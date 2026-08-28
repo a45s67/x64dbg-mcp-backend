@@ -14,9 +14,17 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0005-generation-consistent-snapshots.md`](docs/adr/0005-generation-consistent-snapshots.md)
 - [`docs/adr/0006-native-utf8-boundary.md`](docs/adr/0006-native-utf8-boundary.md)
 - [`docs/adr/0007-bounded-discovery-tools.md`](docs/adr/0007-bounded-discovery-tools.md)
+- [`docs/adr/0008-versioned-codex-workflow-skill.md`](docs/adr/0008-versioned-codex-workflow-skill.md)
+- [`docs/adr/0009-compact-snapshot-and-memory-map-filters.md`](docs/adr/0009-compact-snapshot-and-memory-map-filters.md)
+- [`docs/adr/0010-bounded-actionable-diagnostics.md`](docs/adr/0010-bounded-actionable-diagnostics.md)
+- [`docs/adr/0011-bounded-shutdown-matrix.md`](docs/adr/0011-bounded-shutdown-matrix.md)
+- [`docs/adr/0012-deterministic-robustness-corpus.md`](docs/adr/0012-deterministic-robustness-corpus.md)
+- [`docs/adr/0013-idempotent-install-and-package-verification.md`](docs/adr/0013-idempotent-install-and-package-verification.md)
+- [`docs/adr/0014-release-acceptance-gates.md`](docs/adr/0014-release-acceptance-gates.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
 - [`docs/install.md`](docs/install.md)
+- [`docs/release-readiness.md`](docs/release-readiness.md)
 
 The Gateway owns any dotted namespace prefix. This backend therefore publishes
 backend-local tool names such as `debugger.state` and `memory.read`.
@@ -49,3 +57,7 @@ Build a release with `powershell -File scripts/package.ps1`, then follow the
 [installation and client setup guide](docs/install.md). The installed package
 uses `server\x64dbg-mcp-server.exe`; no Rust, C++ runtime, or build tool is needed
 on the target machine.
+
+Before publishing, use `scripts/run-release-gate.ps1` for the complete locally
+available package plus isolated x32dbg/x64dbg evidence. Publisher signing and a
+pristine Windows VM install remain separately identified release gates.

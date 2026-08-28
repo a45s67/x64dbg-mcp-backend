@@ -30,7 +30,7 @@ function Test-LoopbackPortOpen([int]$Port) {
 $reports = @()
 foreach ($iteration in 1..$Iterations) {
     foreach ($currentBackend in $backends) {
-        Write-Host "Integration soak $iteration/$Iterations ($currentBackend)"
+        Write-Verbose "Integration soak $iteration/$Iterations ($currentBackend)"
         $arguments = @{
             Backend = $currentBackend
         }

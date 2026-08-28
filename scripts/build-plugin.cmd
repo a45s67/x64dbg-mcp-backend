@@ -1,6 +1,10 @@
 @echo off
 setlocal EnableExtensions
 
+rem Keep localized MSVC /showIncludes machine-readable for CMake/Ninja. CMake
+rem decodes the probe using the console code page; UTF-8 prevents a mojibake prefix.
+chcp 65001 >nul
+
 if /I "%~1"=="x64" (
   set "MCP_ARCH=x64"
 ) else if /I "%~1"=="x86" (

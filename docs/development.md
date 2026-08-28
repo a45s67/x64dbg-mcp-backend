@@ -63,6 +63,17 @@ The count is restricted to 1–20. Every run uses the existing isolated integrat
 flow, then verifies that its owned sidecar exited and its loopback port closed. It
 never kills processes by image name.
 
+The complete locally available release gate composes packaging and both real
+debugger integrations and leaves a JSON evidence report under `artifacts`:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\run-release-gate.ps1 -X64dbgRoot C:\tools\x64dbg
+```
+
+See [`release-readiness.md`](release-readiness.md) for the separate publisher
+signing and pristine-VM gates that cannot be asserted by a developer-machine run.
+
 The plugin inherits these non-secret runtime settings from x64dbg:
 
 - `X64DBG_MCP_BIND` (optional, loopback only; default `127.0.0.1`)

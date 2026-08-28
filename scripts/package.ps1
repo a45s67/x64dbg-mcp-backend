@@ -61,6 +61,7 @@ try {
     Copy-Item -Path 'docs\adr\*.md' -Destination (Join-Path $stage 'docs\adr')
     Copy-Item -LiteralPath 'docs\contracts\ipc-v1.md' -Destination (Join-Path $stage 'docs\contracts')
     Copy-Item -LiteralPath 'docs\native-api-audit.md' -Destination (Join-Path $stage 'docs')
+    Copy-Item -LiteralPath 'docs\release-readiness.md' -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath 'scripts\install.ps1' -Destination (Join-Path $stage 'scripts')
     Copy-Item -LiteralPath 'scripts\register-codex.ps1' -Destination (Join-Path $stage 'scripts')
     Copy-Item -LiteralPath 'scripts\verify-package.ps1' -Destination (Join-Path $stage 'scripts')

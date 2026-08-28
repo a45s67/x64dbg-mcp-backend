@@ -615,3 +615,30 @@ installed `checksum.exe` acceptance run then loaded at `0x770000`, resolved RVA
 across all paused snapshots. It returned eight compact instructions, one filtered
 executable region, both known strings, and an explicit stopped state with no
 remaining sidecar.
+
+## 2026-08-29 unified release-gate follow-up
+
+ADR 0014 now separates locally reproducible release acceptance from publisher
+qualification. `scripts/run-release-gate.ps1` composes the locked package gate,
+isolated x32dbg/x64dbg integration, sidecar/port shutdown assertions, and an
+optional installed Flare-On qualification into one JSON evidence report. Signing
+and a pristine Windows VM remain explicitly `not_run` rather than being inferred
+from checksums or a developer-machine integration copy.
+
+The first composed run found that `run-integration-soak.ps1` wrote human progress
+to stdout, so its otherwise successful JSON could not be parsed. Progress now uses
+the verbose stream and stdout is machine-readable JSON. A direct x32/x64 rerun
+confirmed two runs, both owned sidecars exited, and both loopback ports closed.
+
+The corrected complete gate produced package SHA-256
+`448c2bce40cbea5ad671ca88549dd8b3f26f1e64448d70b659c93bbe9844a9ab`.
+The installed `checksum.exe` qualification resolved `CHECKSUM.EXE+0xa78a0` from
+base `0x770000` to `0x8178a0`, hit the software breakpoint once, preserved state
+generation 27 across registers, memory, disassembly, compact snapshot, memory-map,
+and discovery reads, found both known strings on the first bounded page, stopped
+the debuggee, and left no owned sidecar.
+
+The full localized MSVC build also exposed excessive raw `/showIncludes` output.
+The native build wrapper now selects the UTF-8 console code page before CMake's
+localized prefix probe so CMake/Ninja can recognize and suppress the compiler's
+dependency lines consistently.

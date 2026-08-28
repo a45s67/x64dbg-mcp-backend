@@ -4,6 +4,8 @@
 
 #include <array>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <thread>
 
@@ -79,13 +81,52 @@ bool ExerciseStateTool(const unsigned short port) {
 
 int wmain(const int argc, wchar_t** argv) {
     if (argc < 3 || argc > 4) {
-        std::cerr << "usage: lifecycle_harness <server-exe> <unused-port> [sidecar-crash]\n";
+        std::cerr << "usage: lifecycle_harness <server-exe> <unused-port> "
+                     "[sidecar-crash|installed-config]\n";
         return 2;
     }
-    if (SetEnvironmentVariableW(L"X64DBG_MCP_SERVER_PATH", argv[1]) == FALSE ||
-        SetEnvironmentVariableW(L"X64DBG_MCP_PORT", argv[2]) == FALSE ||
-        SetEnvironmentVariableW(L"X64DBG_MCP_TOKEN",
-                                L"0123456789abcdef0123456789abcdef") == FALSE) {
+    const bool installedConfig = argc == 4 && std::wstring_view(argv[3]) == L"installed-config";
+    std::filesystem::path serverPath = argv[1];
+    std::filesystem::path temporaryDirectory;
+    std::filesystem::path configPath;
+    if (installedConfig) {
+#ifdef _WIN64
+        constexpr wchar_t configName[] = L"x64dbg-mcp-server-x64.toml";
+#else
+        constexpr wchar_t configName[] = L"x64dbg-mcp-server-x32.toml";
+#endif
+        temporaryDirectory = std::filesystem::temp_directory_path() /
+                             (L"x64dbg-mcp-installed-config-" +
+                              std::to_wstring(GetCurrentProcessId()));
+        std::filesystem::create_directory(temporaryDirectory);
+        serverPath = temporaryDirectory / std::filesystem::path(argv[1]).filename();
+        std::filesystem::copy_file(argv[1], serverPath,
+                                   std::filesystem::copy_options::overwrite_existing);
+        configPath = temporaryDirectory / configName;
+        std::ofstream config(configPath, std::ios::binary | std::ios::trunc);
+        config << "bind = \"127.0.0.1\"\nport = " << std::filesystem::path(argv[2]).string()
+               << "\nbearer_token = \"0123456789abcdef0123456789abcdef\"\n";
+        if (!config) {
+            std::cerr << "could not create installed-layout config\n";
+            return 3;
+        }
+        SetEnvironmentVariableW(L"X64DBG_MCP_PORT", nullptr);
+        SetEnvironmentVariableW(L"X64DBG_MCP_TOKEN", nullptr);
+    }
+    struct ConfigCleanup {
+        std::filesystem::path directory;
+        ~ConfigCleanup() {
+            if (!directory.empty()) {
+                std::error_code error;
+                std::filesystem::remove_all(directory, error);
+            }
+        }
+    } cleanup{temporaryDirectory};
+    if (SetEnvironmentVariableW(L"X64DBG_MCP_SERVER_PATH", serverPath.c_str()) == FALSE ||
+        (!installedConfig &&
+         (SetEnvironmentVariableW(L"X64DBG_MCP_PORT", argv[2]) == FALSE ||
+          SetEnvironmentVariableW(L"X64DBG_MCP_TOKEN",
+                                  L"0123456789abcdef0123456789abcdef") == FALSE))) {
         return 3;
     }
 

@@ -35,7 +35,8 @@ extern "C" __declspec(dllexport) bool pluginit(PLUG_INITSTRUCT* initStruct) {
 extern "C" __declspec(dllexport) void plugsetup(PLUG_SETUPSTRUCT* setupStruct) {
     (void)setupStruct;
     if (g_runtime.Start()) {
-        _plugin_logputs("[x64dbg-mcp-backend] sidecar supervision started");
+        _plugin_logputs(
+            "[x64dbg-mcp-backend] sidecar process started; awaiting authenticated handshake");
     } else {
         _plugin_logputs("[x64dbg-mcp-backend] sidecar startup failed; check configuration and path");
     }

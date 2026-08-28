@@ -22,6 +22,9 @@ if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $archive)) {
 
 Push-Location $workspace
 try {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $workspace 'scripts\test-register-codex.ps1')
+    if ($LASTEXITCODE -ne 0) { throw 'Codex registration contract tests failed.' }
     & cargo.exe test --offline --locked --workspace --all-targets
     if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
     & cargo.exe clippy --offline --locked --workspace --all-targets -- -D warnings
@@ -50,6 +53,7 @@ try {
     Copy-Item -LiteralPath 'docs\install.md' -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath 'docs\design\mvp.md' -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath 'scripts\install.ps1' -Destination (Join-Path $stage 'scripts')
+    Copy-Item -LiteralPath 'scripts\register-codex.ps1' -Destination (Join-Path $stage 'scripts')
 
     @{
         name = 'x64dbg-mcp-backend'

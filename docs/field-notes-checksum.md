@@ -1,0 +1,207 @@
+# Field notes: Flare-On 11 `checksum.exe`
+
+Date: 2026-08-29
+
+Sample: `Flare-On11_Challenges/checksum.exe` (x64 Go executable)
+
+This document records usability and API gaps observed while driving a real
+reverse-engineering session through the x64dbg MCP backend. It is a backlog, not
+an expansion of the current MVP contract or an automated release result. New
+mutating APIs proposed here still require a threat-model ADR and contract tests.
+
+## P0: session startup and recovery
+
+### Add a debugger launch operation
+
+Observed: after x64dbg and its backend were running, `debugger.state` reported
+`plugin_state=ready` and `debuggee_state=absent`, but the published tools had no
+way to open the sample. The operator had to open it through the debugger UI.
+
+Suggested API:
+
+```text
+debuggee.launch(
+  path,
+  arguments?,
+  working_directory?,
+  break_on_entry?,
+  operation_id
+)
+```
+
+Separately, the working directory was significant to the exploratory automation
+that launched x64dbg itself. Starting
+`C:\tools\x64dbg\release\x64\x64dbg.exe` from an unrelated directory produced
+an x64dbg process with no main window and no MCP sidecar; setting the working
+directory to `release\x64` initialized both correctly. This is a test-harness
+and bootstrap concern, not behavior promised by `debuggee.launch`.
+
+Acceptance criteria:
+
+- Canonicalize and validate the executable and working-directory paths.
+- Return a callback-confirmed state rather than merely reporting process spawn.
+- Report plugin/sidecar initialization failures with actionable diagnostics.
+- Preserve mutation idempotency through `operation_id`.
+
+### Recover after sidecar or debugger restart
+
+Observed: closing x64dbg removed the listener at `127.0.0.1:43164`. Subsequent
+calls failed at the transport layer. After x64dbg was reopened, the client did
+not automatically rediscover or reconnect to the new sidecar.
+
+Acceptance criteria:
+
+- Distinguish backend-unavailable, authentication, and debugger-unavailable
+  failures.
+- Document that reconnect is a client or Gateway responsibility and provide the
+  backend identity needed to do it without replaying mutations.
+- Expose sidecar instance/generation identity so stale sessions are detectable.
+- Document client behavior when a debugger closes during a request.
+
+## P1: mutation ergonomics and execution control
+
+### Describe the actual `operation_id` constraint
+
+Observed: the readable unique value `checksum-resume-to-entry-001` was rejected
+as `INVALID_ARGUMENT`. A UUID was accepted. The design document said UUID was
+recommended, while the schema and runtime require a canonical lowercase UUID.
+
+Acceptance criteria:
+
+- Document canonical lowercase UUID as mandatory, matching the existing schema
+  and runtime validation.
+- Include the expected format in validation errors.
+- Add contract tests for valid, invalid, reused, and ambiguous operation IDs.
+
+### Add resume-until-pause semantics
+
+Observed: `debugger.resume` returned `debuggee_state=running`; the caller then had
+to sleep and poll `debugger.state` to discover the entry breakpoint and later
+`main.main` breakpoint.
+
+Suggested API:
+
+```text
+debugger.wait_for_pause(after_generation?, timeout_ms?)
+```
+
+Acceptance criteria:
+
+- Keep `debugger.resume` as a separately callback-confirmed mutation, then wait
+  from debugger callbacks rather than fixed sleeps.
+- Return pause reason, instruction pointer, thread ID, breakpoint address/type,
+  exception information, and state generation.
+- Treat waiting as read-only observation so its timeout does not make the
+  already-confirmed resume mutation ambiguous.
+
+### Return richer pause reasons
+
+Observed: initial pauses at the ntdll system breakpoint, PE entry breakpoint,
+and a user breakpoint were distinguishable only by inspecting IP and the
+breakpoint list.
+
+Suggested result fields: `pause_reason`, `breakpoint`, `exception`,
+`first_chance`, `thread_id`, and `state_generation`.
+
+## P1: module-relative analysis
+
+### Accept module-relative addresses
+
+Observed: IDA used image base `0x400000`, while this x64dbg run loaded the sample
+at `0xe90000`. The caller manually translated `main.main` from `0x4a78a0` to
+`checksum.exe+0xa78a0`, then supplied absolute address `0xf378a0`.
+
+Possible address forms include:
+
+```text
+checksum.exe+0xa78a0
+module("checksum.exe").base+0xa78a0
+```
+
+A structured `{module, rva}` form or a separate `address.resolve` tool may be
+safer and easier to validate than adding an expression grammar to every tool.
+
+Acceptance criteria:
+
+- Resolve unambiguously against the current module snapshot.
+- Return both canonical absolute address and module/RVA.
+- Reject missing or duplicate module names explicitly.
+- Allow these forms anywhere an address is accepted, especially breakpoints,
+  disassembly, memory reads, and expression evaluation.
+
+## P2: reverse-engineering discovery tools
+
+### Add symbols and functions
+
+Observed: the sample retained Go symbols, including `main.main`, `main.a`, and
+`main.b`, but x64dbg MCP exposed no symbol or function query. IDA MCP was needed
+to locate the challenge logic.
+
+Suggested read-only tools:
+
+- `symbols.resolve(name|address)`
+- `symbols.search(pattern, module?, cursor?, limit?)`
+- `functions.list(module?, pattern?, cursor?, limit?)`
+- `functions.at(address)`
+
+### Add strings and cross-references
+
+Observed: strings such as `Check sum: %d + %d =`, `FlareOn2024`, and
+`REAL_FLAREON_FLAG.JPG` immediately explained the program, but MCP had no string
+or xref discovery operations.
+
+Suggested read-only tools:
+
+- `strings.list/search(module?, pattern?, min_length?, cursor?, limit?)`
+- `xrefs.to(address)` and `xrefs.from(address)`
+- Include owning function and module/RVA in results.
+
+These features should remain bounded and paginated. They may use x64dbg's
+analysis database where available and clearly identify incomplete results.
+
+## P2: output sizing and filtering
+
+### Filter memory maps and snapshots
+
+Observed: a single `memory.map(limit=100)` response contained a very large set of
+system, reserved, heap, and image regions, obscuring the sample's sections and
+causing tool output truncation.
+
+Suggested filters:
+
+- module or allocation base
+- state/type/protection
+- address range
+- committed-only and executable-only flags
+
+Also consider compact output modes that omit empty `info` fields and repeated
+allocation metadata.
+
+### Provide a compact analysis snapshot
+
+The initial workflow required separate calls for state, modules, registers,
+threads, breakpoints, memory map, and disassembly. Parallel calls worked, but the
+combined result was unnecessarily large.
+
+Suggested API:
+
+```text
+debugger.snapshot(
+  registers?,
+  disassembly_count?,
+  include_threads?,
+  include_breakpoints?,
+  include_modules?
+)
+```
+
+Default to a compact paused-state snapshot and keep memory maps opt-in.
+
+## Successful behavior worth preserving
+
+- `debugger.state` clearly separated plugin and debuggee state.
+- Entry breakpoint creation and callback-driven state updates worked.
+- `breakpoints.set` correctly stopped at relocated `main.main`.
+- Concurrent read-only calls for registers, modules, threads, breakpoints, and
+  disassembly completed consistently while paused.
+- Canonical hexadecimal addresses were consistent across results.

@@ -4,7 +4,8 @@ param(
     [string]$X64dbgRoot,
     [int]$X32Port = 43132,
     [int]$X64Port = 43164,
-    [string]$PackageRoot
+    [string]$PackageRoot,
+    [switch]$RegisterCodex
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,19 +65,12 @@ max_body_bytes = 1048576
 max_output_bytes = 1048576
 allowed_origins = []
 "@ | Set-Content -LiteralPath $configPath -Encoding ASCII -NoNewline
-
-        $security = New-Object System.Security.AccessControl.FileSecurity
-        $security.SetAccessRuleProtection($true, $false)
-        $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-        $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
-        foreach ($sid in @($current, $system)) {
-            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                $sid, 'FullControl', 'Allow')
-            $security.AddAccessRule($rule)
-        }
-        Set-Acl -LiteralPath $configPath -AclObject $security
     }
     Write-Output "Installed backend. Bearer token (store securely): $token"
     Write-Output "x32 endpoint: http://127.0.0.1:$X32Port/mcp"
     Write-Output "x64 endpoint: http://127.0.0.1:$X64Port/mcp"
+}
+
+if ($RegisterCodex) {
+    & (Join-Path $PSScriptRoot 'register-codex.ps1') -X64dbgRoot $X64dbgRoot
 }

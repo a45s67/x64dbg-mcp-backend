@@ -11,7 +11,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
 
 The installer verifies that both x32 and x64 debugger directories exist, copies
 the matching `.dp32` and `.dp64` plugins, installs the shared static sidecar, and
-creates two protected TOML files. It generates one cryptographically random
+creates two TOML configuration files. It generates one cryptographically random
 48-byte bearer secret and prints it once. Store that value in the client's secret
 manager; do not put it in source control or command-line arguments.
 
@@ -49,20 +49,21 @@ ready. It does not expose the token or target path.
 
 ## Codex direct connection
 
-Put the token in an environment variable inherited by Codex, then register either
-or both Streamable HTTP endpoints. The current Codex CLI exposes these flags via
-`codex mcp add --help`:
+Register both installed Streamable HTTP endpoints with one command. The helper
+reads and validates the installed x32/x64 configuration, stores the Authorization
+header directly in the user-level Codex `config.toml`, and replaces existing
+entries with the same names. No token environment variable is required:
 
 ```powershell
-$env:X64DBG_MCP_CLIENT_TOKEN = '<token printed by installer>'
-codex mcp add x64dbg --url http://127.0.0.1:43164/mcp `
-  --bearer-token-env-var X64DBG_MCP_CLIENT_TOKEN
-codex mcp add x32dbg --url http://127.0.0.1:43132/mcp `
-  --bearer-token-env-var X64DBG_MCP_CLIENT_TOKEN
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\register-codex.ps1 -X64dbgRoot C:\tools\x64dbg
 codex mcp list
 ```
 
-Restart an already-running Codex process after changing its environment. Opening
+For a new install, add `-RegisterCodex` to `install.ps1` to copy the backend and
+register both endpoints in the same command.
+
+Restart an already-running Codex process after changing its configuration. Opening
 x64dbg/x32dbg is what starts the backend; Codex connects to the selected endpoint
 afterward.
 

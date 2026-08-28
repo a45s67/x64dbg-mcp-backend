@@ -399,7 +399,13 @@ fn operation_schema(mut properties: Vec<(&'static str, Value)>) -> Value {
         0,
         (
             "operation_id",
-            json!({"type":"string","format":"uuid","minLength":36,"maxLength":36}),
+            json!({
+                "type":"string",
+                "format":"uuid",
+                "pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "minLength":36,
+                "maxLength":36
+            }),
         ),
     );
     let mut required = vec!["operation_id"];
@@ -477,5 +483,25 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn mutations_require_a_canonical_lowercase_uuid() {
+        assert!(
+            validate_arguments(
+                "debugger.resume",
+                &json!({"operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813"})
+            )
+            .is_ok()
+        );
+        for invalid_id in [
+            "checksum-resume-to-entry-001",
+            "83DB0D7D-DF01-40AC-BDFC-87BAC1E60813",
+            "{83db0d7d-df01-40ac-bdfc-87bac1e60813}",
+        ] {
+            let error = validate_arguments("debugger.resume", &json!({"operation_id":invalid_id}))
+                .unwrap_err();
+            assert_eq!(error.field, "operation_id");
+        }
     }
 }

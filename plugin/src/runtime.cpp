@@ -29,10 +29,20 @@ constexpr DWORD kShutdownMs = 5000U;
 #ifdef _WIN64
 constexpr wchar_t kBackend[] = L"x64dbg";
 constexpr char kBackendUtf8[] = "x64dbg";
+constexpr wchar_t kConfigBackend[] = L"x64";
 #else
 constexpr wchar_t kBackend[] = L"x32dbg";
 constexpr char kBackendUtf8[] = "x32dbg";
+constexpr wchar_t kConfigBackend[] = L"x32";
 #endif
+
+void PluginLog(const char* message) {
+#ifdef MCP_LIFECYCLE_HARNESS
+    (void)message;
+#else
+    _plugin_logputs(message);
+#endif
+}
 
 std::string Hex(const std::span<const unsigned char> bytes) {
     constexpr char digits[] = "0123456789abcdef";
@@ -496,7 +506,12 @@ bool Runtime::Start() {
     if (!pluginState_.compare_exchange_strong(expected, PluginState::starting)) {
         return false;
     }
-    const std::wstring mutexName = std::wstring(L"Local\\x64dbg-mcp-backend-") + kBackend;
+    std::wstring mutexName = std::wstring(L"Local\\x64dbg-mcp-backend-") + kBackend;
+#ifdef MCP_LIFECYCLE_HARNESS
+    // A lifecycle harness is an isolated backend instance. Keep its ownership
+    // check independent from a debugger the developer may already be running.
+    mutexName += L"-test-" + std::to_wstring(GetCurrentProcessId());
+#endif
     instanceMutex_ = CreateMutexW(nullptr, FALSE, mutexName.c_str());
     if (instanceMutex_ == nullptr || GetLastError() == ERROR_ALREADY_EXISTS || !executor_.Start() ||
         !CreateEndpoint() || !LaunchSidecar()) {
@@ -605,9 +620,13 @@ bool Runtime::LaunchSidecar() {
     std::wstring command = L"\"" + executable.wstring() + L"\" --pipe \"" + pipeName_ + L"\"";
     const std::filesystem::path backendConfig =
         executable.parent_path() /
-        (std::wstring(L"x64dbg-mcp-server-") + kBackend + L".toml");
+        (std::wstring(L"x64dbg-mcp-server-") + kConfigBackend + L".toml");
     if (std::filesystem::is_regular_file(backendConfig)) {
         command += L" --config \"" + backendConfig.wstring() + L"\"";
+        PluginLog("[x64dbg-mcp-backend] using installed per-backend configuration");
+    } else {
+        PluginLog(
+            "[x64dbg-mcp-backend] installed per-backend configuration not found; using environment configuration");
     }
     PROCESS_INFORMATION process{};
     const BOOL created = attributeOk
@@ -642,6 +661,7 @@ bool Runtime::LaunchSidecar() {
 void Runtime::Worker() noexcept {
     const BOOL connected = ConnectNamedPipe(pipe_, nullptr);
     if (connected == FALSE && GetLastError() != ERROR_PIPE_CONNECTED) {
+        PluginLog("[x64dbg-mcp-backend] sidecar IPC connection failed");
         return;
     }
     std::ostringstream handshake;
@@ -651,10 +671,12 @@ void Runtime::Worker() noexcept {
     std::string ack;
     if (!WriteFrame(pipe_, handshake.str()) || !ReadFrame(pipe_, ack) ||
         !IsAcceptedHandshakeAck(ack)) {
+        PluginLog("[x64dbg-mcp-backend] sidecar IPC handshake failed");
         return;
     }
     pluginState_.store(PluginState::ready);
     generation_.fetch_add(1U);
+    PluginLog("[x64dbg-mcp-backend] sidecar ready");
     for (;;) {
         std::string request;
         if (!ReadFrame(pipe_, request) || pluginState_.load() != PluginState::ready) {

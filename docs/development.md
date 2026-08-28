@@ -33,6 +33,7 @@ Run the server checks and build the sidecar with:
 cargo test --offline --workspace --all-targets
 cargo clippy --offline --workspace --all-targets -- -D warnings
 cargo build --release --locked
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-register-codex.ps1
 ```
 
 Native builds also produce `x64dbg_mcp_lifecycle_test.exe`. With the `test`

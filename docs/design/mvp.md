@@ -162,7 +162,7 @@ truncated only at item boundaries and reports `next_cursor`.
 | `disassembly.read` | read | paused | At most 256 decoded instructions from an address |
 | `expression.evaluate` | read | paused | Evaluate x64dbg expression; no command execution |
 
-Every mutating tool requires `operation_id` (UUID recommended). Arbitrary debugger
+Every mutating tool requires `operation_id` as a canonical lowercase UUID. Arbitrary debugger
 command execution, process launch/attach, file upload/download, scripting, shell
 execution, and unbounded search are intentionally excluded from the MVP. They need
 separate threat-model ADRs.

@@ -532,3 +532,31 @@ software breakpoint once. All paused reads retained generation `27`, both known
 strings were found on the first bounded page, and closing the debugger left no
 plugin-owned sidecar running. Documentation now explicitly states that launching
 a second debugger is not an MVP target-handoff mechanism.
+
+## 2026-08-29 bounded shutdown-matrix follow-up
+
+ADR 0011 records the reachable HTTP-to-IPC shutdown states. The sidecar admits
+bounded concurrent HTTP requests but deliberately serializes its single
+authenticated IPC stream, so the matrix distinguishes one request already on
+the wire from reads or mutations waiting for the IPC mutex. It also requires an
+unanswered mutation to appear on IPC exactly once and forbids detached cleanup
+workers or process-name-wide termination in tests.
+
+The real-sidecar supervised suite now covers idle EOF, active read, queued read,
+queued mutation, active mutation without a reply, and an HTTP client disconnect.
+All six cases exited inside the shortened drain deadline. The full Rust gate
+retained 46 unit and contract tests, Clippy remained warning-free, and both x32
+and x64 native suites retained seven passing lifecycle/unit tests. A new opt-in
+integration soak runner bounds repetition to 1--20 iterations and verifies after
+every isolated debugger run that the owned sidecar exited and its loopback port
+closed. One x32 plus one x64 real integration cycle passed those ownership
+checks without terminating any process by image name.
+
+After packaging and installing both architectures, the `checksum.exe` acceptance
+run loaded at `0x770000`, resolved `{module: "CHECKSUM.EXE", rva: "0xa78a0"}` to
+`0x8178a0`, and observed one software-breakpoint hit. Pause, registers, memory,
+disassembly, compact snapshot, and filtered memory-map reads retained generation
+`28`; the compact snapshot returned eight instructions and the executable module
+filter returned one region. Both known strings remained discoverable on their
+first bounded page, `debugger.stop` reported `absent`, and debugger closure left
+the installed sidecar stopped.

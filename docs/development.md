@@ -49,6 +49,19 @@ build\windows-x64\x64dbg_mcp_lifecycle_test.exe `
   $env:X64DBG_MCP_SERVER_PATH 43129
 ```
 
+The Rust supervised-shutdown matrix covers idle, active and IPC-queued reads,
+queued and active mutations, and a disconnected HTTP client. For a finite real
+debugger lifecycle soak after preparing the isolated trees, run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\run-integration-soak.ps1 -Backend both -Iterations 3
+```
+
+The count is restricted to 1–20. Every run uses the existing isolated integration
+flow, then verifies that its owned sidecar exited and its loopback port closed. It
+never kills processes by image name.
+
 The plugin inherits these non-secret runtime settings from x64dbg:
 
 - `X64DBG_MCP_BIND` (optional, loopback only; default `127.0.0.1`)

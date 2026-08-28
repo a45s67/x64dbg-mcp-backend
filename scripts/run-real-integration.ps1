@@ -430,6 +430,8 @@ try {
 
     $report = [ordered]@{
         backend = $Backend
+        debugger_host_process_id = $debuggerProcess.Id
+        sidecar_port = $port
         architecture = $state.architecture
         launched_path = $launch.path
         process_id = $state.process_id

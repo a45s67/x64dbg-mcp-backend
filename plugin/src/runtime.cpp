@@ -8,6 +8,7 @@
 #include <chrono>
 #include <charconv>
 #include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -120,6 +121,16 @@ struct JsonDeleter {
 };
 using JsonOwner = std::unique_ptr<json_t, JsonDeleter>;
 
+enum class AddressReferenceKind : std::uint8_t { absolute, moduleRva };
+
+struct AddressReference {
+    AddressReferenceKind kind{AddressReferenceKind::absolute};
+    duint absolute{0};
+    std::string module;
+    duint rva{0};
+    bool pointerWidthValid{true};
+};
+
 struct Request {
     std::string requestId;
     std::string method;
@@ -128,7 +139,7 @@ struct Request {
     std::string expression;
     std::string path;
     std::string workingDirectory;
-    duint address{0};
+    AddressReference address;
     std::size_t length{0};
     std::vector<std::string> registerNames;
     std::size_t pageLimit{100U};
@@ -167,17 +178,76 @@ bool ParseCursor(const std::string_view cursor, std::uint64_t& generation, std::
            indexResult.ec == std::errc{} && indexResult.ptr == cursor.data() + cursor.size();
 }
 
-bool ParseAddress(json_t* value, duint& output) {
+bool IsCanonicalHex(json_t* value) {
     if (!json_is_string(value)) {
         return false;
     }
     const std::string_view text(json_string_value(value), json_string_length(value));
-    if (!text.starts_with("0x") || text.size() < 3U || text.size() > sizeof(duint) * 2U + 2U) {
+    if (!text.starts_with("0x") || text.size() < 3U || text.size() > 34U) {
         return false;
     }
+    return std::all_of(text.begin() + 2, text.end(), [](const char character) {
+        return (character >= '0' && character <= '9') ||
+               (character >= 'a' && character <= 'f');
+    });
+}
+
+bool ParseCanonicalHex(json_t* value, duint& output) {
+    if (!IsCanonicalHex(value) || json_string_length(value) > sizeof(duint) * 2U + 2U) {
+        return false;
+    }
+    const std::string_view text(json_string_value(value), json_string_length(value));
     const auto conversion =
         std::from_chars(text.data() + 2, text.data() + text.size(), output, 16);
     return conversion.ec == std::errc{} && conversion.ptr == text.data() + text.size();
+}
+
+bool IsBoundedModuleName(json_t* value) {
+    if (!json_is_string(value) || json_string_length(value) == 0U ||
+        json_string_length(value) > 260U) {
+        return false;
+    }
+    const std::string_view text(json_string_value(value), json_string_length(value));
+    return std::none_of(text.begin(), text.end(), [](const char character) {
+        const auto byte = static_cast<unsigned char>(character);
+        return byte < 0x20U || byte == 0x7fU || character == '/' || character == '\\';
+    });
+}
+
+bool ParseAddressReference(json_t* value, AddressReference& output) {
+    duint absolute = 0;
+    if (IsCanonicalHex(value)) {
+        const bool valid = ParseCanonicalHex(value, absolute);
+        output = AddressReference{AddressReferenceKind::absolute, absolute, {}, 0, valid};
+        return true;
+    }
+    if (!json_is_object(value)) {
+        return false;
+    }
+    if (json_object_size(value) == 1U) {
+        json_t* absoluteValue = json_object_get(value, "absolute");
+        if (absoluteValue != nullptr && IsCanonicalHex(absoluteValue)) {
+            const bool valid = ParseCanonicalHex(absoluteValue, absolute);
+            output =
+                AddressReference{AddressReferenceKind::absolute, absolute, {}, 0, valid};
+            return true;
+        }
+        return false;
+    }
+    if (json_object_size(value) != 2U) {
+        return false;
+    }
+    json_t* module = json_object_get(value, "module");
+    json_t* rvaValue = json_object_get(value, "rva");
+    if (!IsBoundedModuleName(module) || !IsCanonicalHex(rvaValue)) {
+        return false;
+    }
+    duint rva = 0;
+    const bool valid = ParseCanonicalHex(rvaValue, rva);
+    output = AddressReference{AddressReferenceKind::moduleRva, 0,
+                              std::string(json_string_value(module), json_string_length(module)),
+                              rva, valid};
+    return true;
 }
 
 bool IsBoundedPathString(json_t* value) {
@@ -277,7 +347,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::string expression;
     std::string path;
     std::string workingDirectory;
-    duint addressValue = 0;
+    AddressReference addressValue;
     std::size_t lengthValue = 0;
     std::vector<std::string> registerNames;
     std::size_t pageLimit = 100U;
@@ -311,22 +381,18 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             return std::nullopt;
         }
         expression.assign(json_string_value(value), json_string_length(value));
+    } else if (methodValue == "address.resolve") {
+        if (json_object_size(payload) != 1U ||
+            !ParseAddressReference(json_object_get(payload, "address"), addressValue)) {
+            return std::nullopt;
+        }
     } else if (methodValue == "memory.read") {
         json_t* address = json_object_get(payload, "address");
         json_t* length = json_object_get(payload, "length");
-        if (json_object_size(payload) != 2U || !json_is_string(address) ||
+        if (json_object_size(payload) != 2U ||
+            !ParseAddressReference(address, addressValue) ||
             !json_is_integer(length) || json_integer_value(length) < 1 ||
             json_integer_value(length) > 65536) {
-            return std::nullopt;
-        }
-        const std::string_view addressText(json_string_value(address), json_string_length(address));
-        if (!addressText.starts_with("0x") || addressText.size() < 3U ||
-            addressText.size() > sizeof(duint) * 2U + 2U) {
-            return std::nullopt;
-        }
-        const auto conversion = std::from_chars(addressText.data() + 2, addressText.data() + addressText.size(),
-                                                addressValue, 16);
-        if (conversion.ec != std::errc{} || conversion.ptr != addressText.data() + addressText.size()) {
             return std::nullopt;
         }
         lengthValue = static_cast<std::size_t>(json_integer_value(length));
@@ -384,7 +450,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         json_t* address = json_object_get(payload, "address");
         json_t* count = json_object_get(payload, "count");
         const std::size_t expectedFields = count == nullptr ? 1U : 2U;
-        if (json_object_size(payload) != expectedFields || !json_is_string(address)) {
+        if (json_object_size(payload) != expectedFields ||
+            !ParseAddressReference(address, addressValue)) {
             return std::nullopt;
         }
         if (count != nullptr) {
@@ -393,18 +460,6 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                 return std::nullopt;
             }
             instructionCount = static_cast<std::size_t>(json_integer_value(count));
-        }
-        const std::string_view addressText(json_string_value(address), json_string_length(address));
-        if (!addressText.starts_with("0x") || addressText.size() < 3U ||
-            addressText.size() > sizeof(duint) * 2U + 2U) {
-            return std::nullopt;
-        }
-        const auto conversion = std::from_chars(addressText.data() + 2,
-                                                addressText.data() + addressText.size(),
-                                                addressValue, 16);
-        if (conversion.ec != std::errc{} ||
-            conversion.ptr != addressText.data() + addressText.size()) {
-            return std::nullopt;
         }
     } else if (methodValue == "debugger.pause" || methodValue == "debugger.resume" ||
                methodValue == "debugger.step_into" || methodValue == "debugger.step_over" ||
@@ -416,14 +471,14 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     } else if (methodValue == "breakpoints.set" || methodValue == "breakpoints.remove") {
         if (json_object_size(payload) != 2U ||
             !json_is_string(json_object_get(payload, "operation_id")) ||
-            !ParseAddress(json_object_get(payload, "address"), addressValue)) {
+            !ParseAddressReference(json_object_get(payload, "address"), addressValue)) {
             return std::nullopt;
         }
     } else if (methodValue == "memory.write") {
         json_t* data = json_object_get(payload, "data_hex");
         if (json_object_size(payload) != 3U ||
             !json_is_string(json_object_get(payload, "operation_id")) ||
-            !ParseAddress(json_object_get(payload, "address"), addressValue) ||
+            !ParseAddressReference(json_object_get(payload, "address"), addressValue) ||
             !json_is_string(data) || json_string_length(data) < 2U ||
             json_string_length(data) > 8192U || json_string_length(data) % 2U != 0U) {
             return std::nullopt;
@@ -478,6 +533,108 @@ std::string HexValue(const std::uint64_t value) {
 }
 
 #ifndef MCP_LIFECYCLE_HARNESS
+struct ResolvedLocation {
+    duint address{0};
+    std::optional<std::string> module;
+    std::optional<duint> moduleBase;
+    std::optional<duint> rva;
+};
+
+struct AddressResolution {
+    std::optional<ResolvedLocation> location;
+    const char* code{"INTERNAL"};
+    const char* message{"address resolution failed"};
+    bool retryable{false};
+};
+
+AddressResolution ResolveAddress(const AddressReference& reference) {
+    if (!reference.pointerWidthValid) {
+        return AddressResolution{std::nullopt, "INVALID_ARGUMENT",
+                                 "address exceeds debugger pointer width", false};
+    }
+    ResolvedLocation resolved{};
+    if (reference.kind == AddressReferenceKind::absolute) {
+        resolved.address = reference.absolute;
+    }
+
+    ListInfo list{};
+    if (!Script::Module::GetList(&list)) {
+        if (reference.kind == AddressReferenceKind::absolute) {
+            return AddressResolution{std::move(resolved), nullptr, nullptr, false};
+        }
+        return AddressResolution{std::nullopt, "INTERNAL", "module list is unavailable", true};
+    }
+    struct ModuleListGuard {
+        void* value;
+        ~ModuleListGuard() {
+            if (value != nullptr) BridgeFree(value);
+        }
+    } guard{list.data};
+    if (list.count < 0 || (list.count > 0 && list.data == nullptr) || list.count > 65536 ||
+        list.size != static_cast<std::size_t>(list.count) *
+                         sizeof(Script::Module::ModuleInfo)) {
+        if (reference.kind == AddressReferenceKind::absolute) {
+            return AddressResolution{std::move(resolved), nullptr, nullptr, false};
+        }
+        return AddressResolution{std::nullopt, "INTERNAL", "module list is invalid", false};
+    }
+    const auto* modules = static_cast<const Script::Module::ModuleInfo*>(list.data);
+    const Script::Module::ModuleInfo* match = nullptr;
+    std::size_t matches = 0;
+    for (int index = 0; index < list.count; ++index) {
+        const auto& module = modules[index];
+        if (reference.kind == AddressReferenceKind::moduleRva) {
+            const std::size_t nameLength = strnlen_s(module.name, sizeof(module.name));
+            const std::string name(module.name, nameLength);
+            if (_stricmp(name.c_str(), reference.module.c_str()) == 0) {
+                match = &module;
+                ++matches;
+            }
+        } else if (reference.absolute >= module.base &&
+                   reference.absolute - module.base < module.size) {
+            match = &module;
+            ++matches;
+        }
+    }
+    if (reference.kind == AddressReferenceKind::moduleRva) {
+        if (matches == 0U) {
+            return AddressResolution{std::nullopt, "INVALID_ARGUMENT",
+                                     "module is not loaded", false};
+        }
+        if (matches != 1U) {
+            return AddressResolution{std::nullopt, "INVALID_ARGUMENT",
+                                     "module name is ambiguous", false};
+        }
+        if (match == nullptr || reference.rva >= match->size) {
+            return AddressResolution{std::nullopt, "INVALID_ARGUMENT",
+                                     "rva is outside the module", false};
+        }
+        if (match->base > (std::numeric_limits<duint>::max)() - reference.rva) {
+            return AddressResolution{std::nullopt, "INVALID_ARGUMENT",
+                                     "module-relative address overflows", false};
+        }
+        resolved.address = match->base + reference.rva;
+    } else if (matches != 1U) {
+        return AddressResolution{std::move(resolved), nullptr, nullptr, false};
+    }
+
+    if (match != nullptr) {
+        const std::size_t nameLength = strnlen_s(match->name, sizeof(match->name));
+        resolved.module = std::string(match->name, nameLength);
+        resolved.moduleBase = match->base;
+        resolved.rva = resolved.address - match->base;
+    }
+    return AddressResolution{std::move(resolved), nullptr, nullptr, false};
+}
+
+std::string LocationJson(const ResolvedLocation& location, const std::uint64_t generation) {
+    return "{\"address\":" + JsonString(HexValue(location.address)) + ",\"module\":" +
+           (location.module ? JsonString(*location.module) : "null") + ",\"module_base\":" +
+           (location.moduleBase ? JsonString(HexValue(*location.moduleBase)) : "null") +
+           ",\"rva\":" + (location.rva ? JsonString(HexValue(*location.rva)) : "null") +
+           ",\"state_generation\":" + std::to_string(generation) + "}";
+}
+
 std::optional<duint> RegisterValue(const REGISTERCONTEXT_AVX512& context,
                                    const std::string_view name) {
     if (name == "cip") return context.cip;
@@ -756,6 +913,33 @@ void Runtime::Worker() noexcept {
                     return StateResponse(parsed->requestId);
                 }
 #ifndef MCP_LIFECYCLE_HARNESS
+                const bool addressMethod = parsed->method == "address.resolve" ||
+                                           parsed->method == "memory.read" ||
+                                           parsed->method == "memory.write" ||
+                                           parsed->method == "breakpoints.set" ||
+                                           parsed->method == "breakpoints.remove" ||
+                                           parsed->method == "disassembly.read";
+                std::optional<ResolvedLocation> resolvedLocation;
+                std::uint64_t resolvedGeneration = 0;
+                if (addressMethod) {
+                    if (debuggeeState_.load() != DebuggeeState::paused || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false, false);
+                    }
+                    AddressResolution resolution = ResolveAddress(parsed->address);
+                    if (!resolution.location) {
+                        return ErrorResponse(*parsed, resolution.code, resolution.message,
+                                             resolution.retryable, false);
+                    }
+                    resolvedLocation = std::move(resolution.location);
+                    resolvedGeneration = generation_.load();
+                }
+                if (parsed->method == "address.resolve") {
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(resolvedGeneration) +
+                           ",\"status\":\"ok\",\"result\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) + "}";
+                }
                 if (parsed->method == "debuggee.launch") {
                     if (debuggeeState_.load() != DebuggeeState::absent || DbgIsDebugging()) {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
@@ -859,17 +1043,14 @@ void Runtime::Worker() noexcept {
                            "}}";
                 }
                 if (parsed->method == "memory.write") {
-                    if (debuggeeState_.load() != DebuggeeState::paused || !DbgIsDebugging()) {
-                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
-                                             "operation requires a paused debuggee", false, false);
-                    }
-                    if (!DbgMemWrite(parsed->address, parsed->writeBytes.data(),
+                    const duint address = resolvedLocation->address;
+                    if (!DbgMemWrite(address, parsed->writeBytes.data(),
                                      static_cast<duint>(parsed->writeBytes.size()))) {
                         return ErrorResponse(*parsed, "ACCESS_DENIED", "memory write failed", false,
                                              false);
                     }
                     std::vector<unsigned char> verified(parsed->writeBytes.size());
-                    if (!DbgMemRead(parsed->address, verified.data(),
+                    if (!DbgMemRead(address, verified.data(),
                                     static_cast<duint>(verified.size())) ||
                         verified != parsed->writeBytes) {
                         return ErrorResponse(*parsed, "INTERNAL",
@@ -878,18 +1059,17 @@ void Runtime::Worker() noexcept {
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
                            ",\"state_generation\":" + std::to_string(generation_.load()) +
                            ",\"status\":\"ok\",\"result\":{\"address\":" +
-                           JsonString(HexValue(parsed->address)) + ",\"bytes_written\":" +
+                           JsonString(HexValue(address)) + ",\"location\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"bytes_written\":" +
                            std::to_string(parsed->writeBytes.size()) + ",\"verified\":true}}";
                 }
                 if (parsed->method == "breakpoints.set" ||
                     parsed->method == "breakpoints.remove") {
-                    if (debuggeeState_.load() != DebuggeeState::paused || !DbgIsDebugging()) {
-                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
-                                             "operation requires a paused debuggee", false, false);
-                    }
+                    const duint address = resolvedLocation->address;
                     const bool setting = parsed->method == "breakpoints.set";
                     const std::string command = std::string(setting ? "bp " : "bc ") +
-                                                HexValue(parsed->address);
+                                                HexValue(address);
                     if (!DbgCmdExec(command.c_str())) {
                         return ErrorResponse(*parsed, "BUSY",
                                              "debugger command queue rejected the operation", true,
@@ -898,7 +1078,7 @@ void Runtime::Worker() noexcept {
                     bool observed = false;
                     while (pluginState_.load() == PluginState::ready &&
                            std::chrono::steady_clock::now() < requestDeadline) {
-                        const bool exists = (DbgGetBpxTypeAt(parsed->address) & bp_normal) != 0;
+                        const bool exists = (DbgGetBpxTypeAt(address) & bp_normal) != 0;
                         if (exists == setting) {
                             observed = true;
                             break;
@@ -913,7 +1093,9 @@ void Runtime::Worker() noexcept {
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
                            ",\"state_generation\":" + std::to_string(generation_.load()) +
                            ",\"status\":\"ok\",\"result\":{\"address\":" +
-                           JsonString(HexValue(parsed->address)) + ",\"present\":" +
+                           JsonString(HexValue(address)) + ",\"location\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"present\":" +
                            (setting ? "true" : "false") + "}}";
                 }
                 if (parsed->method == "expression.evaluate") {
@@ -935,22 +1117,21 @@ void Runtime::Worker() noexcept {
                            JsonString(formatted.str()) + "}}";
                 }
                 if (parsed->method == "memory.read") {
-                    if (debuggeeState_.load() != DebuggeeState::paused || !DbgIsDebugging()) {
-                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
-                                             "operation requires a paused debuggee", false, false);
-                    }
+                    const duint addressValue = resolvedLocation->address;
                     std::vector<unsigned char> bytes(parsed->length);
-                    if (!DbgMemRead(parsed->address, bytes.data(),
+                    if (!DbgMemRead(addressValue, bytes.data(),
                                     static_cast<duint>(bytes.size()))) {
                         return ErrorResponse(*parsed, "ACCESS_DENIED",
                                              "memory range is not fully readable", false, false);
                     }
                     std::ostringstream address;
-                    address << "0x" << std::hex << std::nouppercase << parsed->address;
+                    address << "0x" << std::hex << std::nouppercase << addressValue;
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
                            ",\"state_generation\":" + std::to_string(generation_.load()) +
                            ",\"status\":\"ok\",\"result\":{\"address\":" +
-                           JsonString(address.str()) + ",\"data_hex\":" +
+                           JsonString(address.str()) + ",\"location\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"data_hex\":" +
                            JsonString(Hex(bytes)) + ",\"bytes_read\":" +
                            std::to_string(bytes.size()) + ",\"complete\":true}}";
                 }
@@ -1228,11 +1409,7 @@ void Runtime::Worker() noexcept {
                            ",\"next_cursor\":" + next + "}}";
                 }
                 if (parsed->method == "disassembly.read") {
-                    if (debuggeeState_.load() != DebuggeeState::paused || !DbgIsDebugging()) {
-                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
-                                             "operation requires a paused debuggee", false, false);
-                    }
-                    duint address = parsed->address;
+                    duint address = resolvedLocation->address;
                     std::string items = "[";
                     for (std::size_t index = 0; index < parsed->instructionCount; ++index) {
                         DISASM_INSTR instruction{};
@@ -1259,8 +1436,10 @@ void Runtime::Worker() noexcept {
                     }
                     items += "]";
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
-                           ",\"state_generation\":" + std::to_string(generation_.load()) +
-                           ",\"status\":\"ok\",\"result\":{\"items\":" + items + "}}";
+                           ",\"state_generation\":" + std::to_string(resolvedGeneration) +
+                           ",\"status\":\"ok\",\"result\":{\"location\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"items\":" + items + "}}";
                 }
 #endif
                 return ErrorResponse(*parsed, "UNSUPPORTED", "tool not implemented by plugin",

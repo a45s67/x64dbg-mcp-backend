@@ -55,6 +55,19 @@ Authentication failure closes the pipe without detailed logging.
 
 `operation_id` is null for reads and required for mutations. `deadline_unix_ms`
 is admission metadata, not permission to continue forever after the deadline.
+Address-taking payloads accept a legacy canonical hexadecimal string or one of
+the closed structured forms:
+
+```json
+{"address":{"absolute":"0x140001000"}}
+```
+
+```json
+{"address":{"module":"sample.exe","rva":"0x1000"}}
+```
+
+The plugin resolves the latter only after the work item reaches the serialized
+debugger executor. Arbitrary expression strings are not address references.
 
 ## Response
 
@@ -65,7 +78,17 @@ Success:
   "request_id": "83db0d7d-df01-40ac-bdfc-87bac1e60813",
   "state_generation": 8,
   "status": "ok",
-  "result": {"bytes_written":1}
+  "result": {
+    "address": "0x140001000",
+    "location": {
+      "address": "0x140001000",
+      "module": "sample.exe",
+      "module_base": "0x140000000",
+      "rva": "0x1000",
+      "state_generation": 8
+    },
+    "bytes_written": 1
+  }
 }
 ```
 

@@ -77,14 +77,18 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             }
             Ok(())
         }
+        "address.resolve" => {
+            exact_keys(object, &["address"], &[])?;
+            validate_address_ref(object, "address")
+        }
         "memory.read" => {
             exact_keys(object, &["address", "length"], &[])?;
-            validate_address(object, "address")?;
+            validate_address_ref(object, "address")?;
             integer(object, "length", 1, 65_536)
         }
         "memory.write" => {
             operation(object, &["address", "data_hex"])?;
-            validate_address(object, "address")?;
+            validate_address_ref(object, "address")?;
             let data = string(object, "data_hex", 2, 8192)?;
             if data.len() % 2 != 0
                 || !data
@@ -101,11 +105,11 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
         "memory.map" | "modules.list" | "threads.list" | "breakpoints.list" => page(object),
         "breakpoints.set" | "breakpoints.remove" => {
             operation(object, &["address"])?;
-            validate_address(object, "address")
+            validate_address_ref(object, "address")
         }
         "disassembly.read" => {
             exact_keys(object, &["address"], &["count"])?;
-            validate_address(object, "address")?;
+            validate_address_ref(object, "address")?;
             optional_integer(object, "count", 1, 256)
         }
         "expression.evaluate" => {
@@ -174,11 +178,54 @@ fn validate_path(
     Ok(())
 }
 
-fn validate_address(
+fn validate_address_ref(
     object: &serde_json::Map<String, Value>,
     field: &'static str,
 ) -> Result<(), ValidationError> {
-    let value = string(object, field, 3, 34)?;
+    let value = object
+        .get(field)
+        .ok_or(invalid(field, "must be an address reference"))?;
+    if let Some(value) = value.as_str() {
+        return validate_hex(value, field);
+    }
+    let reference = value
+        .as_object()
+        .ok_or(invalid(field, "must be an address reference"))?;
+    if reference.len() == 1 && reference.contains_key("absolute") {
+        let absolute = reference["absolute"].as_str().ok_or(invalid(
+            field,
+            "absolute must be canonical lowercase hexadecimal",
+        ))?;
+        return validate_hex(absolute, field);
+    }
+    if reference.len() == 2 && reference.contains_key("module") && reference.contains_key("rva") {
+        let module = reference["module"]
+            .as_str()
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 260
+                    && !value.chars().any(char::is_control)
+                    && !value.contains('/')
+                    && !value.contains('\\')
+            })
+            .ok_or(invalid(field, "module must be a bounded module name"))?;
+        let _ = module;
+        let rva = reference["rva"].as_str().ok_or(invalid(
+            field,
+            "rva must be canonical lowercase hexadecimal",
+        ))?;
+        return validate_hex(rva, field);
+    }
+    Err(invalid(
+        field,
+        "must contain only absolute or module and rva",
+    ))
+}
+
+fn validate_hex(value: &str, field: &'static str) -> Result<(), ValidationError> {
+    if !(3..=34).contains(&value.len()) {
+        return Err(invalid(field, "must be canonical lowercase hexadecimal"));
+    }
     if !value.starts_with("0x")
         || !value[2..]
             .bytes()
@@ -300,11 +347,16 @@ fn build_catalog() -> Vec<Value> {
             ),
         ),
         read_tool(
+            "address.resolve",
+            "Resolve an absolute or module-relative address inside the current paused debugger generation. Returns the canonical runtime address and module/RVA metadata.",
+            object(vec![("address", address_ref())], vec!["address"]),
+        ),
+        read_tool(
             "memory.read",
-            "Read at most 65536 bytes from a paused debuggee. Addresses are canonical hexadecimal strings.",
+            "Read at most 65536 bytes from a paused debuggee. Accepts an absolute or module-relative address reference.",
             object(
                 vec![
-                    ("address", address()),
+                    ("address", address_ref()),
                     (
                         "length",
                         json!({"type":"integer","minimum":1,"maximum":65536}),
@@ -317,7 +369,7 @@ fn build_catalog() -> Vec<Value> {
             "memory.write",
             "Write at most 4096 bytes to a paused debuggee. Read original bytes first when verification or rollback matters.",
             operation_schema(vec![
-                ("address", address()),
+                ("address", address_ref()),
                 (
                     "data_hex",
                     json!({"type":"string","pattern":"^(?:[0-9a-f]{2}){1,4096}$"}),
@@ -347,22 +399,22 @@ fn build_catalog() -> Vec<Value> {
         ),
         mutation_tool(
             "breakpoints.set",
-            "Create a software breakpoint at an explicit address while paused.",
-            operation_schema(vec![("address", address())]),
+            "Create a software breakpoint at an absolute or module-relative address while paused.",
+            operation_schema(vec![("address", address_ref())]),
             false,
         ),
         mutation_tool(
             "breakpoints.remove",
-            "Remove a software breakpoint at an explicit address while paused.",
-            operation_schema(vec![("address", address())]),
+            "Remove a software breakpoint at an absolute or module-relative address while paused.",
+            operation_schema(vec![("address", address_ref())]),
             true,
         ),
         read_tool(
             "disassembly.read",
-            "Decode at most 256 instructions from an explicit address while paused.",
+            "Decode at most 256 instructions from an absolute or module-relative address while paused.",
             object(
                 vec![
-                    ("address", address()),
+                    ("address", address_ref()),
                     (
                         "count",
                         json!({"type":"integer","minimum":1,"maximum":256,"default":32}),
@@ -413,8 +465,36 @@ fn mutation_tool(name: &str, description: &str, input_schema: Value, destructive
     })
 }
 
-fn address() -> Value {
-    json!({ "type": "string", "pattern": "^0x[0-9a-f]+$", "maxLength": 34 })
+fn canonical_hex() -> Value {
+    json!({ "type": "string", "pattern": "^0x[0-9a-f]+$", "minLength": 3, "maxLength": 34 })
+}
+
+fn address_ref() -> Value {
+    json!({
+        "oneOf": [
+            canonical_hex(),
+            {
+                "type": "object",
+                "properties": { "absolute": canonical_hex() },
+                "required": ["absolute"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "module": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 260,
+                        "pattern": "^[^\\\\/\\u0000-\\u001f\\u007f]+$"
+                    },
+                    "rva": canonical_hex()
+                },
+                "required": ["module", "rva"],
+                "additionalProperties": false
+            }
+        ]
+    })
 }
 
 fn page_schema() -> Value {
@@ -489,7 +569,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 18);
+        assert_eq!(catalog().len(), 19);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -509,8 +589,30 @@ mod tests {
             validate_arguments("memory.read", &json!({"address":"0x1000","length":65536})).is_ok()
         );
         assert!(
+            validate_arguments(
+                "memory.read",
+                &json!({"address":{"module":"sample.exe","rva":"0x1000"},"length":16})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "address.resolve",
+                &json!({"address":{"absolute":"0x140001000"}})
+            )
+            .is_ok()
+        );
+        assert!(
             validate_arguments("memory.read", &json!({"address":"0X1000","length":1})).is_err()
         );
+        for invalid in [
+            json!({"module":"sample.exe","rva":"0X1000"}),
+            json!({"module":"..\\sample.exe","rva":"0x1000"}),
+            json!({"module":"sample.exe","rva":"0x1000","extra":true}),
+            json!({"absolute":"0x1000","rva":"0x20"}),
+        ] {
+            assert!(validate_arguments("address.resolve", &json!({"address":invalid})).is_err());
+        }
         assert!(
             validate_arguments("memory.read", &json!({"address":"0x1000","length":65537})).is_err()
         );

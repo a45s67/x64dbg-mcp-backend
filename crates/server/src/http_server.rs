@@ -414,8 +414,9 @@ mod tests {
         let value =
             mcp_request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#).await;
         let tools = value["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 19);
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.state"));
+        assert!(tools.iter().any(|tool| tool["name"] == "address.resolve"));
         assert!(tools.iter().any(|tool| tool["name"] == "memory.write"));
     }
 
@@ -431,6 +432,20 @@ mod tests {
         let text: Value =
             serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(text, result["structuredContent"]);
+    }
+
+    #[tokio::test]
+    async fn structured_module_relative_address_matches_the_contract() {
+        let value = mcp_request(
+            r#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"address.resolve","arguments":{"address":{"module":"sample.exe","rva":"0x1000"}}}}"#,
+        )
+        .await;
+        let result = &value["result"];
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["structuredContent"]["address"], "0x0000000140001000");
+        assert_eq!(result["structuredContent"]["module"], "sample.exe");
+        assert_eq!(result["structuredContent"]["rva"], "0x1000");
+        assert_eq!(result["structuredContent"]["state_generation"], 7);
     }
 
     #[tokio::test]

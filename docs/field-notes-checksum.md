@@ -48,8 +48,9 @@ accepts `path`, optional `working_directory`, and `operation_id`; raw command-li
 arguments and a configurable entry-break policy remain deferred until their
 quoting and debugger semantics can be tested precisely. The isolated x32dbg
 fixture passed the callback-confirmed launch workflow on 2026-08-29. The matching
-x64dbg real-integration run remains required when no other x64 backend instance
-owns the MVP single-instance mutex.
+x64 installed-backend workflow passed on the same date by launching this sample,
+observing the initial system and PE-entry pauses, and reaching a relocated
+`main.main` breakpoint.
 
 ### Recover after sidecar or debugger restart
 
@@ -111,9 +112,30 @@ breakpoint list.
 Suggested result fields: `pause_reason`, `breakpoint`, `exception`,
 `first_chance`, `thread_id`, and `state_generation`.
 
+### Make paused snapshots internally consistent
+
+Observed: during the initial loader pause, `debugger.state.instruction_pointer`
+briefly differed from both `expression.evaluate("cip")` and `registers.read.rip`.
+All three agreed after the user breakpoint at `main.main` was reached. Callers
+should not have to guess whether a callback-derived state field or a synchronous
+debugger-thread read is authoritative.
+
+Acceptance criteria:
+
+- Define the consistency boundary for a paused-state generation.
+- Return the generation used by register, expression, and disassembly reads.
+- Reject or clearly mark a result if execution changed while its snapshot was
+  being collected.
+
+### Preserve debugger text as UTF-8
+
+Observed: the localized main-thread name was returned as mojibake while ASCII
+module names and paths were correct. Normalize native debugger strings at the
+plugin boundary and add a non-ASCII contract fixture.
+
 ## P1: module-relative analysis
 
-### Accept module-relative addresses
+### Accept module-relative addresses (implemented)
 
 Observed: IDA used image base `0x400000`, while this x64dbg run loaded the sample
 at `0xe90000`. The caller manually translated `main.main` from `0x4a78a0` to
@@ -136,6 +158,16 @@ Acceptance criteria:
 - Reject missing or duplicate module names explicitly.
 - Allow these forms anywhere an address is accepted, especially breakpoints,
   disassembly, memory reads, and expression evaluation.
+
+Implemented in ADR 0003 with a closed `AddressRef` union, a read-only
+`address.resolve` tool, and atomic native resolution for memory, breakpoint, and
+disassembly tools. Arbitrary x64dbg expressions remain confined to
+`expression.evaluate`. The x32 and x64 isolated fixtures passed absolute,
+case-insensitive module/RVA, mutation replay, memory, disassembly, and breakpoint
+coverage on 2026-08-29. The packaged installed backend then passed the
+`checksum.exe` gate without client-side base arithmetic: the client supplied only
+`{ "module": "CHECKSUM.EXE", "rva": "0xa78a0" }`, and resolve, memory,
+disassembly, and breakpoint operations all reported the same runtime location.
 
 ## P2: reverse-engineering discovery tools
 
@@ -223,9 +255,9 @@ Suggested skill contents:
 
 - A state-machine table for absent, starting, running, paused, and stopped
   debuggees, including legal tools and recovery actions for each state.
-- Module-relative address recipes: prefer `{module, rva}` or
-  `address.resolve` when implemented; until then, query `modules.list` and
-  calculate the relocated address explicitly.
+- Module-relative address recipes: prefer `{module, rva}` directly on consuming
+  tools; use `address.resolve` when the canonical runtime location must be
+  inspected separately.
 - Safe mutation rules: generate a new canonical lowercase UUID, preserve it
   across ambiguous retries, and never retry a different mutation with the same
   ID.
@@ -276,3 +308,42 @@ Suggested improvements:
 - Concurrent read-only calls for registers, modules, threads, breakpoints, and
   disassembly completed consistently while paused.
 - Canonical hexadecimal addresses were consistent across results.
+
+## Installed x64 validation record
+
+On 2026-08-29, the packaged backend was installed into `C:\tools\x64dbg` and
+`debuggee.launch` loaded the sample through the authenticated Streamable HTTP
+endpoint. The observed runtime values were:
+
+- module base `0xc20000`, PE entry `0xc83fe0`;
+- `main.main` RVA `0xa78a0`, relocated address `0xcc78a0`;
+- pause sequence: system breakpoint, PE entry, then the user breakpoint at
+  `main.main`;
+- x64 architecture, with the user breakpoint enabled and hit exactly once.
+
+The main routine generates arithmetic prompts using the string
+`Check sum: %d + %d = `. Its checksum validator XORs the candidate with the
+repeating key `FlareOn2024`, Base64-encodes the result, and compares it with an
+embedded 88-byte value. Reversing that transform yields the expected candidate:
+
+```text
+7fd7dd1d0e959f74c133c13abb740b9faa61ab06bd0ecd177645e93b1e3825dd
+```
+
+This run exercised launch, state, module enumeration, expression evaluation,
+register reads, disassembly, memory reads, breakpoint creation, resume, and
+thread/breakpoint enumeration against a real Go challenge binary. It also
+confirmed that the missing wait-for-pause, module-relative addressing, symbol,
+string, and cross-reference tools are practical workflow gaps rather than only
+speculative backlog items.
+
+The ADR 0003 installed-package rerun loaded the image at `0x770000` and resolved
+`main.main` to `0x8178a0` directly from `{module, rva}`. It paused at the PE entry
+and then at `main.main`; the structured breakpoint hit count was one. A first
+monolithic PowerShell smoke runner used a 20-second HTTP timeout shorter than the
+configured 30-second mutation deadline. Aborting an in-flight mutation left that
+client session unable to continue safely, so the run was discarded rather than
+blindly retried. Staged calls with client deadlines longer than backend mutation
+deadlines completed normally. Keep test-client deadlines aligned with the
+contract and implement `debugger.wait_for_pause` before replacing callback waits
+with a large polling loop.

@@ -124,17 +124,75 @@ try {
     $expression = Invoke-Tool 'expression.evaluate' @{ expression = 'cip' } 4
     $memory = Invoke-Tool 'memory.read' @{ address = $expression.value; length = 16 } 5
     $disassembly = Invoke-Tool 'disassembly.read' @{ address = $expression.value; count = 4 } 6
-    $modules = Invoke-Tool 'modules.list' @{ limit = 2 } 7
+    $modules = Invoke-Tool 'modules.list' @{ limit = 256 } 7
+    $fixtureName = [System.IO.Path]::GetFileName($fixture)
+    $fixtureModule = @($modules.items | Where-Object { $_.name -ieq $fixtureName })[0]
+    if (!$fixtureModule) {
+        throw 'The launched fixture was not present in modules.list.'
+    }
+    $moduleBase = [Convert]::ToUInt64($fixtureModule.base.Substring(2), 16)
+    $moduleEntry = [Convert]::ToUInt64($fixtureModule.entry.Substring(2), 16)
+    $entryRva = '0x{0:x}' -f ($moduleEntry - $moduleBase)
+    $moduleEntryRef = @{
+        module = $fixtureModule.name.ToUpperInvariant()
+        rva = $entryRva
+    }
+    $resolvedEntry = Invoke-Tool 'address.resolve' @{ address = $moduleEntryRef } 41
+    if ($resolvedEntry.address -ne $fixtureModule.entry -or
+        $resolvedEntry.module -ine $fixtureModule.name -or
+        $resolvedEntry.rva -ne $entryRva) {
+        throw 'Module-relative address resolution did not return the fixture entry.'
+    }
+    $resolvedAbsolute = Invoke-Tool 'address.resolve' @{
+        address = @{ absolute = $fixtureModule.entry }
+    } 44
+    if ($resolvedAbsolute.address -ne $resolvedEntry.address -or
+        $resolvedAbsolute.module -ine $resolvedEntry.module -or
+        $resolvedAbsolute.rva -ne $resolvedEntry.rva) {
+        throw 'Structured absolute and module-relative references did not resolve equally.'
+    }
+    $missingModule = Invoke-Mcp 'tools/call' @{
+        name = 'address.resolve'
+        arguments = @{ address = @{ module = 'definitely-missing.exe'; rva = '0x0' } }
+    } 45
+    if (!$missingModule.isError -or
+        $missingModule.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'address.resolve did not reject a missing module.'
+    }
+    $outsideModule = Invoke-Mcp 'tools/call' @{
+        name = 'address.resolve'
+        arguments = @{ address = @{ module = $fixtureModule.name; rva = $fixtureModule.size } }
+    } 46
+    if (!$outsideModule.isError -or
+        $outsideModule.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'address.resolve did not reject an RVA at the module size boundary.'
+    }
+    $tooWideAddress = if ($Backend -eq 'x32') { '0x100000000' } else { '0x10000000000000000' }
+    $pointerWidth = Invoke-Mcp 'tools/call' @{
+        name = 'address.resolve'
+        arguments = @{ address = $tooWideAddress }
+    } 47
+    if (!$pointerWidth.isError -or
+        $pointerWidth.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'address.resolve did not reject an address wider than the debugger pointer.'
+    }
+    $afterWidthError = Invoke-Tool 'debugger.state' @{} 48
+    if ($afterWidthError.plugin_state -ne 'ready' -or
+        $afterWidthError.debuggee_state -ne 'paused') {
+        throw 'A pointer-width validation error damaged the plugin connection.'
+    }
+    $moduleMemory = Invoke-Tool 'memory.read' @{ address = $moduleEntryRef; length = 16 } 42
+    $moduleDisassembly = Invoke-Tool 'disassembly.read' @{ address = $moduleEntryRef; count = 4 } 43
     $threads = Invoke-Tool 'threads.list' @{ limit = 2 } 8
     $memoryMap = Invoke-Tool 'memory.map' @{ limit = 2 } 9
     $breakpoints = Invoke-Tool 'breakpoints.list' @{ limit = 2 } 10
 
     $writeOperation = [Guid]::NewGuid().ToString()
     $write = Invoke-Tool 'memory.write' @{
-        operation_id = $writeOperation; address = $expression.value; data_hex = $memory.data_hex.Substring(0, 2)
+        operation_id = $writeOperation; address = $moduleEntryRef; data_hex = $moduleMemory.data_hex.Substring(0, 2)
     } 11
     $writeReplay = Invoke-Tool 'memory.write' @{
-        operation_id = $writeOperation; address = $expression.value; data_hex = $memory.data_hex.Substring(0, 2)
+        operation_id = $writeOperation; address = $moduleEntryRef; data_hex = $moduleMemory.data_hex.Substring(0, 2)
     } 12
     if (($write | ConvertTo-Json -Compress) -ne ($writeReplay | ConvertTo-Json -Compress)) {
         throw 'Mutation replay did not return the recorded memory.write result.'
@@ -161,12 +219,11 @@ try {
     $pause = Invoke-Tool 'debugger.pause' @{ operation_id = [Guid]::NewGuid().ToString() } 40
     $stepInto = Invoke-Tool 'debugger.step_into' @{ operation_id = [Guid]::NewGuid().ToString() } 17
     $stepOver = Invoke-Tool 'debugger.step_over' @{ operation_id = [Guid]::NewGuid().ToString() } 18
-    $breakpointAddress = $disassembly.items[1].address
     $breakpointSet = Invoke-Tool 'breakpoints.set' @{
-        operation_id = [Guid]::NewGuid().ToString(); address = $breakpointAddress
+        operation_id = [Guid]::NewGuid().ToString(); address = $moduleEntryRef
     } 19
     $breakpointRemove = Invoke-Tool 'breakpoints.remove' @{
-        operation_id = [Guid]::NewGuid().ToString(); address = $breakpointAddress
+        operation_id = [Guid]::NewGuid().ToString(); address = $moduleEntryRef
     } 20
     $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 21
 
@@ -182,6 +239,16 @@ try {
         threads = $threads.items.Count
         memory_regions = $memoryMap.items.Count
         breakpoints = $breakpoints.items.Count
+        resolved_entry = $resolvedEntry.address
+        resolved_module = $resolvedEntry.module
+        resolved_rva = $resolvedEntry.rva
+        absolute_resolution_equal = $true
+        missing_module_rejected = $true
+        out_of_range_rva_rejected = $true
+        pointer_width_rejected = $true
+        connection_survived_width_error = $true
+        module_memory_bytes = $moduleMemory.bytes_read
+        module_instructions = $moduleDisassembly.items.Count
         write_verified = $write.verified
         write_replay_equal = $true
         resume_state = $resume.debuggee_state

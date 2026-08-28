@@ -27,12 +27,19 @@ characters cannot enter the command and raw command-line arguments are not
 accepted. Timeout after submission is reported as unknown and is never retried
 automatically.
 
+Structured module-relative addresses are resolved with
+`Script::Module::GetList` inside the same executor work item as the consuming
+native operation. The resolver validates list ownership, exact case-insensitive
+module-name uniqueness, RVA bounds, and addition overflow before producing the
+numeric address. It never forwards a caller expression to `DbgEval`.
+
 ## Enabled calls
 
 | Tool | Native API | Required state | Completion and ownership |
 |---|---|---|---|
 | `debugger.state` | `DbgGetRegDumpEx` | paused for CIP; any otherwise | atomic callback snapshot; copied register dump |
 | `registers.read` | `DbgGetRegDumpEx` | paused | copied fixed-size dump; register-name allowlist |
+| `address.resolve` | `Script::Module::GetList` | paused | unique module/RVA or absolute lookup; `BridgeFree(list.data)` |
 | `memory.read` | `DbgMemRead` | paused | caller-owned buffer, max 64 KiB |
 | `memory.map` | `DbgMemMap` | paused | max 256 returned items; `BridgeFree(map.page)` |
 | `modules.list` | `Script::Module::GetList` | paused | validates `ListInfo`; `BridgeFree(list.data)` |

@@ -85,6 +85,13 @@ impl DebuggerAdapter for FakeAdapter {
                     retryable: false,
                     details: json!({}),
                 }),
+            "address.resolve" => Ok(json!({
+                "address": "0x0000000140001000",
+                "module": "sample.exe",
+                "module_base": "0x0000000140000000",
+                "rva": "0x1000",
+                "state_generation": 7
+            })),
             _ => Err(ToolError {
                 code: "UNSUPPORTED",
                 message: "tool is not implemented by the fake adapter",

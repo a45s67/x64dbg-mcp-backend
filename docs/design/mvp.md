@@ -138,9 +138,12 @@ correlation ID, never stack traces or raw OS error text.
 ## 4. Initial tool catalog
 
 All addresses and machine-sized integers are JSON strings in canonical lowercase
-hex (`0x...`) to avoid JSON precision loss. Byte payloads are lowercase hex unless
-explicitly documented. Every list uses `limit` and an opaque `cursor`; output is
-truncated only at item boundaries and reports `next_cursor`.
+hex (`0x...`) to avoid JSON precision loss. ADR 0003 additionally permits the
+closed address-reference objects `{ "absolute": "0x..." }` and
+`{ "module": "sample.exe", "rva": "0x..." }`; resolution remains native and
+atomic with the consuming debugger operation. Byte payloads are lowercase hex
+unless explicitly documented. Every list uses `limit` and an opaque `cursor`;
+output is truncated only at item boundaries and reports `next_cursor`.
 
 | Tool | Kind | Valid state | Purpose / key bounds |
 |---|---|---|---|
@@ -152,6 +155,7 @@ truncated only at item boundaries and reports `next_cursor`.
 | `debugger.stop` | mutate | starting/running/paused | Stop current debug session |
 | `debuggee.launch` | destructive mutation | absent | Canonicalize and load an existing executable, then wait for a callback-confirmed initial pause |
 | `registers.read` | read | paused | Selected registers or bounded complete register set |
+| `address.resolve` | read | paused | Resolve absolute or module/RVA input and return canonical location metadata |
 | `memory.read` | read | paused | Read at most 64 KiB per call; report partial/unreadable ranges |
 | `memory.write` | mutate | paused | Write at most 4 KiB; explicit hex bytes and operation ID |
 | `memory.map` | read | paused | Paginated memory regions, at most 256 per page |
@@ -354,9 +358,9 @@ Post-MVP work (separate ADRs): SSE/resumption, remote bind with TLS/OAuth, multi
 same-type debugger instances, resources/prompts, attach/launch, scripting, and
 arbitrary command execution.
 
-The first post-MVP exception is the bounded `debuggee.launch` mutation accepted
-in ADR 0002. It deliberately does not expose arbitrary commands or raw command
-line arguments.
+Accepted post-MVP additions are the bounded `debuggee.launch` mutation in ADR
+0002 and structured module-relative address references in ADR 0003. Neither
+exposes arbitrary debugger commands or expressions to mutation inputs.
 
 ## References
 

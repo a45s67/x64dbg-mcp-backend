@@ -416,3 +416,43 @@ The installed-package acceptance run copied Flare-On 11 `checksum.exe` to
 module identity `MÜNCHEN-CHECKSUM.EXE` and RVA `0xa78a0`. The backend resolved
 runtime base `0x290000`, hit `0x3378a0` once, reported generation `28` consistently
 for pause/register/memory/disassembly results, and stopped cleanly.
+
+## 2026-08-29 bounded discovery follow-up
+
+ADR 0007 adds four paused-state, known-only tools: `symbols.search`,
+`functions.list`, `strings.search`, and inbound `references.to`. All use
+generation-bound opaque cursors, bounded native ownership, Unicode literal
+matching, structured module/RVA locations, and no implicit analysis mutation.
+Long string candidates return UTF-8-safe context around the actual match plus
+`match_offset` and `text_offset`, rather than hiding a late match by always
+returning the first 512 bytes.
+
+Fresh isolated trees containing the exact final dp32/dp64 artifacts passed the
+complete real integration suite. Both architectures found three fixture
+symbols, one ASCII/UTF-8 sentinel, and one UTF-16LE sentinel; both reported zero
+known functions and inbound references without overstating completeness. They
+also rejected filter-mismatched and stale-generation discovery cursors while
+keeping the connection alive, then completed pause, step, breakpoint, stop, and
+supervised sidecar shutdown checks.
+
+The x32 run exposed a real callback-order race: x32dbg may emit
+`CB_PAUSEDEBUG` before `CB_STEPPED`. Step mutations now wait for the specific
+newer `step` observation instead of accepting the intermediate generic paused
+state. The final x32 and x64 runs both retained `step` for step-into and
+step-over.
+
+The installed `checksum.exe` run loaded at `0x770000`, resolved
+`{module: "CHECKSUM.EXE", rva: "0xa78a0"}` to `0x8178a0`, hit it once, and
+reported generation `27` consistently for pause, register, memory, and
+disassembly snapshots. Bounded paginated string discovery found both
+`FlareOn2024` and `Check sum: %d + %d = ` on the first 1 MiB page, including
+the query within returned long-string context. The current x64dbg database
+reported zero retained `main.main` symbols, functions, and inbound references;
+those empty results correctly remained `known_only` rather than being treated
+as proof of absence. The debuggee and plugin-owned sidecar stopped cleanly.
+
+A final review tightened candidate extraction so an invalid high byte terminates
+an ASCII/UTF-8 candidate instead of causing adjacent valid text to be discarded;
+UTF-16 surrogate validity and long-candidate deadline/generation checks were
+tightened at the same time. The rebuilt installed artifact repeated the same
+checksum workflow at generation `26`, found both literals, and shut down cleanly.

@@ -117,6 +117,33 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             validate_address_ref(object, "address")?;
             optional_integer(object, "count", 1, 256)
         }
+        "symbols.search" | "functions.list" => {
+            exact_keys(object, &["module"], &["query", "limit", "cursor"])?;
+            validate_module_name(object, "module")?;
+            optional_query(object)?;
+            discovery_page(object)
+        }
+        "strings.search" => {
+            exact_keys(
+                object,
+                &["module"],
+                &["query", "min_length", "encoding", "limit", "cursor"],
+            )?;
+            validate_module_name(object, "module")?;
+            optional_query(object)?;
+            optional_integer(object, "min_length", 4, 256)?;
+            if let Some(encoding) = object.get("encoding")
+                && !matches!(encoding.as_str(), Some("ascii_utf8" | "utf16le" | "both"))
+            {
+                return Err(invalid("encoding", "must be ascii_utf8, utf16le, or both"));
+            }
+            discovery_page(object)
+        }
+        "references.to" => {
+            exact_keys(object, &["address"], &["limit", "cursor"])?;
+            validate_address_ref(object, "address")?;
+            discovery_page(object)
+        }
         "expression.evaluate" => {
             exact_keys(object, &["expression"], &[])?;
             let expression = string(object, "expression", 1, 1024)?;
@@ -208,17 +235,7 @@ fn validate_address_ref(
         return validate_hex(absolute, field);
     }
     if reference.len() == 2 && reference.contains_key("module") && reference.contains_key("rva") {
-        let module = reference["module"]
-            .as_str()
-            .filter(|value| {
-                !value.is_empty()
-                    && value.len() <= 260
-                    && !value.chars().any(char::is_control)
-                    && !value.contains('/')
-                    && !value.contains('\\')
-            })
-            .ok_or(invalid(field, "module must be a bounded module name"))?;
-        let _ = module;
+        validate_module_value(&reference["module"], field)?;
         let rva = reference["rva"].as_str().ok_or(invalid(
             field,
             "rva must be canonical lowercase hexadecimal",
@@ -229,6 +246,51 @@ fn validate_address_ref(
         field,
         "must contain only absolute or module and rva",
     ))
+}
+
+fn validate_module_name(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+) -> Result<(), ValidationError> {
+    let value = object
+        .get(field)
+        .ok_or(invalid(field, "module must be a bounded module name"))?;
+    validate_module_value(value, field)
+}
+
+fn validate_module_value(value: &Value, field: &'static str) -> Result<(), ValidationError> {
+    value
+        .as_str()
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 260
+                && !value.chars().any(char::is_control)
+                && !value.contains('/')
+                && !value.contains('\\')
+        })
+        .map(|_| ())
+        .ok_or(invalid(field, "module must be a bounded module name"))
+}
+
+fn optional_query(object: &serde_json::Map<String, Value>) -> Result<(), ValidationError> {
+    if let Some(value) = object.get("query") {
+        let query = value
+            .as_str()
+            .filter(|query| !query.is_empty() && query.len() <= 256)
+            .ok_or(invalid("query", "must be 1 to 256 UTF-8 bytes"))?;
+        if query.chars().any(char::is_control) {
+            return Err(invalid("query", "must not contain control characters"));
+        }
+    }
+    Ok(())
+}
+
+fn discovery_page(object: &serde_json::Map<String, Value>) -> Result<(), ValidationError> {
+    optional_integer(object, "limit", 1, 256)?;
+    if object.contains_key("cursor") {
+        string(object, "cursor", 1, 512)?;
+    }
+    Ok(())
 }
 
 fn validate_hex(value: &str, field: &'static str) -> Result<(), ValidationError> {
@@ -460,7 +522,90 @@ fn build_catalog() -> Vec<Value> {
                 vec!["expression"],
             ),
         ),
+        read_tool(
+            "symbols.search",
+            "Search the current x64dbg symbol database in one loaded module. Results are bounded, paginated, generation-consistent, and known-only.",
+            discovery_schema(),
+        ),
+        read_tool(
+            "functions.list",
+            "List current x64dbg analyzed functions in one loaded module, optionally filtering by an exact literal substring.",
+            discovery_schema(),
+        ),
+        read_tool(
+            "strings.search",
+            "Incrementally scan at most 1 MiB of one loaded module for bounded string candidates. Results are known-only and do not trigger analysis.",
+            object(
+                vec![
+                    ("module", module_name_schema()),
+                    (
+                        "query",
+                        json!({"type":"string","minLength":1,"maxLength":256}),
+                    ),
+                    (
+                        "min_length",
+                        json!({"type":"integer","minimum":4,"maximum":256,"default":4}),
+                    ),
+                    (
+                        "encoding",
+                        json!({"type":"string","enum":["ascii_utf8","utf16le","both"],"default":"both"}),
+                    ),
+                    (
+                        "limit",
+                        json!({"type":"integer","minimum":1,"maximum":256,"default":100}),
+                    ),
+                    (
+                        "cursor",
+                        json!({"type":"string","minLength":1,"maxLength":512}),
+                    ),
+                ],
+                vec!["module"],
+            ),
+        ),
+        read_tool(
+            "references.to",
+            "List bounded inbound references already known to x64dbg for an absolute or module-relative target.",
+            object(
+                vec![
+                    ("address", address_ref()),
+                    (
+                        "limit",
+                        json!({"type":"integer","minimum":1,"maximum":256,"default":100}),
+                    ),
+                    (
+                        "cursor",
+                        json!({"type":"string","minLength":1,"maxLength":512}),
+                    ),
+                ],
+                vec!["address"],
+            ),
+        ),
     ]
+}
+
+fn module_name_schema() -> Value {
+    json!({"type":"string","minLength":1,"maxLength":260})
+}
+
+fn discovery_schema() -> Value {
+    object(
+        vec![
+            ("module", module_name_schema()),
+            (
+                "query",
+                json!({"type":"string","minLength":1,"maxLength":256}),
+            ),
+            (
+                "limit",
+                json!({"type":"integer","minimum":1,"maximum":256,"default":100}),
+            ),
+            (
+                "cursor",
+                json!({"type":"string","minLength":1,"maxLength":512}),
+            ),
+        ],
+        vec!["module"],
+    )
 }
 
 fn read_tool(name: &str, description: &str, input_schema: Value) -> Value {
@@ -595,7 +740,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 20);
+        assert_eq!(catalog().len(), 24);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -701,6 +846,34 @@ mod tests {
         );
         assert!(
             validate_arguments("expression.evaluate", &json!({"expression":"cip\0junk"})).is_err()
+        );
+        assert!(
+            validate_arguments(
+                "symbols.search",
+                &json!({"module":"München.exe","query":"main.","limit":256})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "strings.search",
+                &json!({"module":"sample.exe","min_length":4,"encoding":"both"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "strings.search",
+                &json!({"module":"sample.exe","encoding":"utf32"})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "references.to",
+                &json!({"address":{"module":"sample.exe","rva":"0x1000"},"limit":100})
+            )
+            .is_ok()
         );
     }
 

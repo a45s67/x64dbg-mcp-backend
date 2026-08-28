@@ -47,6 +47,27 @@ function Invoke-Tool([string]$Name, $Arguments, [int]$Id) {
     return $result.structuredContent
 }
 
+function Find-InstalledString([string]$Module, [string]$Query, [int]$IdBase) {
+    $cursor = $null
+    for ($page = 0; $page -lt 8; $page++) {
+        $arguments = @{
+            module = $Module; query = $Query; encoding = 'ascii_utf8'
+            min_length = 4; limit = 16
+        }
+        if ($cursor) { $arguments.cursor = $cursor }
+        $result = Invoke-Tool 'strings.search' $arguments ($IdBase + $page)
+        $match = @($result.items | Where-Object {
+            $_.text.IndexOf($Query, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        } | Select-Object -First 1)
+        if ($match.Count -eq 1) {
+            return [pscustomobject]@{ Item = $match[0]; Page = $page + 1; Result = $result }
+        }
+        $cursor = $result.next_cursor
+        if (!$cursor) { break }
+    }
+    throw "Installed strings.search did not find '$Query' within eight bounded pages."
+}
+
 $debuggerProcess = $null
 $stopSubmitted = $false
 try {
@@ -138,6 +159,30 @@ try {
         throw 'Installed read tools did not preserve the stable main-pause generation.'
     }
 
+    $moduleName = [System.IO.Path]::GetFileName($sample).ToUpperInvariant()
+    $mainSymbols = Invoke-Tool 'symbols.search' @{
+        module = $moduleName; query = 'main.main'; limit = 32
+    } 50
+    $mainFunctions = Invoke-Tool 'functions.list' @{
+        module = $moduleName; query = 'main.main'; limit = 32
+    } 51
+    $mainReferences = Invoke-Tool 'references.to' @{ address = $moduleRef; limit = 32 } 52
+    $keyString = Find-InstalledString $moduleName 'FlareOn2024' 60
+    $promptString = Find-InstalledString $moduleName 'Check sum: %d + %d = ' 70
+    foreach ($discovery in @($mainSymbols, $mainFunctions, $mainReferences,
+            $keyString.Result, $promptString.Result)) {
+        if ($discovery.completeness -ne 'known_only' -or
+            $discovery.state_generation -ne $mainPause.state_generation) {
+            throw 'Installed discovery result omitted stable known-only metadata.'
+        }
+    }
+    foreach ($found in @($keyString, $promptString)) {
+        if ($null -eq $found.Item.match_offset -or $null -eq $found.Item.text_offset -or
+            $found.Item.match_offset -lt $found.Item.text_offset) {
+            throw 'Installed string discovery omitted valid match-context offsets.'
+        }
+    }
+
     $stopSubmitted = $true
     $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 40
     [ordered]@{
@@ -155,6 +200,13 @@ try {
         memory_generation = $memorySnapshot.state_generation
         disassembly_generation = $disassemblySnapshot.state_generation
         snapshot_generations_equal = $true
+        main_symbols = @($mainSymbols.items).Count
+        main_functions = @($mainFunctions.items).Count
+        inbound_main_references = @($mainReferences.items).Count
+        key_string = $keyString.Item.text
+        key_string_page = $keyString.Page
+        prompt_string = $promptString.Item.text
+        prompt_string_page = $promptString.Page
         stopped = $stop.debuggee_state -eq 'absent'
     } | ConvertTo-Json -Depth 5
 } finally {

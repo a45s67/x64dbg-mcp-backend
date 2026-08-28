@@ -66,6 +66,8 @@ private:
     std::string StateResponse(const std::string& requestId);
     bool WaitForState(DebuggeeState expected, std::uint64_t afterGeneration,
                       std::chrono::steady_clock::time_point deadline) noexcept;
+    bool WaitForPauseReason(PauseReasonKind reason, std::uint64_t afterGeneration,
+                            std::chrono::steady_clock::time_point deadline) noexcept;
     bool WaitForActionableLaunchPause(std::uint64_t afterGeneration,
                                       std::chrono::steady_clock::time_point deadline) noexcept;
     [[nodiscard]] std::uint64_t ObservedGeneration(DebuggeeState state) const noexcept;

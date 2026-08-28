@@ -211,6 +211,8 @@ fn stable_error_code(code: &str) -> &'static str {
         "ACCESS_DENIED" => "ACCESS_DENIED",
         "BUSY" => "BUSY",
         "TIMEOUT" => "TIMEOUT",
+        "STALE_CURSOR" => "STALE_CURSOR",
+        "OUTPUT_LIMIT_EXCEEDED" => "OUTPUT_LIMIT_EXCEEDED",
         "CANCELLED" => "CANCELLED",
         "UNSUPPORTED" => "UNSUPPORTED",
         _ => "INTERNAL",
@@ -295,6 +297,16 @@ mod tests {
 
     use super::*;
     use crate::ipc::{IpcOutcome, IpcResponse};
+
+    #[test]
+    fn discovery_error_codes_remain_structured() {
+        assert_eq!(stable_error_code("STALE_CURSOR"), "STALE_CURSOR");
+        assert_eq!(
+            stable_error_code("OUTPUT_LIMIT_EXCEEDED"),
+            "OUTPUT_LIMIT_EXCEEDED"
+        );
+        assert_eq!(stable_error_code("untrusted-plugin-code"), "INTERNAL");
+    }
 
     #[tokio::test]
     async fn correlated_response_is_returned() {

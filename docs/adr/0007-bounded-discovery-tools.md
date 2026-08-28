@@ -31,12 +31,17 @@ The first discovery catalog adds four paused-state, read-only tools:
 `module` is required for list/scan operations. It uses the same Unicode ordinal identity and
 unique loaded-module resolution as `AddressRef`. `query` is a case-insensitive literal substring,
 not a regex or wildcard. `encoding` is one of `ascii_utf8`, `utf16le`, or `both`.
+For `ascii_utf8`, invalid UTF-8 bytes terminate a candidate rather than poisoning adjacent valid
+text, and `min_length` counts decoded Unicode scalar values. For `utf16le`, it counts UTF-16 code
+units.
 
 All results carry `state_generation` and structured absolute plus module/RVA locations. Symbols
 include name, type (`function`, `import`, or `export`), and manual status. Functions include start,
 end-inclusive, instruction count, manual status, and nullable name. Strings include address,
-bounded text, byte length, and encoding. References include source location and type (`data`,
-`jump`, or `call`) plus the target location.
+bounded text, byte length, encoding, the match's byte offset in the full candidate, and the
+returned context's byte offset. Long strings return UTF-8-safe context around the literal match,
+so the result does not hide a match beyond the first 512 bytes. References include source
+location and type (`data`, `jump`, or `call`) plus the target location.
 
 The tools expose `completeness: "known_only"`: they read current x64dbg analysis state and never
 silently run analysis or mutate the database. An empty result does not prove that the binary has
@@ -55,7 +60,7 @@ no symbol, string, function, or reference.
 - Loops check the request deadline and snapshot generation between chunks. Deadline expiry returns
   retryable `TIMEOUT`; generation churn returns retryable `BUSY`. Neither condition is retried
   internally.
-- Opaque discovery cursors bind the debugger generation, method, normalized filters, module, and
+- Opaque discovery cursors bind the debugger generation, method, exact supplied filters, module, and
   next native index/byte offset. A cursor used with different arguments is `INVALID_ARGUMENT`; a
   generation change is `STALE_CURSOR`.
 - Native list pointers and xref arrays are always released with `BridgeFree` in the same serialized
@@ -73,9 +78,11 @@ no symbol, string, function, or reference.
 
 ## Verification
 
-Unit and contract tests cover schemas, cursor/filter binding, count limits, malformed list
-ownership, string extraction boundaries, unreadable gaps, deadlines, stale generations, UTF-8,
-and output truncation. Isolated x32/x64 fixtures seed known symbols/functions/xrefs where the SDK
-permits and verify empty/known-only behavior otherwise. Each installed feature stage is then
-tested on a Flare-On 11 sample, preferring `checksum.exe` for retained Go names and embedded
-strings and choosing another sample if its x64dbg database lacks sufficient analysis evidence.
+Rust unit and contract tests cover schemas, strict argument bounds, response limits, and stable
+discovery error forwarding. Native UTF-8 tests cover ordinal Unicode matching and byte offsets.
+Isolated x32/x64 fixtures verify symbols, ASCII/UTF-8 and UTF-16LE strings, filter-bound and stale
+cursors, snapshot generation, known-only metadata, empty database behavior, connection survival,
+step/pause lifecycle, and clean shutdown. Native count rejection, allocation release, deadline,
+unreadable-page, and context-truncation branches are enforced in code and remain candidates for a
+future injectable Bridge seam. Each installed feature stage is additionally tested on a Flare-On
+11 sample, preferring `checksum.exe` for retained Go names and embedded strings.

@@ -65,7 +65,7 @@ max_output_bytes = 1048576
 allowed_origins = []
 "@ | Set-Content -LiteralPath $configPath -Encoding ASCII -NoNewline
     }
-    Write-Output "Installed backend. Bearer token (store securely): $token"
+    Write-Output 'Installed backend. Bearer token generated and stored in the two server config files.'
     Write-Output "x32 endpoint: http://127.0.0.1:$X32Port/mcp"
     Write-Output "x64 endpoint: http://127.0.0.1:$X64Port/mcp"
 }

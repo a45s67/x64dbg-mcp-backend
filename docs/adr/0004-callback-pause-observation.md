@@ -73,6 +73,13 @@ All callback-confirmed state-changing results, especially `debugger.resume`,
 also expose their confirmed `state_generation`, giving clients an unambiguous
 value for the subsequent wait.
 
+Step mutations are confirmed by the specific `CB_STEPPED` observation, not by
+the first generic paused-state callback. x32dbg can emit `CB_PAUSEDEBUG` before
+`CB_STEPPED`; treating that intermediate callback as completion would return a
+generation whose reason is still `user_pause` and race the later refinement.
+`debugger.step_into` and `debugger.step_over` therefore wait for a newer pause
+whose retained reason is `step`.
+
 ## Consistency and bounds
 
 Only the most recent pause observation is retained. The waiter and synchronous
@@ -97,6 +104,8 @@ snapshot was collected. No unbounded event history is introduced.
 - Bounded retryable timeout without mutation-ledger involvement.
 - Specific breakpoint/exception/step reasons are not overwritten by the generic
   pause callback.
+- A generic pause arriving before `CB_STEPPED` cannot prematurely confirm a
+  step mutation.
 - Stop, disconnect, and plugin unload wake active waiters within shutdown bounds.
 - x32 and x64 fixtures use resume -> wait without sleeps or state polling.
 - A Flare-On sample reaches a structured module/RVA breakpoint and reports a

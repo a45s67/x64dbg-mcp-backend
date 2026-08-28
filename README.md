@@ -12,6 +12,8 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0003-structured-address-references.md`](docs/adr/0003-structured-address-references.md)
 - [`docs/adr/0004-callback-pause-observation.md`](docs/adr/0004-callback-pause-observation.md)
 - [`docs/adr/0005-generation-consistent-snapshots.md`](docs/adr/0005-generation-consistent-snapshots.md)
+- [`docs/adr/0006-native-utf8-boundary.md`](docs/adr/0006-native-utf8-boundary.md)
+- [`docs/adr/0007-bounded-discovery-tools.md`](docs/adr/0007-bounded-discovery-tools.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
 - [`docs/install.md`](docs/install.md)
@@ -33,6 +35,11 @@ Execution workflows use `debugger.resume` followed by
 `debugger.wait_for_pause`. The first call confirms the mutation and returns its
 generation; the second waits on native debugger callbacks and reports a bounded
 pause reason without sleeps or state polling.
+
+Bounded discovery is available through `symbols.search`, `functions.list`,
+`strings.search`, and `references.to`. Results are generation-consistent,
+paginated, module/RVA aware, and explicitly report `completeness: "known_only"`;
+the read tools never silently trigger debugger analysis.
 
 Build a release with `powershell -File scripts/package.ps1`, then follow the
 [installation and client setup guide](docs/install.md). The installed package

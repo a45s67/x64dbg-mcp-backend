@@ -59,6 +59,10 @@ not mutated anything.
 | `memory.write` | `DbgMemWrite`, `DbgMemRead` | paused | max 4 KiB; read-back verification |
 | breakpoint set/remove | `DbgCmdExec`, `DbgGetBpxTypeAt` | paused | validated address only; bounded observation loop |
 | `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; ignores transient process-created pause and confirms a later actionable callback |
+| `symbols.search` | `Script::Symbol::GetList` | paused | `BridgeFree(list.data)`; rejects count above 65,536; bounded literal filtering and generation recheck |
+| `functions.list` | `Script::Function::GetList`, `Script::Symbol::GetList` | paused | both lists released with `BridgeFree`; each rejects count above 65,536; bounded name join and generation recheck |
+| `strings.search` | `DbgMemRead` | paused | caller-owned 64 KiB chunks, 4 KiB fallback, at most 1 MiB/request; deadline/generation checks and UTF-8-safe match context |
+| `references.to` | `DbgGetXrefCountAt`, `DbgXrefGet` | paused | `BridgeFree(info.references)`; rejects count above 65,536; inbound known-only references |
 
 Pause metadata is copied synchronously from `CB_SYSTEMBREAKPOINT`,
 `CB_BREAKPOINT`, `CB_EXCEPTION`, and `CB_STEPPED`. The plugin retains no callback
@@ -81,18 +85,6 @@ injects a sidecar crash for both architectures and verifies bounded plugin stop.
 Any new native API requires updating this table and adding state, bound,
 allocation, timeout, and unload tests.
 
-## Accepted but not yet enabled: ADR 0007 discovery
-
-The next stage may enable only the following read paths after their ownership and bound tests
-land:
-
-| Planned tool | Native API | Required state | Planned ownership and bound |
-|---|---|---|---|
-| `symbols.search` | `Script::Symbol::GetList` | paused | `BridgeFree(list.data)`; reject count above 65,536; inspect at most that count |
-| `functions.list` | `Script::Function::GetList` | paused | `BridgeFree(list.data)`; reject count above 65,536; join only copied bounded symbols |
-| `strings.search` | `DbgMemRead` | paused | caller-owned chunks at most 64 KiB; at most 1 MiB scanned per call |
-| `references.to` | `DbgXrefGet` | paused | `BridgeFree(info.references)`; reject count above 65,536 |
-
-These entries are not an authorization to expose a tool before ADR 0007 schemas, generation and
-deadline checks, filter-bound cursors, UTF-8 handling, and dual-architecture tests pass. No GUI
-reference API or analysis-triggering command is permitted.
+ADR 0007 discovery is enabled after schema, generation/deadline, filter-bound cursor, Unicode,
+ownership, and isolated dual-architecture gates passed. No GUI reference API or
+analysis-triggering command is permitted.

@@ -191,6 +191,58 @@ try {
     }
     $moduleMemory = Invoke-Tool 'memory.read' @{ address = $moduleEntryRef; length = 16 } 42
     $moduleDisassembly = Invoke-Tool 'disassembly.read' @{ address = $moduleEntryRef; count = 4 } 43
+    $symbols = Invoke-Tool 'symbols.search' @{
+        module = $fixtureModule.name.ToUpperInvariant(); query = 'mcp_fixture'; limit = 32
+    } 60
+    $functions = Invoke-Tool 'functions.list' @{
+        module = $fixtureModule.name.ToUpperInvariant(); limit = 32
+    } 61
+    $asciiStrings = Invoke-Tool 'strings.search' @{
+        module = $fixtureModule.name.ToUpperInvariant(); query = 'MCP_DISCOVERY_ASCII_SENTINEL'
+        encoding = 'ascii_utf8'; min_length = 4; limit = 8
+    } 62
+    $wideStrings = Invoke-Tool 'strings.search' @{
+        module = $fixtureModule.name.ToUpperInvariant(); query = 'MCP_DISCOVERY_UTF16_SENTINEL'
+        encoding = 'utf16le'; min_length = 4; limit = 8
+    } 63
+    $references = Invoke-Tool 'references.to' @{ address = $moduleEntryRef; limit = 32 } 64
+    if (@($asciiStrings.items | Where-Object { $_.text -eq 'MCP_DISCOVERY_ASCII_SENTINEL' }).Count -eq 0 -or
+        @($wideStrings.items | Where-Object { $_.text -eq 'MCP_DISCOVERY_UTF16_SENTINEL' }).Count -eq 0) {
+        throw 'Bounded string discovery did not find both fixture sentinels.'
+    }
+    foreach ($item in @($asciiStrings.items) + @($wideStrings.items)) {
+        if ($null -eq $item.match_offset -or $null -eq $item.text_offset -or
+            $item.match_offset -lt $item.text_offset) {
+            throw 'A string result omitted valid match-context offsets.'
+        }
+    }
+    foreach ($discovery in @($symbols, $functions, $asciiStrings, $wideStrings, $references)) {
+        if ($discovery.completeness -ne 'known_only' -or
+            $discovery.state_generation -ne $state.state_generation) {
+            throw 'Discovery result omitted known-only or generation metadata.'
+        }
+    }
+    $discoveryCursorProbe = Invoke-Tool 'strings.search' @{
+        module = $fixtureModule.name; min_length = 4; encoding = 'both'; limit = 1
+    } 65
+    if (!$discoveryCursorProbe.next_cursor -or
+        !$discoveryCursorProbe.next_cursor.StartsWith('v2:')) {
+        throw 'String discovery did not return a v2 cursor for binding tests.'
+    }
+    $mismatchedDiscoveryCursor = Invoke-Mcp 'tools/call' @{
+        name = 'strings.search'; arguments = @{
+            module = $fixtureModule.name; query = 'different-filter'; min_length = 4
+            encoding = 'both'; limit = 1; cursor = $discoveryCursorProbe.next_cursor
+        }
+    } 66
+    if (!$mismatchedDiscoveryCursor.isError -or
+        $mismatchedDiscoveryCursor.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Discovery cursor was not bound to its exact filters.'
+    }
+    $afterDiscoveryCursorError = Invoke-Tool 'debugger.state' @{} 67
+    if ($afterDiscoveryCursorError.plugin_state -ne 'ready') {
+        throw 'A mismatched discovery cursor damaged the plugin connection.'
+    }
     $threads = Invoke-Tool 'threads.list' @{ limit = 2 } 8
     $memoryMap = Invoke-Tool 'memory.map' @{ limit = 2 } 9
     $cursorProbe = Invoke-Tool 'memory.map' @{ limit = 1 } 52
@@ -287,6 +339,16 @@ try {
         $staleCursor.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
         throw 'A cursor from an older debugger generation was not rejected.'
     }
+    $staleDiscoveryCursor = Invoke-Mcp 'tools/call' @{
+        name = 'strings.search'; arguments = @{
+            module = $fixtureModule.name; min_length = 4; encoding = 'both'; limit = 1
+            cursor = $discoveryCursorProbe.next_cursor
+        }
+    } 68
+    if (!$staleDiscoveryCursor.isError -or
+        $staleDiscoveryCursor.structuredContent.error.code -ne 'STALE_CURSOR') {
+        throw "A discovery cursor from an older debugger generation was not rejected: $($staleDiscoveryCursor | ConvertTo-Json -Compress -Depth 8)"
+    }
     $stepOver = Invoke-Tool 'debugger.step_over' @{ operation_id = [Guid]::NewGuid().ToString() } 18
     $stepOverObservation = Invoke-Tool 'debugger.wait_for_pause' @{
         after_generation = $stepInto.state_generation; timeout_ms = 1500
@@ -329,6 +391,13 @@ try {
         connection_survived_width_error = $true
         module_memory_bytes = $moduleMemory.bytes_read
         module_instructions = $moduleDisassembly.items.Count
+        symbols = $symbols.items.Count
+        functions = $functions.items.Count
+        ascii_strings = $asciiStrings.items.Count
+        utf16_strings = $wideStrings.items.Count
+        inbound_references = $references.items.Count
+        discovery_cursor_filter_bound = $true
+        stale_discovery_cursor_rejected = $true
         write_verified = $write.verified
         write_replay_equal = $true
         resume_state = $resume.debuggee_state

@@ -11,17 +11,21 @@
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <span>
 #include <sstream>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "_plugins.h"
+#include "_scriptapi_function.h"
 #include "_scriptapi_module.h"
+#include "_scriptapi_symbol.h"
 #include "jansson/jansson.h"
 
 namespace mcp {
@@ -133,6 +137,12 @@ struct Request {
     std::vector<unsigned char> writeBytes;
     std::uint64_t afterGeneration{0};
     std::size_t waitTimeoutMs{5000U};
+    std::string module;
+    std::string query;
+    std::string stringEncoding{"both"};
+    std::size_t minStringLength{4U};
+    std::optional<std::uint64_t> cursorFingerprint;
+    bool discoveryCursorInvalid{false};
 };
 
 bool IsMutation(const std::string_view method) {
@@ -146,6 +156,53 @@ bool IsMutation(const std::string_view method) {
 bool IsPageMethod(const std::string_view method) {
     return method == "memory.map" || method == "modules.list" || method == "threads.list" ||
            method == "breakpoints.list";
+}
+
+bool IsDiscoveryMethod(const std::string_view method) {
+    return method == "symbols.search" || method == "functions.list" ||
+           method == "strings.search" || method == "references.to";
+}
+
+std::uint64_t DiscoveryFingerprint(const std::string_view method,
+                                   const std::string_view module,
+                                   const std::string_view query,
+                                   const std::string_view encoding,
+                                   const std::size_t minLength) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    const auto add = [&hash](const std::string_view part) {
+        for (const unsigned char byte : part) {
+            hash ^= byte;
+            hash *= 1099511628211ULL;
+        }
+        hash ^= 0xffU;
+        hash *= 1099511628211ULL;
+    };
+    add(method);
+    add(module);
+    add(query);
+    add(encoding);
+    add(std::to_string(minLength));
+    return hash;
+}
+
+bool ParseDiscoveryCursor(const std::string_view cursor, std::uint64_t& generation,
+                          std::uint64_t& fingerprint, std::size_t& index) {
+    if (!cursor.starts_with("v2:") || cursor.size() > 128U) return false;
+    const auto first = cursor.find(':', 3U);
+    const auto second = first == std::string_view::npos
+                            ? std::string_view::npos
+                            : cursor.find(':', first + 1U);
+    if (first == std::string_view::npos || second == std::string_view::npos) return false;
+    const auto generationResult =
+        std::from_chars(cursor.data() + 3U, cursor.data() + first, generation, 10);
+    const auto fingerprintResult =
+        std::from_chars(cursor.data() + first + 1U, cursor.data() + second, fingerprint, 16);
+    const auto indexResult =
+        std::from_chars(cursor.data() + second + 1U, cursor.data() + cursor.size(), index, 10);
+    return generationResult.ec == std::errc{} && generationResult.ptr == cursor.data() + first &&
+           fingerprintResult.ec == std::errc{} &&
+           fingerprintResult.ptr == cursor.data() + second && indexResult.ec == std::errc{} &&
+           indexResult.ptr == cursor.data() + cursor.size();
 }
 
 bool ParseCursor(const std::string_view cursor, std::uint64_t& generation, std::size_t& index) {
@@ -343,6 +400,12 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::vector<unsigned char> writeBytes;
     std::uint64_t afterGeneration = 0;
     std::size_t waitTimeoutMs = 5000U;
+    std::string moduleFilter;
+    std::string query;
+    std::string stringEncoding = "both";
+    std::size_t minStringLength = 4U;
+    std::optional<std::uint64_t> cursorFingerprint;
+    bool discoveryCursorInvalid = false;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
@@ -431,6 +494,76 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                 }
                 registerNames.push_back(std::move(value));
             }
+        }
+    } else if (IsDiscoveryMethod(methodValue)) {
+        json_t* module = json_object_get(payload, "module");
+        json_t* queryValue = json_object_get(payload, "query");
+        json_t* encoding = json_object_get(payload, "encoding");
+        json_t* minimum = json_object_get(payload, "min_length");
+        json_t* limit = json_object_get(payload, "limit");
+        json_t* cursor = json_object_get(payload, "cursor");
+        json_t* address = json_object_get(payload, "address");
+        const bool references = methodValue == "references.to";
+        const std::size_t expectedFields = 1U + (queryValue ? 1U : 0U) +
+                                           (encoding ? 1U : 0U) + (minimum ? 1U : 0U) +
+                                           (limit ? 1U : 0U) + (cursor ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields ||
+            (references ? !ParseAddressReference(address, addressValue)
+                        : !IsBoundedModuleName(module)) ||
+            (references && module != nullptr) || (!references && address != nullptr) ||
+            (references && queryValue != nullptr) ||
+            (methodValue != "strings.search" && (encoding != nullptr || minimum != nullptr))) {
+            return std::nullopt;
+        }
+        if (!references) {
+            moduleFilter.assign(json_string_value(module), json_string_length(module));
+        }
+        if (queryValue != nullptr) {
+            if (!json_is_string(queryValue) || json_string_length(queryValue) == 0U ||
+                json_string_length(queryValue) > 256U) return std::nullopt;
+            const std::string_view text(json_string_value(queryValue),
+                                        json_string_length(queryValue));
+            if (std::any_of(text.begin(), text.end(), [](const char character) {
+                    const auto byte = static_cast<unsigned char>(character);
+                    return byte < 0x20U || byte == 0x7fU;
+                })) return std::nullopt;
+            query.assign(text);
+        }
+        if (encoding != nullptr) {
+            if (!json_is_string(encoding)) return std::nullopt;
+            const std::string_view value(json_string_value(encoding), json_string_length(encoding));
+            if (value != "ascii_utf8" && value != "utf16le" && value != "both") {
+                return std::nullopt;
+            }
+            stringEncoding.assign(value);
+        }
+        if (minimum != nullptr) {
+            if (!json_is_integer(minimum) || json_integer_value(minimum) < 4 ||
+                json_integer_value(minimum) > 256) return std::nullopt;
+            minStringLength = static_cast<std::size_t>(json_integer_value(minimum));
+        }
+        if (limit != nullptr) {
+            if (!json_is_integer(limit) || json_integer_value(limit) < 1 ||
+                json_integer_value(limit) > 256) return std::nullopt;
+            pageLimit = static_cast<std::size_t>(json_integer_value(limit));
+        }
+        const std::uint64_t expectedFingerprint = DiscoveryFingerprint(
+            methodValue, moduleFilter, query, stringEncoding, minStringLength);
+        if (cursor != nullptr) {
+            if (!json_is_string(cursor)) return std::nullopt;
+            std::uint64_t cursorGenerationValue = 0;
+            std::uint64_t fingerprintValue = 0;
+            const std::string_view cursorText(json_string_value(cursor), json_string_length(cursor));
+            if (!ParseDiscoveryCursor(cursorText, cursorGenerationValue, fingerprintValue,
+                                      cursorIndex)) {
+                discoveryCursorInvalid = true;
+            } else {
+                cursorGeneration = cursorGenerationValue;
+                discoveryCursorInvalid = fingerprintValue != expectedFingerprint;
+            }
+            cursorFingerprint = expectedFingerprint;
+        } else {
+            cursorFingerprint = expectedFingerprint;
         }
     } else if (IsPageMethod(methodValue)) {
         json_t* limit = json_object_get(payload, "limit");
@@ -522,7 +655,9 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(expression), std::move(path), std::move(workingDirectory),
                    addressValue, lengthValue, std::move(registerNames), pageLimit,
                    cursorGeneration, cursorIndex, instructionCount,
-                   std::move(writeBytes), afterGeneration, waitTimeoutMs};
+                   std::move(writeBytes), afterGeneration, waitTimeoutMs,
+                   std::move(moduleFilter), std::move(query), std::move(stringEncoding),
+                   minStringLength, cursorFingerprint, discoveryCursorInvalid};
 }
 
 bool IsAcceptedHandshakeAck(const std::string_view bytes) {
@@ -587,6 +722,12 @@ struct ResolvedLocation {
     std::optional<std::string> module;
     std::optional<duint> moduleBase;
     std::optional<duint> rva;
+};
+
+struct ModuleRecord {
+    duint base{0};
+    duint size{0};
+    std::string name;
 };
 
 struct AddressResolution {
@@ -682,6 +823,111 @@ std::string LocationJson(const ResolvedLocation& location, const std::uint64_t g
            (location.moduleBase ? JsonString(HexValue(*location.moduleBase)) : "null") +
            ",\"rva\":" + (location.rva ? JsonString(HexValue(*location.rva)) : "null") +
            ",\"state_generation\":" + std::to_string(generation) + "}";
+}
+
+std::optional<std::vector<ModuleRecord>> CaptureModuleRecords() {
+    ListInfo list{};
+    if (!Script::Module::GetList(&list)) return std::nullopt;
+    struct Guard {
+        void* value;
+        ~Guard() { if (value != nullptr) BridgeFree(value); }
+    } guard{list.data};
+    if (list.count < 0 || list.count > 65536 || (list.count > 0 && list.data == nullptr) ||
+        list.size != static_cast<std::size_t>(list.count) * sizeof(Script::Module::ModuleInfo)) {
+        return std::nullopt;
+    }
+    const auto* source = static_cast<const Script::Module::ModuleInfo*>(list.data);
+    std::vector<ModuleRecord> result;
+    result.reserve(static_cast<std::size_t>(list.count));
+    for (int index = 0; index < list.count; ++index) {
+        const auto& module = source[index];
+        result.push_back(ModuleRecord{module.base, module.size,
+                                      std::string(module.name,
+                                                  strnlen_s(module.name, sizeof(module.name)))});
+    }
+    return result;
+}
+
+std::optional<ModuleRecord> UniqueModule(const std::vector<ModuleRecord>& modules,
+                                         const std::string_view name) {
+    std::optional<ModuleRecord> match;
+    for (const auto& module : modules) {
+        if (Utf8OrdinalEqualsIgnoreCase(module.name, name)) {
+            if (match) return std::nullopt;
+            match = module;
+        }
+    }
+    return match;
+}
+
+ResolvedLocation LocationFromModules(const duint address,
+                                     const std::vector<ModuleRecord>& modules) {
+    ResolvedLocation result{};
+    result.address = address;
+    const ModuleRecord* match = nullptr;
+    for (const auto& module : modules) {
+        if (address >= module.base && address - module.base < module.size) {
+            if (match != nullptr) return result;
+            match = &module;
+        }
+    }
+    if (match != nullptr) {
+        result.module = match->name;
+        result.moduleBase = match->base;
+        result.rva = address - match->base;
+    }
+    return result;
+}
+
+std::string DiscoveryCursor(const Request& request, const std::uint64_t generation,
+                            const std::size_t index) {
+    std::ostringstream cursor;
+    cursor << "v2:" << generation << ':' << std::hex << std::nouppercase
+           << request.cursorFingerprint.value_or(0U) << ':' << std::dec << index;
+    return cursor.str();
+}
+
+struct StringCandidate {
+    std::size_t offset{0};
+    std::size_t byteLength{0};
+    std::string text;
+    const char* encoding{"ascii_utf8"};
+    bool truncated{false};
+    std::size_t key{0};
+    std::size_t matchOffset{0};
+    std::size_t textOffset{0};
+};
+
+struct StringContext {
+    std::string text;
+    std::size_t offset{0};
+    bool truncated{false};
+};
+
+StringContext ContextAroundUtf8Match(const std::string_view value,
+                                     const std::size_t matchOffset) {
+    constexpr std::size_t kMaxBytes = 512U;
+    constexpr std::size_t kPrefixBytes = 128U;
+    std::size_t start = matchOffset > kPrefixBytes ? matchOffset - kPrefixBytes : 0U;
+    while (start < value.size() &&
+           (static_cast<unsigned char>(value[start]) & 0xc0U) == 0x80U) ++start;
+    std::size_t end = (std::min)(value.size(), start + kMaxBytes);
+    while (end > start && !IsValidUtf8(value.substr(start, end - start))) --end;
+    return {std::string(value.substr(start, end - start)), start,
+            start != 0U || end != value.size()};
+}
+
+std::optional<std::string> Utf16ToUtf8(const std::span<const wchar_t> value) {
+    if (value.empty() || value.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+        return std::nullopt;
+    const int inputLength = static_cast<int>(value.size());
+    const int required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+                                              inputLength, nullptr, 0, nullptr, nullptr);
+    if (required <= 0) return std::nullopt;
+    std::string result(static_cast<std::size_t>(required), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), inputLength,
+                            result.data(), required, nullptr, nullptr) != required) return std::nullopt;
+    return result;
 }
 
 std::optional<duint> RegisterValue(const REGISTERCONTEXT_AVX512& context,
@@ -1063,7 +1309,8 @@ void Runtime::Worker() noexcept {
                                            parsed->method == "memory.write" ||
                                            parsed->method == "breakpoints.set" ||
                                            parsed->method == "breakpoints.remove" ||
-                                           parsed->method == "disassembly.read";
+                                           parsed->method == "disassembly.read" ||
+                                           parsed->method == "references.to";
                 std::optional<ResolvedLocation> resolvedLocation;
                 std::uint64_t resolvedGeneration = 0;
                 if (addressMethod) {
@@ -1084,6 +1331,11 @@ void Runtime::Worker() noexcept {
                                              "debugger changed during address resolution", true,
                                              false);
                     }
+                }
+                if (IsDiscoveryMethod(parsed->method) && parsed->discoveryCursorInvalid) {
+                    return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                         "cursor does not match the discovery filters", false,
+                                         false);
                 }
                 if (parsed->method == "address.resolve") {
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
@@ -1182,7 +1434,12 @@ void Runtime::Worker() noexcept {
                                              "debugger command queue rejected the operation", true,
                                              false);
                     }
-                    if (!WaitForState(expected, before, requestDeadline)) {
+                    const bool isStep = parsed->method == "debugger.step_into" ||
+                                        parsed->method == "debugger.step_over";
+                    const bool outcomeConfirmed =
+                        isStep ? WaitForPauseReason(PauseReasonKind::step, before, requestDeadline)
+                               : WaitForState(expected, before, requestDeadline);
+                    if (!outcomeConfirmed) {
                         return ErrorResponse(*parsed, "TIMEOUT",
                                              "mutation outcome was not callback-confirmed", false,
                                              true);
@@ -1353,6 +1610,556 @@ void Runtime::Worker() noexcept {
                            ",\"state_generation\":" + std::to_string(*snapshot) +
                            ",\"status\":\"ok\",\"result\":{\"registers\":" + registers +
                            ",\"state_generation\":" + std::to_string(*snapshot) + "}}";
+                }
+                if (parsed->method == "strings.search") {
+                    const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false, false);
+                    }
+                    if (parsed->cursorGeneration && *parsed->cursorGeneration != *snapshot) {
+                        return ErrorResponse(*parsed, "STALE_CURSOR", "cursor generation is stale",
+                                             false, false);
+                    }
+                    const auto modules = CaptureModuleRecords();
+                    if (!modules) {
+                        return ErrorResponse(*parsed, "INTERNAL", "module snapshot is invalid",
+                                             true, false);
+                    }
+                    const auto module = UniqueModule(*modules, parsed->module);
+                    if (!module) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "module is missing or ambiguous", false, false);
+                    }
+                    if (module->size > (std::numeric_limits<std::size_t>::max)() / 2U) {
+                        return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                             "module is too large for string pagination", false,
+                                             false);
+                    }
+                    const std::size_t cursorKey = parsed->cursorIndex;
+                    const std::size_t scanStart = cursorKey / 2U;
+                    if (scanStart > static_cast<std::size_t>(module->size)) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT", "cursor is invalid",
+                                             false, false);
+                    }
+                    constexpr std::size_t kScanBytes = 1024U * 1024U;
+                    constexpr std::size_t kChunkBytes = 64U * 1024U;
+                    constexpr std::size_t kPageBytes = 4096U;
+                    const std::size_t remaining = static_cast<std::size_t>(module->size) - scanStart;
+                    const std::size_t scanLength = (std::min)(remaining, kScanBytes);
+                    std::vector<unsigned char> bytes(scanLength);
+                    std::vector<unsigned char> readable(scanLength, 0U);
+                    bool incomplete = false;
+                    for (std::size_t offset = 0; offset < scanLength; offset += kChunkBytes) {
+                        if (std::chrono::steady_clock::now() >= requestDeadline) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "string scan exceeded its deadline", true, false);
+                        }
+                        const std::size_t chunk = (std::min)(kChunkBytes, scanLength - offset);
+                        const duint address = module->base + static_cast<duint>(scanStart + offset);
+                        if (DbgMemRead(address, bytes.data() + offset, static_cast<duint>(chunk))) {
+                            std::fill(readable.begin() + static_cast<std::ptrdiff_t>(offset),
+                                      readable.begin() + static_cast<std::ptrdiff_t>(offset + chunk),
+                                      1U);
+                        } else {
+                            incomplete = true;
+                            for (std::size_t page = 0; page < chunk; page += kPageBytes) {
+                                const std::size_t pageSize = (std::min)(kPageBytes, chunk - page);
+                                if (DbgMemRead(address + static_cast<duint>(page),
+                                               bytes.data() + offset + page,
+                                               static_cast<duint>(pageSize))) {
+                                    std::fill(
+                                        readable.begin() +
+                                            static_cast<std::ptrdiff_t>(offset + page),
+                                        readable.begin() +
+                                            static_cast<std::ptrdiff_t>(offset + page + pageSize),
+                                        1U);
+                                }
+                            }
+                        }
+                        if (!PausedSnapshotCurrent(*snapshot)) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "debugger changed during string scan", true,
+                                                 false);
+                        }
+                    }
+                    const auto matchOffset = [parsed](const std::string_view text) {
+                        if (!IsValidUtf8(text)) return std::optional<std::size_t>{};
+                        return Utf8OrdinalFindIgnoreCase(text, parsed->query);
+                    };
+                    std::vector<StringCandidate> ascii;
+                    std::vector<StringCandidate> wide;
+                    const std::size_t retain = parsed->pageLimit + 1U;
+                    if (parsed->stringEncoding != "utf16le") {
+                        const std::string_view scannedText = bytes.empty()
+                                                                 ? std::string_view{}
+                                                                 : std::string_view(
+                                                                       reinterpret_cast<const char*>(
+                                                                           bytes.data()),
+                                                                       bytes.size());
+                        const auto printableLength = [&readable, scannedText](
+                                                         const std::size_t at) {
+                            if (readable[at] == 0U) return std::size_t{0};
+                            const auto first = static_cast<unsigned char>(scannedText[at]);
+                            if (first < 0x20U || first == 0x7fU) return std::size_t{0};
+                            const std::size_t length = Utf8SequenceLength(scannedText, at);
+                            if (length == 0U || at + length > readable.size()) return std::size_t{0};
+                            for (std::size_t index = 0; index < length; ++index) {
+                                if (readable[at + index] == 0U) return std::size_t{0};
+                            }
+                            return length;
+                        };
+                        for (std::size_t offset = 0; offset < scanLength;) {
+                            if ((offset & 0xffffU) == 0U &&
+                                std::chrono::steady_clock::now() >= requestDeadline) {
+                                return ErrorResponse(*parsed, "TIMEOUT",
+                                                     "string extraction exceeded its deadline",
+                                                     true, false);
+                            }
+                            if ((offset & 0xffffU) == 0U &&
+                                !PausedSnapshotCurrent(*snapshot)) {
+                                return ErrorResponse(*parsed, "BUSY",
+                                                     "debugger changed during string extraction",
+                                                     true, false);
+                            }
+                            if (printableLength(offset) == 0U) { ++offset; continue; }
+                            const std::size_t begin = offset;
+                            std::size_t characterCount = 0U;
+                            std::size_t nextCheck = 64U * 1024U;
+                            while (offset < scanLength) {
+                                const std::size_t sequenceLength = printableLength(offset);
+                                if (sequenceLength == 0U) break;
+                                offset += sequenceLength;
+                                ++characterCount;
+                                if (offset - begin >= nextCheck) {
+                                    if (std::chrono::steady_clock::now() >= requestDeadline) {
+                                        return ErrorResponse(
+                                            *parsed, "TIMEOUT",
+                                            "string extraction exceeded its deadline", true,
+                                            false);
+                                    }
+                                    if (!PausedSnapshotCurrent(*snapshot)) {
+                                        return ErrorResponse(
+                                            *parsed, "BUSY",
+                                            "debugger changed during string extraction", true,
+                                            false);
+                                    }
+                                    nextCheck += 64U * 1024U;
+                                }
+                            }
+                            const std::size_t length = offset - begin;
+                            const std::size_t absoluteOffset = scanStart + begin;
+                            const std::size_t key = absoluteOffset * 2U;
+                            const std::string_view text(
+                                reinterpret_cast<const char*>(bytes.data() + begin), length);
+                            const auto match = matchOffset(text);
+                            if (characterCount >= parsed->minStringLength && key >= cursorKey &&
+                                match && ascii.size() < retain) {
+                                const auto context = ContextAroundUtf8Match(text, *match);
+                                ascii.push_back(StringCandidate{
+                                    absoluteOffset, length, context.text, "ascii_utf8",
+                                    context.truncated, key, *match, context.offset});
+                            }
+                        }
+                    }
+                    if (parsed->stringEncoding != "ascii_utf8") {
+                        for (std::size_t offset = 0; offset + 1U < scanLength;) {
+                            if ((offset & 0xffffU) == 0U &&
+                                std::chrono::steady_clock::now() >= requestDeadline) {
+                                return ErrorResponse(*parsed, "TIMEOUT",
+                                                     "string extraction exceeded its deadline",
+                                                     true, false);
+                            }
+                            if ((offset & 0xffffU) == 0U &&
+                                !PausedSnapshotCurrent(*snapshot)) {
+                                return ErrorResponse(*parsed, "BUSY",
+                                                     "debugger changed during string extraction",
+                                                     true, false);
+                            }
+                            const std::size_t absoluteOffset = scanStart + offset;
+                            if ((absoluteOffset & 1U) != 0U || readable[offset] == 0U ||
+                                readable[offset + 1U] == 0U) { ++offset; continue; }
+                            const auto unitAt = [&bytes](const std::size_t at) -> std::uint16_t {
+                                return static_cast<std::uint16_t>(
+                                    static_cast<unsigned int>(bytes[at]) |
+                                    (static_cast<unsigned int>(bytes[at + 1U]) << 8U));
+                            };
+                            const auto printableUnits = [&readable, &unitAt, scanLength](
+                                                            const std::size_t at) {
+                                if (at + 1U >= scanLength || readable[at] == 0U ||
+                                    readable[at + 1U] == 0U) return std::size_t{0};
+                                const std::uint16_t first = unitAt(at);
+                                if (first < 0x20U || first == 0x7fU ||
+                                    (first >= 0xdc00U && first <= 0xdfffU)) {
+                                    return std::size_t{0};
+                                }
+                                if (first < 0xd800U || first > 0xdbffU) return std::size_t{1};
+                                if (at + 3U >= scanLength || readable[at + 2U] == 0U ||
+                                    readable[at + 3U] == 0U) return std::size_t{0};
+                                const std::uint16_t second = unitAt(at + 2U);
+                                return second >= 0xdc00U && second <= 0xdfffU ? std::size_t{2}
+                                                                            : std::size_t{0};
+                            };
+                            if (printableUnits(offset) == 0U) { offset += 2U; continue; }
+                            const std::size_t begin = offset;
+                            std::vector<wchar_t> units;
+                            std::size_t nextCheck = 64U * 1024U;
+                            while (offset + 1U < scanLength) {
+                                const std::size_t unitCount = printableUnits(offset);
+                                if (unitCount == 0U) break;
+                                for (std::size_t index = 0; index < unitCount; ++index) {
+                                    units.push_back(
+                                        static_cast<wchar_t>(unitAt(offset + index * 2U)));
+                                }
+                                offset += unitCount * 2U;
+                                if (offset - begin >= nextCheck) {
+                                    if (std::chrono::steady_clock::now() >= requestDeadline) {
+                                        return ErrorResponse(
+                                            *parsed, "TIMEOUT",
+                                            "string extraction exceeded its deadline", true,
+                                            false);
+                                    }
+                                    if (!PausedSnapshotCurrent(*snapshot)) {
+                                        return ErrorResponse(
+                                            *parsed, "BUSY",
+                                            "debugger changed during string extraction", true,
+                                            false);
+                                    }
+                                    nextCheck += 64U * 1024U;
+                                }
+                            }
+                            const auto text = Utf16ToUtf8(units);
+                            const std::size_t key = (scanStart + begin) * 2U + 1U;
+                            const auto match = text ? matchOffset(*text)
+                                                    : std::optional<std::size_t>{};
+                            if (units.size() >= parsed->minStringLength && key >= cursorKey && text &&
+                                match && wide.size() < retain) {
+                                const auto context = ContextAroundUtf8Match(*text, *match);
+                                wide.push_back(StringCandidate{
+                                    scanStart + begin, units.size() * 2U, context.text, "utf16le",
+                                    context.truncated, key, *match, context.offset});
+                            }
+                            if (offset == begin) offset += 2U;
+                        }
+                    }
+                    std::vector<StringCandidate> candidates;
+                    candidates.reserve(ascii.size() + wide.size());
+                    std::move(ascii.begin(), ascii.end(), std::back_inserter(candidates));
+                    std::move(wide.begin(), wide.end(), std::back_inserter(candidates));
+                    std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
+                        return left.key < right.key;
+                    });
+                    const std::size_t returned = (std::min)(candidates.size(), parsed->pageLimit);
+                    std::string items = "[";
+                    for (std::size_t index = 0; index < returned; ++index) {
+                        if (index != 0U) items.push_back(',');
+                        const auto& candidate = candidates[index];
+                        const duint address = module->base + static_cast<duint>(candidate.offset);
+                        items += "{\"text\":" + JsonString(candidate.text) +
+                                 ",\"encoding\":" + JsonString(candidate.encoding) +
+                                 ",\"byte_length\":" + std::to_string(candidate.byteLength) +
+                                 ",\"match_offset\":" + std::to_string(candidate.matchOffset) +
+                                 ",\"text_offset\":" + std::to_string(candidate.textOffset) +
+                                 ",\"truncated\":" + (candidate.truncated ? "true" : "false") +
+                                 ",\"location\":" +
+                                 LocationJson(LocationFromModules(address, *modules), *snapshot) +
+                                 "}";
+                    }
+                    items += "]";
+                    const std::size_t scanEnd = scanStart + scanLength;
+                    std::string next = "null";
+                    if (candidates.size() > returned) {
+                        next = JsonString(DiscoveryCursor(*parsed, *snapshot,
+                                                          candidates[returned].key));
+                    } else if (scanEnd < static_cast<std::size_t>(module->size)) {
+                        next = JsonString(DiscoveryCursor(*parsed, *snapshot, scanEnd * 2U));
+                    }
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during string scan", true, false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"items\":" + items +
+                           ",\"next_cursor\":" + next + ",\"bytes_scanned\":" +
+                           std::to_string(scanLength) + ",\"incomplete\":" +
+                           (incomplete ? "true" : "false") +
+                           ",\"completeness\":\"known_only\",\"state_generation\":" +
+                           std::to_string(*snapshot) + "}}";
+                }
+                if (parsed->method == "symbols.search" ||
+                    parsed->method == "functions.list") {
+                    const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false, false);
+                    }
+                    if (parsed->cursorGeneration && *parsed->cursorGeneration != *snapshot) {
+                        return ErrorResponse(*parsed, "STALE_CURSOR", "cursor generation is stale",
+                                             false, false);
+                    }
+                    const auto modules = CaptureModuleRecords();
+                    if (!modules) {
+                        return ErrorResponse(*parsed, "INTERNAL", "module snapshot is invalid",
+                                             true, false);
+                    }
+                    const auto module = UniqueModule(*modules, parsed->module);
+                    if (!module) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "module is missing or ambiguous", false, false);
+                    }
+                    if (parsed->method == "symbols.search") {
+                        ListInfo list{};
+                        if (!Script::Symbol::GetList(&list)) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "symbol database is unavailable", true, false);
+                        }
+                        struct Guard { void* p; ~Guard() { if (p) BridgeFree(p); } } guard{list.data};
+                        if (list.count < 0 || list.count > 65536 ||
+                            (list.count > 0 && list.data == nullptr) ||
+                            list.size != static_cast<std::size_t>(list.count) *
+                                             sizeof(Script::Symbol::SymbolInfo)) {
+                            return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                                 "symbol database exceeds native bounds", false,
+                                                 false);
+                        }
+                        const auto* values =
+                            static_cast<const Script::Symbol::SymbolInfo*>(list.data);
+                        const std::size_t count = static_cast<std::size_t>(list.count);
+                        if (parsed->cursorIndex > count) {
+                            return ErrorResponse(*parsed, "INVALID_ARGUMENT", "cursor is invalid",
+                                                 false, false);
+                        }
+                        std::string items = "[";
+                        std::size_t index = parsed->cursorIndex;
+                        std::size_t emitted = 0;
+                        for (; index < count && emitted < parsed->pageLimit; ++index) {
+                            if ((index & 0xffU) == 0U &&
+                                std::chrono::steady_clock::now() >= requestDeadline) {
+                                return ErrorResponse(*parsed, "TIMEOUT",
+                                                     "symbol search exceeded its deadline", true,
+                                                     false);
+                            }
+                            const auto& symbol = values[index];
+                            const std::string_view symbolModule(
+                                symbol.mod, strnlen_s(symbol.mod, sizeof(symbol.mod)));
+                            const std::string_view name(
+                                symbol.name, strnlen_s(symbol.name, sizeof(symbol.name)));
+                            if (!Utf8OrdinalEqualsIgnoreCase(symbolModule, module->name) ||
+                                !Utf8OrdinalContainsIgnoreCase(name, parsed->query)) continue;
+                            if (symbol.rva >= module->size ||
+                                module->base > (std::numeric_limits<duint>::max)() - symbol.rva) {
+                                return ErrorResponse(*parsed, "INTERNAL",
+                                                     "symbol record is outside its module", false,
+                                                     false);
+                            }
+                            const char* type = symbol.type == Script::Symbol::Function
+                                                   ? "function"
+                                                   : symbol.type == Script::Symbol::Import
+                                                         ? "import"
+                                                         : "export";
+                            if (emitted++ != 0U) items.push_back(',');
+                            const auto location = LocationFromModules(module->base + symbol.rva,
+                                                                      *modules);
+                            items += "{\"name\":" + JsonString(name) + ",\"type\":" +
+                                     JsonString(type) + ",\"manual\":" +
+                                     (symbol.manual ? "true" : "false") + ",\"location\":" +
+                                     LocationJson(location, *snapshot) + "}";
+                        }
+                        items += "]";
+                        const std::string next = index < count
+                                                     ? JsonString(DiscoveryCursor(*parsed, *snapshot,
+                                                                                  index))
+                                                     : "null";
+                        if (!PausedSnapshotCurrent(*snapshot)) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "debugger changed during symbol search", true,
+                                                 false);
+                        }
+                        return "{\"request_id\":" + JsonString(parsed->requestId) +
+                               ",\"state_generation\":" + std::to_string(*snapshot) +
+                               ",\"status\":\"ok\",\"result\":{\"items\":" + items +
+                               ",\"next_cursor\":" + next +
+                               ",\"completeness\":\"known_only\",\"state_generation\":" +
+                               std::to_string(*snapshot) + "}}";
+                    }
+
+                    ListInfo functionList{};
+                    if (!Script::Function::GetList(&functionList)) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "function database is unavailable", true, false);
+                    }
+                    struct FunctionGuard { void* p; ~FunctionGuard() { if (p) BridgeFree(p); } }
+                        functionGuard{functionList.data};
+                    if (functionList.count < 0 || functionList.count > 65536 ||
+                        (functionList.count > 0 && functionList.data == nullptr) ||
+                        functionList.size != static_cast<std::size_t>(functionList.count) *
+                                                 sizeof(Script::Function::FunctionInfo)) {
+                        return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                             "function database exceeds native bounds", false,
+                                             false);
+                    }
+                    std::unordered_map<duint, std::string> names;
+                    ListInfo symbolList{};
+                    if (Script::Symbol::GetList(&symbolList)) {
+                        struct SymbolGuard { void* p; ~SymbolGuard() { if (p) BridgeFree(p); } }
+                            symbolGuard{symbolList.data};
+                        if (symbolList.count < 0 || symbolList.count > 65536 ||
+                            (symbolList.count > 0 && symbolList.data == nullptr) ||
+                            symbolList.size != static_cast<std::size_t>(symbolList.count) *
+                                                   sizeof(Script::Symbol::SymbolInfo)) {
+                            return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                                 "symbol database exceeds native bounds", false,
+                                                 false);
+                        }
+                        const auto* symbols =
+                            static_cast<const Script::Symbol::SymbolInfo*>(symbolList.data);
+                        for (int i = 0; i < symbolList.count; ++i) {
+                            if ((i & 0xff) == 0 &&
+                                std::chrono::steady_clock::now() >= requestDeadline) {
+                                return ErrorResponse(*parsed, "TIMEOUT",
+                                                     "function name join exceeded its deadline",
+                                                     true, false);
+                            }
+                            const auto& symbol = symbols[i];
+                            const std::string_view symbolModule(
+                                symbol.mod, strnlen_s(symbol.mod, sizeof(symbol.mod)));
+                            if (symbol.type == Script::Symbol::Function &&
+                                Utf8OrdinalEqualsIgnoreCase(symbolModule, module->name)) {
+                                names.try_emplace(symbol.rva, symbol.name,
+                                                  strnlen_s(symbol.name, sizeof(symbol.name)));
+                            }
+                        }
+                    }
+                    const auto* values =
+                        static_cast<const Script::Function::FunctionInfo*>(functionList.data);
+                    const std::size_t count = static_cast<std::size_t>(functionList.count);
+                    if (parsed->cursorIndex > count) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT", "cursor is invalid",
+                                             false, false);
+                    }
+                    std::string items = "[";
+                    std::size_t index = parsed->cursorIndex;
+                    std::size_t emitted = 0;
+                    for (; index < count && emitted < parsed->pageLimit; ++index) {
+                        if ((index & 0xffU) == 0U &&
+                            std::chrono::steady_clock::now() >= requestDeadline) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "function search exceeded its deadline", true,
+                                                 false);
+                        }
+                        const auto& function = values[index];
+                        const std::string_view functionModule(
+                            function.mod, strnlen_s(function.mod, sizeof(function.mod)));
+                        if (!Utf8OrdinalEqualsIgnoreCase(functionModule, module->name) ||
+                            function.rvaStart > function.rvaEnd ||
+                            function.rvaEnd >= module->size) continue;
+                        if (module->base > (std::numeric_limits<duint>::max)() -
+                                               function.rvaEnd) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "function record is outside its module", false,
+                                                 false);
+                        }
+                        const auto named = names.find(function.rvaStart);
+                        if (!parsed->query.empty() &&
+                            (named == names.end() ||
+                             !Utf8OrdinalContainsIgnoreCase(named->second, parsed->query))) continue;
+                        if (emitted++ != 0U) items.push_back(',');
+                        const auto start = LocationFromModules(module->base + function.rvaStart,
+                                                               *modules);
+                        const auto end = LocationFromModules(module->base + function.rvaEnd,
+                                                             *modules);
+                        items += "{\"name\":" +
+                                 (named == names.end() ? "null" : JsonString(named->second)) +
+                                 ",\"start\":" + LocationJson(start, *snapshot) +
+                                 ",\"end_inclusive\":" + LocationJson(end, *snapshot) +
+                                 ",\"instruction_count\":" +
+                                 std::to_string(function.instructioncount) + ",\"manual\":" +
+                                 (function.manual ? "true" : "false") + "}";
+                    }
+                    items += "]";
+                    const std::string next = index < count
+                                                 ? JsonString(DiscoveryCursor(*parsed, *snapshot,
+                                                                              index))
+                                                 : "null";
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during function search", true,
+                                             false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"items\":" + items +
+                           ",\"next_cursor\":" + next +
+                           ",\"completeness\":\"known_only\",\"state_generation\":" +
+                           std::to_string(*snapshot) + "}}";
+                }
+                if (parsed->method == "references.to") {
+                    if (parsed->cursorGeneration &&
+                        *parsed->cursorGeneration != resolvedGeneration) {
+                        return ErrorResponse(*parsed, "STALE_CURSOR", "cursor generation is stale",
+                                             false, false);
+                    }
+                    const auto modules = CaptureModuleRecords();
+                    if (!modules) {
+                        return ErrorResponse(*parsed, "INTERNAL", "module snapshot is invalid",
+                                             true, false);
+                    }
+                    const std::size_t reported = DbgGetXrefCountAt(resolvedLocation->address);
+                    if (reported > 65536U) {
+                        return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                             "reference database exceeds native bounds", false,
+                                             false);
+                    }
+                    XREF_INFO info{};
+                    if (reported != 0U && !DbgXrefGet(resolvedLocation->address, &info)) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "reference database is unavailable", true, false);
+                    }
+                    struct XrefGuard { XREF_RECORD* p; ~XrefGuard() { if (p) BridgeFree(p); } }
+                        guard{info.references};
+                    if (info.refcount > 65536U || info.refcount != reported ||
+                        (info.refcount > 0U && info.references == nullptr)) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "reference snapshot is invalid", false, false);
+                    }
+                    const std::size_t count = static_cast<std::size_t>(info.refcount);
+                    if (parsed->cursorIndex > count) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT", "cursor is invalid",
+                                             false, false);
+                    }
+                    const std::size_t end =
+                        (std::min)(count, parsed->cursorIndex + parsed->pageLimit);
+                    std::string items = "[";
+                    for (std::size_t index = parsed->cursorIndex; index < end; ++index) {
+                        if (index != parsed->cursorIndex) items.push_back(',');
+                        const auto& reference = info.references[index];
+                        const char* type = reference.type == XREF_CALL
+                                               ? "call"
+                                               : reference.type == XREF_JMP ? "jump" : "data";
+                        items += "{\"from\":" +
+                                 LocationJson(LocationFromModules(reference.addr, *modules),
+                                              resolvedGeneration) +
+                                 ",\"type\":" + JsonString(type) + "}";
+                    }
+                    items += "]";
+                    const std::string next = end < count
+                                                 ? JsonString(DiscoveryCursor(*parsed,
+                                                                              resolvedGeneration,
+                                                                              end))
+                                                 : "null";
+                    if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during reference search", true,
+                                             false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(resolvedGeneration) +
+                           ",\"status\":\"ok\",\"result\":{\"target\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"items\":" + items + ",\"next_cursor\":" + next +
+                           ",\"completeness\":\"known_only\",\"state_generation\":" +
+                           std::to_string(resolvedGeneration) + "}}";
                 }
                 if (parsed->method == "threads.list") {
                     const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
@@ -1804,6 +2611,18 @@ bool Runtime::WaitForState(const DebuggeeState expected, const std::uint64_t aft
     }) &&
            pluginState_.load() == PluginState::ready &&
            ObservedGeneration(expected) > afterGeneration;
+}
+
+bool Runtime::WaitForPauseReason(const PauseReasonKind reason,
+                                 const std::uint64_t afterGeneration,
+                                 const std::chrono::steady_clock::time_point deadline) noexcept {
+    std::unique_lock lock(stateMutex_);
+    return stateChanged_.wait_until(lock, deadline, [this, reason, afterGeneration] {
+        return pluginState_.load() != PluginState::ready ||
+               (pausedGeneration_.load() > afterGeneration && latestPause_.kind == reason);
+    }) &&
+           pluginState_.load() == PluginState::ready &&
+           pausedGeneration_.load() > afterGeneration && latestPause_.kind == reason;
 }
 
 bool Runtime::WaitForActionableLaunchPause(

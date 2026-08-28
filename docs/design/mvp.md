@@ -133,7 +133,7 @@ inspect them; malformed MCP/JSON-RPC calls use standard JSON-RPC errors.
 
 Stable backend codes include `UNAUTHENTICATED`, `INVALID_ARGUMENT`,
 `INVALID_DEBUGGER_STATE`, `NO_DEBUGGEE`, `NOT_FOUND`, `ACCESS_DENIED`,
-`REQUEST_TOO_LARGE`, `OUTPUT_LIMIT_EXCEEDED`, `BUSY`, `TIMEOUT`, `CANCELLED`,
+`REQUEST_TOO_LARGE`, `OUTPUT_LIMIT_EXCEEDED`, `STALE_CURSOR`, `BUSY`, `TIMEOUT`, `CANCELLED`,
 `PLUGIN_UNAVAILABLE`, `VERSION_MISMATCH`, `INSTANCE_ALREADY_RUNNING`,
 `OPERATION_ID_CONFLICT`, `UNSUPPORTED`, and `INTERNAL`. Internal errors expose a
 correlation ID, never stack traces or raw OS error text.
@@ -170,6 +170,10 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `breakpoints.remove` | mutate | paused | Remove backend-observed breakpoint by address/type |
 | `disassembly.read` | read | paused | At most 256 decoded instructions from an address |
 | `expression.evaluate` | read | paused | Evaluate x64dbg expression; no command execution |
+| `symbols.search` | read | paused | Search up to 65,536 retained symbols with bounded, filter-bound pagination |
+| `functions.list` | read | paused | List retained analyzed functions and exact-start symbol names; known-only |
+| `strings.search` | read | paused | Scan at most 1 MiB per request for bounded ASCII/UTF-8 or UTF-16LE strings |
+| `references.to` | read | paused | Paginate up to 65,536 retained inbound xrefs for an address |
 
 Every mutating tool requires `operation_id` as a canonical lowercase UUID. Arbitrary debugger
 command execution, process launch/attach, file upload/download, scripting, shell

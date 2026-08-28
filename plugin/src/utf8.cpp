@@ -113,6 +113,20 @@ std::string JsonString(const std::string_view value) {
     return result;
 }
 
+bool IsValidUtf8(const std::string_view value) noexcept {
+    for (std::size_t offset = 0; offset < value.size();) {
+        const std::size_t length = ValidSequenceLength(value, offset);
+        if (length == 0U) return false;
+        offset += length;
+    }
+    return true;
+}
+
+std::size_t Utf8SequenceLength(const std::string_view value,
+                               const std::size_t offset) noexcept {
+    return offset < value.size() ? ValidSequenceLength(value, offset) : 0U;
+}
+
 bool Utf8OrdinalEqualsIgnoreCase(const std::string_view left,
                                  const std::string_view right) noexcept {
     try {
@@ -126,6 +140,33 @@ bool Utf8OrdinalEqualsIgnoreCase(const std::string_view left,
                CSTR_EQUAL;
     } catch (...) {
         return false;
+    }
+}
+
+bool Utf8OrdinalContainsIgnoreCase(const std::string_view haystack,
+                                   const std::string_view needle) noexcept {
+    return Utf8OrdinalFindIgnoreCase(haystack, needle).has_value();
+}
+
+std::optional<std::size_t> Utf8OrdinalFindIgnoreCase(const std::string_view haystack,
+                                                     const std::string_view needle) noexcept {
+    if (needle.empty()) return 0U;
+    try {
+        const auto wideHaystack = ToWide(haystack);
+        const auto wideNeedle = ToWide(needle);
+        if (!wideHaystack || !wideNeedle) return std::nullopt;
+        const int found = FindNLSStringEx(
+            LOCALE_NAME_INVARIANT, FIND_FROMSTART | NORM_IGNORECASE, wideHaystack->data(),
+            static_cast<int>(wideHaystack->size()), wideNeedle->data(),
+            static_cast<int>(wideNeedle->size()), nullptr, nullptr, nullptr, 0);
+        if (found < 0) return std::nullopt;
+        if (found == 0) return 0U;
+        const int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wideHaystack->data(),
+                                               found, nullptr, 0, nullptr, nullptr);
+        return bytes <= 0 ? std::nullopt
+                          : std::optional<std::size_t>(static_cast<std::size_t>(bytes));
+    } catch (...) {
+        return std::nullopt;
     }
 }
 

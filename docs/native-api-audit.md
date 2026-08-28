@@ -80,3 +80,19 @@ injects a sidecar crash for both architectures and verifies bounded plugin stop.
 
 Any new native API requires updating this table and adding state, bound,
 allocation, timeout, and unload tests.
+
+## Accepted but not yet enabled: ADR 0007 discovery
+
+The next stage may enable only the following read paths after their ownership and bound tests
+land:
+
+| Planned tool | Native API | Required state | Planned ownership and bound |
+|---|---|---|---|
+| `symbols.search` | `Script::Symbol::GetList` | paused | `BridgeFree(list.data)`; reject count above 65,536; inspect at most that count |
+| `functions.list` | `Script::Function::GetList` | paused | `BridgeFree(list.data)`; reject count above 65,536; join only copied bounded symbols |
+| `strings.search` | `DbgMemRead` | paused | caller-owned chunks at most 64 KiB; at most 1 MiB scanned per call |
+| `references.to` | `DbgXrefGet` | paused | `BridgeFree(info.references)`; reject count above 65,536 |
+
+These entries are not an authorization to expose a tool before ADR 0007 schemas, generation and
+deadline checks, filter-bound cursors, UTF-8 handling, and dual-architecture tests pass. No GUI
+reference API or analysis-triggering command is permitted.

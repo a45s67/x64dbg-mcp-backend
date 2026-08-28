@@ -1,0 +1,22 @@
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"error\":{\"code\":\"PLUGIN_UNAVAILABLE\",\"details\":{},\"message\":\"x64dbg plugin is not connected\",\"retryable\":true},\"ok\":false}"
+      }
+    ],
+    "structuredContent": {
+      "ok": false,
+      "error": {
+        "code": "PLUGIN_UNAVAILABLE",
+        "message": "x64dbg plugin is not connected",
+        "retryable": true,
+        "details": {}
+      }
+    },
+    "isError": true
+  }
+}

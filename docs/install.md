@@ -1,0 +1,111 @@
+# Install and connect
+
+## Release installation
+
+Extract the release ZIP, then run PowerShell from its top-level directory:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
+  -X64dbgRoot C:\tools\x64dbg
+```
+
+The installer verifies that both x32 and x64 debugger directories exist, copies
+the matching `.dp32` and `.dp64` plugins, installs the shared static sidecar, and
+creates two protected TOML files. It generates one cryptographically random
+48-byte bearer secret and prints it once. Store that value in the client's secret
+manager; do not put it in source control or command-line arguments.
+
+Default endpoints are:
+
+- x32dbg: `http://127.0.0.1:43132/mcp`
+- x64dbg: `http://127.0.0.1:43164/mcp`
+
+Use `-X32Port` and `-X64Port` to select different, non-equal ports. Start the
+desired debugger normally. Its plugin launches the sidecar automatically after
+plugin initialization. Closing or unloading the debugger plugin shuts down its
+sidecar; there is no detached server process to start separately.
+
+Never install the x32 and x64 backends on the same port. The MVP permits one
+debugger instance per backend type, so a second x32dbg or x64dbg instance reports
+an explicit single-instance failure.
+
+## Verify health
+
+Liveness intentionally needs no token:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:43164/health/live
+```
+
+Readiness proves that the authenticated plugin IPC connection works:
+
+```powershell
+$headers = @{ Authorization = "Bearer $env:X64DBG_MCP_CLIENT_TOKEN" }
+Invoke-RestMethod http://127.0.0.1:43164/health/ready -Headers $headers
+```
+
+The readiness endpoint returns 503 until the matching debugger and plugin are
+ready. It does not expose the token or target path.
+
+## Codex direct connection
+
+Put the token in an environment variable inherited by Codex, then register either
+or both Streamable HTTP endpoints. The current Codex CLI exposes these flags via
+`codex mcp add --help`:
+
+```powershell
+$env:X64DBG_MCP_CLIENT_TOKEN = '<token printed by installer>'
+codex mcp add x64dbg --url http://127.0.0.1:43164/mcp `
+  --bearer-token-env-var X64DBG_MCP_CLIENT_TOKEN
+codex mcp add x32dbg --url http://127.0.0.1:43132/mcp `
+  --bearer-token-env-var X64DBG_MCP_CLIENT_TOKEN
+codex mcp list
+```
+
+Restart an already-running Codex process after changing its environment. Opening
+x64dbg/x32dbg is what starts the backend; Codex connects to the selected endpoint
+afterward.
+
+## Dynamic Analysis Gateway
+
+Register each endpoint as a separate Streamable HTTP backend and configure the
+same bearer token through the Gateway's secret facility. Use distinct backend
+identities such as `x64dbg` and `x32dbg`. The backend publishes local names such as
+`debugger.state`; the Gateway adds its dotted namespace. Do not pre-prefix the
+tool names in this backend.
+
+The Gateway integration must preserve these transport properties:
+
+- HTTP POST endpoint `/mcp`, MCP protocol `2025-06-18`;
+- `Authorization: Bearer <token>` on MCP and readiness requests;
+- `Content-Type: application/json` and an `Accept` value allowing
+  `application/json`;
+- no automatic retry of tools whose `readOnlyHint` is false;
+- the caller-generated `operation_id` must remain unchanged if the Gateway asks
+  for the recorded result of an ambiguous mutation.
+
+## Manual and diagnostic launch
+
+Manual sidecar launch without `--pipe` is supported only as a disconnected MCP
+server for contract diagnostics. It cannot control a debugger. Configuration is
+loaded from `--config <path>`, then overlaid by `X64DBG_MCP_*` environment
+variables. Tokens are deliberately not accepted as command-line flags.
+
+The complete settings and hard caps are documented in
+[`design/mvp.md`](design/mvp.md). Browser requests with an `Origin` header are
+denied unless the exact origin appears in `allowed_origins`; CORS is not enabled
+implicitly.
+
+## Uninstall
+
+Close both debuggers, then remove only these installed files:
+
+```text
+x32/plugins/x64dbg-mcp-backend.dp32
+x64/plugins/x64dbg-mcp-backend.dp64
+server/x64dbg-mcp-server.exe
+server/x64dbg-mcp-server-x32.toml
+server/x64dbg-mcp-server-x64.toml
+```
+
+The installer does not modify other plugins or x64dbg configuration.

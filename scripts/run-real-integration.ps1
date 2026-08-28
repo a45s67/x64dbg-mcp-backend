@@ -96,6 +96,12 @@ try {
     if ($ready.status -ne 'ready') {
         throw 'Sidecar did not become ready through the isolated debugger plugin.'
     }
+    if ($ready.debugger_state -ne 'absent' -or $ready.diagnostic_code -ne 'NO_DEBUGGEE' -or
+        @($ready.next_actions).Count -ne 1 -or
+        $ready.next_actions[0].code -ne 'CALL_DEBUGGEE_LAUNCH' -or
+        $ready.next_actions[0].tool -ne 'debuggee.launch') {
+        throw 'Readiness did not advertise the bounded absent-debuggee launch action.'
+    }
     Write-Verbose 'Sidecar is ready'
 
     $null = Invoke-Mcp 'initialize' @{
@@ -104,6 +110,11 @@ try {
     $beforeLaunch = Invoke-Tool 'debugger.state' @{} 2
     if ($beforeLaunch.debuggee_state -ne 'absent') {
         throw "Isolated debugger did not start without a debuggee; actual=$($beforeLaunch.debuggee_state)"
+    }
+    if ($beforeLaunch.diagnostic_code -ne 'NO_DEBUGGEE' -or
+        @($beforeLaunch.next_actions).Count -ne 1 -or
+        $beforeLaunch.next_actions[0].tool -ne 'debuggee.launch') {
+        throw 'debugger.state did not advertise the absent-debuggee launch action.'
     }
     $invalidLaunch = Invoke-Mcp 'tools/call' @{
         name = 'debuggee.launch'
@@ -124,6 +135,9 @@ try {
     $state = Invoke-Tool 'debugger.state' @{} 5
     if ($state.debuggee_state -ne 'paused') {
         throw "Fixture did not reach paused state; actual=$($state.debuggee_state)"
+    }
+    if ($null -ne $state.diagnostic_code -or @($state.next_actions).Count -ne 0) {
+        throw 'Paused debugger.state retained a stale bootstrap diagnostic.'
     }
     Write-Verbose 'Debuggee is paused'
 
@@ -428,6 +442,8 @@ try {
         compact_snapshot_instructions = @($compactSnapshot.disassembly).Count
         filtered_executable_regions = @($filteredMap.items).Count
         snapshot_generations_present = $true
+        bootstrap_launch_action_advertised = $true
+        paused_diagnostic_cleared = $true
         address_snapshot_generations_equal = $true
         cursor_generation_matches = $true
         stale_cursor_rejected = $true

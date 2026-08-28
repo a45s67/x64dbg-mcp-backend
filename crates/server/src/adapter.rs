@@ -70,7 +70,9 @@ impl DebuggerAdapter for FakeAdapter {
                 "process_id": 4242,
                 "active_thread_id": 4343,
                 "instruction_pointer": "0x0000000140001000",
-                "pause_reason": { "kind": "breakpoint", "address": "0x0000000140001000" }
+                "pause_reason": { "kind": "breakpoint", "address": "0x0000000140001000" },
+                "diagnostic_code": null,
+                "next_actions": []
             })),
             "debugger.wait_for_pause" => Ok(json!({
                 "debuggee_state": "paused",
@@ -115,6 +117,46 @@ impl DebuggerAdapter for FakeAdapter {
                 retryable: false,
                 details: json!({ "tool": name }),
             }),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct FakeAbsentAdapter;
+
+#[cfg(test)]
+#[async_trait]
+impl DebuggerAdapter for FakeAbsentAdapter {
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    async fn call(&self, name: &str, _arguments: &Value) -> Result<Value, ToolError> {
+        if name == "debugger.state" {
+            Ok(json!({
+                "backend": "x64dbg",
+                "plugin_state": "ready",
+                "debuggee_state": "absent",
+                "state_generation": 1,
+                "architecture": "x86_64",
+                "process_id": null,
+                "active_thread_id": null,
+                "instruction_pointer": null,
+                "pause_reason": null,
+                "diagnostic_code": "NO_DEBUGGEE",
+                "next_actions": [{
+                    "code": "CALL_DEBUGGEE_LAUNCH",
+                    "tool": "debuggee.launch"
+                }]
+            }))
+        } else {
+            Err(ToolError {
+                code: "UNSUPPORTED",
+                message: "tool is not implemented by the fake adapter",
+                retryable: false,
+                details: json!({ "tool": name }),
+            })
         }
     }
 }

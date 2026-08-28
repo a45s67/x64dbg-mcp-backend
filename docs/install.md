@@ -40,12 +40,19 @@ Invoke-RestMethod http://127.0.0.1:43164/health/live
 Readiness proves that the authenticated plugin IPC connection works:
 
 ```powershell
-$headers = @{ Authorization = "Bearer $env:X64DBG_MCP_CLIENT_TOKEN" }
+$headers = @{ Authorization = 'Bearer <token from server\x64dbg-mcp-server-x64.toml>' }
 Invoke-RestMethod http://127.0.0.1:43164/health/ready -Headers $headers
 ```
 
 The readiness endpoint returns 503 until the matching debugger and plugin are
-ready. It does not expose the token or target path.
+ready. Once the plugin is connected it returns 200 even when no debuggee is
+loaded; that state reports `diagnostic_code` as `NO_DEBUGGEE` and points
+`next_actions` to the explicit `debuggee.launch` tool. It does not expose the
+token or target path.
+
+The MVP owns one connected debugger instance per backend type. To load a target
+into that instance, call `debuggee.launch` or use the same debugger UI. Starting
+a second x64dbg/x32dbg process is not a target-handoff mechanism.
 
 ## Codex direct connection
 

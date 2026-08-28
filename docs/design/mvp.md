@@ -101,6 +101,8 @@ Otherwise HTTP 503. Response is bounded and contains no target path or token:
   "backend":"x64dbg",
   "plugin_connected":true,
   "debugger_state":"paused",
+  "diagnostic_code":null,
+  "next_actions":[],
   "protocol_version":"2025-06-18",
   "version":"0.1.0"
 }
@@ -111,6 +113,13 @@ body and `WWW-Authenticate: Bearer`; authorization data is never logged.
 All JSON health and structured HTTP error responses also declare
 `application/json; charset=utf-8` for compatibility with clients that do not
 apply JSON's UTF-8 default correctly.
+
+When the plugin is connected without a debuggee, readiness remains HTTP 200 and reports
+`diagnostic_code: "NO_DEBUGGEE"` with the single non-executing action hint
+`{"code":"CALL_DEBUGGEE_LAUNCH","tool":"debuggee.launch"}`. A disconnected diagnostic
+sidecar returns HTTP 503 with `PLUGIN_DISCONNECTED` and `START_DEBUGGER_WITH_PLUGIN`.
+Structured HTTP errors always contain bounded `details`; media-type and protocol validation
+errors list their accepted values as specified by ADR 0010.
 
 ### Tool result and error envelope
 

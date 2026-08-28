@@ -83,6 +83,11 @@ structured content). A callback during collection returns `BUSY` with
 `retryable: true`; no mixed-generation result is emitted. Pagination cursor
 generation must equal the checked result generation.
 
+`debugger.state` also returns bounded `diagnostic_code` and `next_actions` fields.
+The absent or exited state advertises `NO_DEBUGGEE` and the exact `debuggee.launch` tool;
+other connected states return `null` and an empty array. These hints are data only
+and never cause an IPC request or mutation by themselves.
+
 ## Response
 
 Success:

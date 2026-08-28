@@ -2771,6 +2771,14 @@ std::string Runtime::StateResponse(const std::string& requestId) {
            ",\"instruction_pointer\":" + instructionPointer +
            ",\"pause_reason\":" +
            (state == DebuggeeState::paused ? PauseReasonJson(pause) : "null") +
+           ",\"diagnostic_code\":" +
+           (state == DebuggeeState::absent || state == DebuggeeState::exited
+                ? "\"NO_DEBUGGEE\""
+                : "null") +
+           ",\"next_actions\":" +
+           (state == DebuggeeState::absent || state == DebuggeeState::exited
+                ? "[{\"code\":\"CALL_DEBUGGEE_LAUNCH\",\"tool\":\"debuggee.launch\"}]"
+                : "[]") +
            ",\"state_generation\":" + std::to_string(generation) + "}}";
 }
 

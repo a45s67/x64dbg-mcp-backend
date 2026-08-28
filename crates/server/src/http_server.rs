@@ -140,11 +140,25 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Result<Resp
     let Ok(snapshot) = state.adapter.call("debugger.state", &json!({})).await else {
         return Ok(not_ready());
     };
+    let debuggee_state = snapshot
+        .get("debuggee_state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let (diagnostic_code, next_actions) = if matches!(debuggee_state, "absent" | "exited") {
+        (
+            json!("NO_DEBUGGEE"),
+            json!([{ "code": "CALL_DEBUGGEE_LAUNCH", "tool": "debuggee.launch" }]),
+        )
+    } else {
+        (serde_json::Value::Null, json!([]))
+    };
     let mut response = Json(json!({
         "status": "ready",
         "backend": snapshot.get("backend").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
         "plugin_connected": true,
-        "debugger_state": snapshot.get("debuggee_state").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
+        "debugger_state": debuggee_state,
+        "diagnostic_code": diagnostic_code,
+        "next_actions": next_actions,
         "protocol_version": "2025-06-18",
         "version": env!("CARGO_PKG_VERSION")
     }))
@@ -158,7 +172,9 @@ fn not_ready() -> Response {
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({
             "status": "not_ready",
-            "plugin_connected": false
+            "plugin_connected": false,
+            "diagnostic_code": "PLUGIN_DISCONNECTED",
+            "next_actions": [{ "code": "START_DEBUGGER_WITH_PLUGIN" }]
         })),
     )
         .into_response();
@@ -203,11 +219,14 @@ fn require_protocol_version(headers: &HeaderMap) -> Result<(), HttpError> {
     let valid = headers
         .get("mcp-protocol-version")
         .is_none_or(|value| value.as_bytes() == b"2025-06-18");
-    valid.then_some(()).ok_or(HttpError::new(
-        StatusCode::BAD_REQUEST,
-        "INVALID_PROTOCOL_VERSION",
-        "unsupported MCP protocol version",
-    ))
+    valid.then_some(()).ok_or_else(|| {
+        HttpError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_PROTOCOL_VERSION",
+            "unsupported MCP protocol version",
+        )
+        .with_details(json!({ "supported_versions": ["2025-06-18"] }))
+    })
 }
 
 fn authorize_origin(state: &AppState, headers: &HeaderMap) -> Result<(), HttpError> {
@@ -264,11 +283,14 @@ fn require_json_content_type(headers: &HeaderMap) -> Result<(), HttpError> {
                 .next()
                 .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
         });
-    valid.then_some(()).ok_or(HttpError::new(
-        StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        "INVALID_CONTENT_TYPE",
-        "Content-Type must be application/json",
-    ))
+    valid.then_some(()).ok_or_else(|| {
+        HttpError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "INVALID_CONTENT_TYPE",
+            "Content-Type must be application/json",
+        )
+        .with_details(json!({ "accepted_media_types": ["application/json"] }))
+    })
 }
 
 fn require_json_accept(headers: &HeaderMap) -> Result<(), HttpError> {
@@ -282,11 +304,16 @@ fn require_json_accept(headers: &HeaderMap) -> Result<(), HttpError> {
                 mime == "*/*" || mime.eq_ignore_ascii_case("application/json")
             })
         });
-    valid.then_some(()).ok_or(HttpError::new(
-        StatusCode::NOT_ACCEPTABLE,
-        "INVALID_ACCEPT",
-        "Accept must allow application/json",
-    ))
+    valid.then_some(()).ok_or_else(|| {
+        HttpError::new(
+            StatusCode::NOT_ACCEPTABLE,
+            "INVALID_ACCEPT",
+            "Accept must allow application/json",
+        )
+        .with_details(json!({
+            "accepted_media_types": ["application/json", "*/*"]
+        }))
+    })
 }
 
 fn acquire(state: &AppState) -> Result<OwnedSemaphorePermit, HttpError> {
@@ -314,7 +341,10 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{AppState, JSON_UTF8, bound_response, router};
-    use crate::{adapter::FakeAdapter, config::Config};
+    use crate::{
+        adapter::{FakeAbsentAdapter, FakeAdapter},
+        config::Config,
+    };
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
@@ -371,6 +401,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["debugger_state"], "paused");
+        assert!(value["diagnostic_code"].is_null());
+        assert_eq!(value["next_actions"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn authenticated_absent_debuggee_advertises_explicit_launch_action() {
+        let app = router(AppState::with_adapter(
+            Arc::new(Config::for_test(TOKEN)),
+            Arc::new(FakeAbsentAdapter),
+        ));
+        let response = app
+            .oneshot(
+                Request::get("/health/ready")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["debugger_state"], "absent");
+        assert_eq!(value["diagnostic_code"], "NO_DEBUGGEE");
+        assert_eq!(value["next_actions"][0]["code"], "CALL_DEBUGGEE_LAUNCH");
+        assert_eq!(value["next_actions"][0]["tool"], "debuggee.launch");
     }
 
     #[tokio::test]
@@ -386,6 +445,78 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["diagnostic_code"], "PLUGIN_DISCONNECTED");
+        assert_eq!(
+            value["next_actions"][0]["code"],
+            "START_DEBUGGER_WITH_PLUGIN"
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_validation_errors_advertise_bounded_accepted_values() {
+        let invalid_accept = app()
+            .oneshot(
+                Request::post("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "text/plain")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_accept.status(), StatusCode::NOT_ACCEPTABLE);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(invalid_accept.into_body(), 4096).await.unwrap())
+                .unwrap();
+        assert_eq!(value["error"]["code"], "INVALID_ACCEPT");
+        assert_eq!(
+            value["error"]["details"]["accepted_media_types"],
+            serde_json::json!(["application/json", "*/*"])
+        );
+
+        let invalid_content = app()
+            .oneshot(
+                Request::post("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .header(header::ACCEPT, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_content.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(invalid_content.into_body(), 4096).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            value["error"]["details"]["accepted_media_types"],
+            serde_json::json!(["application/json"])
+        );
+
+        let invalid_version = app()
+            .oneshot(
+                Request::post("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json")
+                    .header("mcp-protocol-version", "1900-01-01")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_version.status(), StatusCode::BAD_REQUEST);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(invalid_version.into_body(), 4096).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            value["error"]["details"]["supported_versions"],
+            serde_json::json!(["2025-06-18"])
+        );
     }
 
     #[tokio::test]

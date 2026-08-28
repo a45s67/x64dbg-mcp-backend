@@ -92,6 +92,11 @@ try {
     if ($ready.status -ne 'ready') {
         throw 'Installed x64 backend did not become ready.'
     }
+    if ($ready.debugger_state -ne 'absent' -or $ready.diagnostic_code -ne 'NO_DEBUGGEE' -or
+        @($ready.next_actions).Count -ne 1 -or
+        $ready.next_actions[0].tool -ne 'debuggee.launch') {
+        throw 'Installed readiness did not advertise the explicit launch action.'
+    }
 
     $null = Invoke-Mcp 'initialize' @{
         protocolVersion = '2025-06-18'
@@ -101,6 +106,11 @@ try {
     $initial = Invoke-Tool 'debugger.state' @{} 2
     if ($initial.debuggee_state -ne 'absent') {
         throw 'Installed debugger did not start without a debuggee.'
+    }
+    if ($initial.diagnostic_code -ne 'NO_DEBUGGEE' -or
+        @($initial.next_actions).Count -ne 1 -or
+        $initial.next_actions[0].tool -ne 'debuggee.launch') {
+        throw 'Installed debugger.state did not advertise the explicit launch action.'
     }
     $launch = Invoke-Tool 'debuggee.launch' @{
         operation_id = [Guid]::NewGuid().ToString()
@@ -207,6 +217,7 @@ try {
         instruction_pointer = $mainPause.instruction_pointer
         active_thread_id = $mainPause.active_thread_id
         state_generation = $mainPause.state_generation
+        bootstrap_launch_action_advertised = $true
         registers_generation = $registerSnapshot.state_generation
         memory_generation = $memorySnapshot.state_generation
         disassembly_generation = $disassemblySnapshot.state_generation

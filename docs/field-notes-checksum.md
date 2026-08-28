@@ -509,3 +509,26 @@ snapshot, and filtered memory map all retained generation `27`; the compact
 snapshot contained eight instructions and the module-filtered committed
 executable map returned one region. Both known strings were still found on the
 first bounded page, then the debuggee and plugin-owned sidecar stopped cleanly.
+
+## 2026-08-29 actionable diagnostics follow-up
+
+ADR 0010 keeps backend readiness separate from debuggee availability while
+making the absent state actionable. Authenticated readiness and
+`debugger.state` now return `NO_DEBUGGEE` with exactly one non-executing action
+hint naming `debuggee.launch`; once a target is active they return a null code
+and an empty action list. A disconnected manual diagnostic sidecar reports
+`PLUGIN_DISCONNECTED`. HTTP Accept, Content-Type, and protocol-version failures
+now include only their bounded accepted values in structured `details`.
+
+Rust contract coverage increased to 46 tests. Fresh isolated x32 and x64 runs
+both observed the launch hint before the fixture mutation, verified that it was
+cleared in the paused state, then completed compact snapshots, filtered memory
+maps, cursor failures, mutation replay, stepping, stop, and supervised shutdown.
+Each native architecture retained seven passing tests.
+
+The deployed `checksum.exe` acceptance run followed the advertised launch action,
+again loaded at `0x770000`, resolved RVA `0xa78a0` to `0x8178a0`, and hit the
+software breakpoint once. All paused reads retained generation `27`, both known
+strings were found on the first bounded page, and closing the debugger left no
+plugin-owned sidecar running. Documentation now explicitly states that launching
+a second debugger is not an MVP target-handoff mechanism.

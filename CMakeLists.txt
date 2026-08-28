@@ -108,7 +108,13 @@ if(BUILD_TESTING)
     COMMAND x64dbg_mcp_lifecycle_test
       "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe"
       "${MCP_INSTALLED_CONFIG_TEST_PORT}" installed-config)
+  math(EXPR MCP_ACTIVE_WAIT_TEST_PORT "${MCP_TEST_PORT} + 3")
+  add_test(NAME active-wait-shutdown-${MCP_TEST_ARCH}
+    COMMAND x64dbg_mcp_lifecycle_test
+      "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe"
+      "${MCP_ACTIVE_WAIT_TEST_PORT}" active-wait-shutdown)
   set_tests_properties(executor-${MCP_TEST_ARCH} lifecycle-${MCP_TEST_ARCH}
     sidecar-crash-${MCP_TEST_ARCH} installed-config-${MCP_TEST_ARCH}
+    active-wait-shutdown-${MCP_TEST_ARCH}
     PROPERTIES TIMEOUT 15)
 endif()

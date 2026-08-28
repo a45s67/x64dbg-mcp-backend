@@ -39,6 +39,11 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
         .ok_or(invalid("arguments", "must be an object"))?;
     match name {
         "debugger.state" => exact_keys(object, &[], &[]),
+        "debugger.wait_for_pause" => {
+            exact_keys(object, &["after_generation"], &["timeout_ms"])?;
+            integer(object, "after_generation", 0, 9_007_199_254_740_991)?;
+            optional_integer(object, "timeout_ms", 1, 9_000)
+        }
         "debugger.pause" | "debugger.resume" | "debugger.step_into" | "debugger.step_over"
         | "debugger.stop" => operation(object, &[]),
         "debuggee.launch" => {
@@ -289,6 +294,23 @@ fn build_catalog() -> Vec<Value> {
             "debugger.state",
             "Read debugger, debuggee, architecture, thread, instruction pointer, and pause state. Use this before state-sensitive operations.",
             object(vec![], vec![]),
+        ),
+        read_tool(
+            "debugger.wait_for_pause",
+            "Wait on debugger callbacks for a pause newer than after_generation. This is read-only observation; timeout does not make a prior mutation ambiguous.",
+            object(
+                vec![
+                    (
+                        "after_generation",
+                        json!({"type":"integer","minimum":0,"maximum":9_007_199_254_740_991_i64}),
+                    ),
+                    (
+                        "timeout_ms",
+                        json!({"type":"integer","minimum":1,"maximum":9000,"default":5000}),
+                    ),
+                ],
+                vec!["after_generation"],
+            ),
         ),
         mutation_tool(
             "debugger.pause",
@@ -569,7 +591,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 19);
+        assert_eq!(catalog().len(), 20);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -584,6 +606,20 @@ mod tests {
     #[test]
     fn validation_enforces_bounds_and_additional_properties() {
         assert!(validate_arguments("debugger.state", &json!({})).is_ok());
+        assert!(
+            validate_arguments(
+                "debugger.wait_for_pause",
+                &json!({"after_generation":7,"timeout_ms":9000})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "debugger.wait_for_pause",
+                &json!({"after_generation":7,"timeout_ms":9001})
+            )
+            .is_err()
+        );
         assert!(validate_arguments("debugger.state", &json!({"extra":true})).is_err());
         assert!(
             validate_arguments("memory.read", &json!({"address":"0x1000","length":65536})).is_ok()

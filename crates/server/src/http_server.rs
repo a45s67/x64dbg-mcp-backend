@@ -414,8 +414,13 @@ mod tests {
         let value =
             mcp_request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#).await;
         let tools = value["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), 20);
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.state"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "debugger.wait_for_pause")
+        );
         assert!(tools.iter().any(|tool| tool["name"] == "address.resolve"));
         assert!(tools.iter().any(|tool| tool["name"] == "memory.write"));
     }
@@ -446,6 +451,22 @@ mod tests {
         assert_eq!(result["structuredContent"]["module"], "sample.exe");
         assert_eq!(result["structuredContent"]["rva"], "0x1000");
         assert_eq!(result["structuredContent"]["state_generation"], 7);
+    }
+
+    #[tokio::test]
+    async fn callback_pause_observation_matches_the_contract() {
+        let value = mcp_request(
+            r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"debugger.wait_for_pause","arguments":{"after_generation":7,"timeout_ms":5000}}}"#,
+        )
+        .await;
+        let result = &value["result"];
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["structuredContent"]["state_generation"], 8);
+        assert_eq!(
+            result["structuredContent"]["pause_reason"]["kind"],
+            "breakpoint"
+        );
+        assert_eq!(result["structuredContent"]["pause_reason"]["hit_count"], 1);
     }
 
     #[tokio::test]

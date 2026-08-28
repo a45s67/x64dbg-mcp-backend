@@ -17,6 +17,27 @@ namespace mcp {
 
 enum class PluginState : std::uint8_t { starting, ready, draining, stopped };
 enum class DebuggeeState : std::uint8_t { absent, starting, paused, running, stopping, exited };
+enum class PauseReasonKind : std::uint8_t {
+    unknown,
+    processCreated,
+    systemBreakpoint,
+    breakpoint,
+    exception,
+    step,
+    userPause
+};
+
+struct PauseObservation {
+    std::uint64_t generation{0};
+    PauseReasonKind kind{PauseReasonKind::unknown};
+    std::uint64_t address{0};
+    std::uint64_t exceptionCode{0};
+    std::uint32_t hitCount{0};
+    std::uint8_t breakpointType{0};
+    bool hasAddress{false};
+    bool hasExceptionCode{false};
+    bool firstChance{false};
+};
 
 class Runtime final {
 public:
@@ -31,6 +52,7 @@ public:
     [[nodiscard]] bool IsReady() const noexcept;
 #ifdef MCP_LIFECYCLE_HARNESS
     [[nodiscard]] DWORD SidecarProcessIdForTesting() const noexcept;
+    [[nodiscard]] PauseObservation PauseForTesting() noexcept;
 #endif
 
 private:
@@ -41,6 +63,8 @@ private:
     std::string StateResponse(const std::string& requestId) const;
     bool WaitForState(DebuggeeState expected, std::uint64_t afterGeneration,
                       std::chrono::steady_clock::time_point deadline) noexcept;
+    bool WaitForActionableLaunchPause(std::uint64_t afterGeneration,
+                                      std::chrono::steady_clock::time_point deadline) noexcept;
     [[nodiscard]] std::uint64_t ObservedGeneration(DebuggeeState state) const noexcept;
 
     std::atomic<PluginState> pluginState_{PluginState::stopped};
@@ -60,6 +84,7 @@ private:
     DebuggerExecutor executor_;
     std::mutex stateMutex_;
     std::condition_variable stateChanged_;
+    PauseObservation latestPause_;
     std::wstring pipeName_;
     std::string nonce_;
 };

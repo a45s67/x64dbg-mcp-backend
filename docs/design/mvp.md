@@ -148,12 +148,13 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | Tool | Kind | Valid state | Purpose / key bounds |
 |---|---|---|---|
 | `debugger.state` | read | any | Backend, lifecycle state, PID/TID, architecture |
+| `debugger.wait_for_pause` | read | active debuggee | Wait for a newer callback pause; 1-9,000 ms; structured reason |
 | `debugger.pause` | mutate | running | Request pause; bounded wait for callback confirmation |
 | `debugger.resume` | mutate | paused | Resume execution |
 | `debugger.step_into` | mutate | paused | One instruction, then bounded wait for pause |
 | `debugger.step_over` | mutate | paused | One instruction, then bounded wait for pause |
 | `debugger.stop` | mutate | starting/running/paused | Stop current debug session |
-| `debuggee.launch` | destructive mutation | absent | Canonicalize and load an existing executable, then wait for a callback-confirmed initial pause |
+| `debuggee.launch` | destructive mutation | absent | Canonicalize and load an existing executable, then wait past process creation for an actionable callback pause |
 | `registers.read` | read | paused | Selected registers or bounded complete register set |
 | `address.resolve` | read | paused | Resolve absolute or module/RVA input and return canonical location metadata |
 | `memory.read` | read | paused | Read at most 64 KiB per call; report partial/unreadable ranges |
@@ -193,6 +194,9 @@ Each snapshot carries a monotonically increasing `state_generation`. Requests st
 their required state and revalidate it on the debugger executor immediately before
 touching debugger APIs. A command completes only after the relevant callback/state
 transition or its deadline; an accepted command is not reported as completed.
+Callback-confirmed mutations include their confirmed generation in the tool
+result. Clients pass that value to `debugger.wait_for_pause`; an observation
+timeout is retryable and never changes the already-confirmed mutation outcome.
 
 ### Threads and queues
 

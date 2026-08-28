@@ -10,6 +10,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0001-mvp-architecture.md`](docs/adr/0001-mvp-architecture.md)
 - [`docs/adr/0002-debuggee-launch.md`](docs/adr/0002-debuggee-launch.md)
 - [`docs/adr/0003-structured-address-references.md`](docs/adr/0003-structured-address-references.md)
+- [`docs/adr/0004-callback-pause-observation.md`](docs/adr/0004-callback-pause-observation.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
 - [`docs/install.md`](docs/install.md)
@@ -26,6 +27,11 @@ module-relative references, so clients do not need to redo ASLR arithmetic:
 
 Use `address.resolve` to inspect the corresponding absolute address, module
 base, RVA, and state generation without performing a mutation.
+
+Execution workflows use `debugger.resume` followed by
+`debugger.wait_for_pause`. The first call confirms the mutation and returns its
+generation; the second waits on native debugger callbacks and reports a bounded
+pause reason without sleeps or state polling.
 
 Build a release with `powershell -File scripts/package.ps1`, then follow the
 [installation and client setup guide](docs/install.md). The installed package

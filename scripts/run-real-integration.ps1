@@ -41,7 +41,7 @@ function Invoke-Mcp([string]$Method, $Params, [int]$Id) {
     $request = @{ jsonrpc = '2.0'; id = $Id; method = $Method; params = $Params } |
         ConvertTo-Json -Depth 12 -Compress
     $response = Invoke-RestMethod -UseBasicParsing -Method Post -Uri "$baseUri/mcp" `
-        -Headers $headers -ContentType 'application/json' -Body $request -TimeoutSec 15
+        -Headers $headers -ContentType 'application/json' -Body $request -TimeoutSec 40
     if ($response.error) {
         throw "JSON-RPC error from $Method`: $($response.error | ConvertTo-Json -Compress)"
     }
@@ -198,27 +198,69 @@ try {
         throw 'Mutation replay did not return the recorded memory.write result.'
     }
     $resume = $null
+    $startupPause = $null
     $stableRunning = $false
     for ($attempt = 0; $attempt -lt 6; $attempt++) {
-        $beforeResume = Invoke-Tool 'debugger.state' @{} (13 + $attempt * 2)
-        if ($beforeResume.debuggee_state -eq 'paused') {
-            $resume = Invoke-Tool 'debugger.resume' @{
-                operation_id = [Guid]::NewGuid().ToString()
-            } (14 + $attempt * 2)
+        $resume = Invoke-Tool 'debugger.resume' @{
+            operation_id = [Guid]::NewGuid().ToString()
+        } (14 + $attempt * 2)
+        if (!$resume.state_generation) {
+            throw 'debugger.resume omitted its callback-confirmed state_generation.'
         }
-        Start-Sleep -Milliseconds 250
-        $afterResume = Invoke-Tool 'debugger.state' @{} (30 + $attempt)
-        if ($afterResume.debuggee_state -eq 'running') {
+        $wait = Invoke-Mcp 'tools/call' @{
+            name = 'debugger.wait_for_pause'
+            arguments = @{ after_generation = $resume.state_generation; timeout_ms = 1500 }
+        } (15 + $attempt * 2)
+        if ($wait.isError) {
+            if ($wait.structuredContent.error.code -ne 'TIMEOUT' -or
+                !$wait.structuredContent.error.retryable) {
+                throw "Unexpected wait_for_pause failure: $($wait.structuredContent | ConvertTo-Json -Compress -Depth 8)"
+            }
             $stableRunning = $true
             break
         }
+        $startupPause = $wait.structuredContent
+        if ($startupPause.debuggee_state -ne 'paused' -or
+            $startupPause.state_generation -le $resume.state_generation -or
+            !$startupPause.pause_reason.kind) {
+            throw 'Callback wait did not return a newer structured pause observation.'
+        }
+        if ($startupPause.pause_reason.kind -eq 'breakpoint' -and
+            (!$startupPause.pause_reason.address -or
+             !$startupPause.pause_reason.breakpoint_type -or
+             $null -eq $startupPause.pause_reason.hit_count -or
+             !$startupPause.instruction_pointer -or
+             !$startupPause.active_thread_id)) {
+            throw 'Breakpoint pause observation omitted required address, type, hit, IP, or thread metadata.'
+        }
     }
     if (!$stableRunning) {
-        throw 'Fixture never reached a stable running window after confirmed startup pauses.'
+        throw 'Fixture never reached a stable running window after callback-observed startup pauses.'
     }
     $pause = Invoke-Tool 'debugger.pause' @{ operation_id = [Guid]::NewGuid().ToString() } 40
+    $pauseObservation = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $resume.state_generation; timeout_ms = 1500
+    } 49
+    if ($pauseObservation.state_generation -ne $pause.state_generation -or
+        $pauseObservation.pause_reason.kind -ne 'user_pause') {
+        throw 'Explicit pause was not retained as a generation-consistent user_pause observation.'
+    }
     $stepInto = Invoke-Tool 'debugger.step_into' @{ operation_id = [Guid]::NewGuid().ToString() } 17
+    $stepIntoObservation = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $pause.state_generation; timeout_ms = 1500
+    } 50
+    if ($stepIntoObservation.state_generation -ne $stepInto.state_generation -or
+        $stepIntoObservation.pause_reason.kind -ne 'step') {
+        throw 'Step-into callback reason or generation was not retained.'
+    }
     $stepOver = Invoke-Tool 'debugger.step_over' @{ operation_id = [Guid]::NewGuid().ToString() } 18
+    $stepOverObservation = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $stepInto.state_generation; timeout_ms = 1500
+    } 51
+    if ($stepOverObservation.state_generation -ne $stepOver.state_generation -or
+        $stepOverObservation.pause_reason.kind -ne 'step') {
+        throw 'Step-over callback reason or generation was not retained.'
+    }
     $breakpointSet = Invoke-Tool 'breakpoints.set' @{
         operation_id = [Guid]::NewGuid().ToString(); address = $moduleEntryRef
     } 19
@@ -252,8 +294,15 @@ try {
         write_verified = $write.verified
         write_replay_equal = $true
         resume_state = $resume.debuggee_state
+        resume_generation = $resume.state_generation
+        startup_pause_reason = if ($startupPause) { $startupPause.pause_reason.kind } else { $null }
+        wait_timeout_retryable = $true
+        pause_reason = $pauseObservation.pause_reason.kind
+        pause_generation = $pauseObservation.state_generation
         step_into_state = $stepInto.debuggee_state
+        step_into_reason = $stepIntoObservation.pause_reason.kind
         step_over_state = $stepOver.debuggee_state
+        step_over_reason = $stepOverObservation.pause_reason.kind
         breakpoint_set = $breakpointSet.present
         breakpoint_removed = !$breakpointRemove.present
         pause_state = $pause.debuggee_state

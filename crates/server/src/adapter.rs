@@ -72,6 +72,19 @@ impl DebuggerAdapter for FakeAdapter {
                 "instruction_pointer": "0x0000000140001000",
                 "pause_reason": { "kind": "breakpoint", "address": "0x0000000140001000" }
             })),
+            "debugger.wait_for_pause" => Ok(json!({
+                "debuggee_state": "paused",
+                "state_generation": 8,
+                "architecture": "x86_64",
+                "active_thread_id": "0x10f7",
+                "instruction_pointer": "0x0000000140001000",
+                "pause_reason": {
+                    "kind": "breakpoint",
+                    "address": "0x0000000140001000",
+                    "breakpoint_type": "software",
+                    "hit_count": 1
+                }
+            })),
             "expression.evaluate" => arguments
                 .get("expression")
                 .and_then(Value::as_str)

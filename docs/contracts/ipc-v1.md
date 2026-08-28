@@ -69,6 +69,14 @@ the closed structured forms:
 The plugin resolves the latter only after the work item reaches the serialized
 debugger executor. Arbitrary expression strings are not address references.
 
+`debugger.wait_for_pause` is a read request (`operation_id: null`) whose payload
+contains required integer `after_generation` and optional integer `timeout_ms`
+(default 5,000; range 1-9,000). A successful result includes
+`debuggee_state`, `state_generation`, `instruction_pointer`,
+`active_thread_id`, and a bounded `pause_reason`. Its reason `kind` is one of
+`process_created`, `system_breakpoint`, `breakpoint`, `exception`, `step`,
+`user_pause`, or `unknown`.
+
 ## Response
 
 Success:

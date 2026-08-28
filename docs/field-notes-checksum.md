@@ -347,3 +347,35 @@ blindly retried. Staged calls with client deadlines longer than backend mutation
 deadlines completed normally. Keep test-client deadlines aligned with the
 contract and implement `debugger.wait_for_pause` before replacing callback waits
 with a large polling loop.
+
+## 2026-08-29 callback-wait follow-up
+
+ADR 0004 implements the recommendation above as a separate read-only
+`debugger.wait_for_pause(after_generation, timeout_ms?)` operation. Resume,
+pause, step, stop, and launch now return their callback-confirmed generation;
+the wait observes only a newer retained pause and never changes mutation
+identity or replay semantics.
+
+The isolated x64 and x32 fixtures both completed resume-to-pause workflows
+without sleep/state polling. Each observed a loader breakpoint with structured
+address/type/hit metadata, a retryable wait timeout while stably running,
+`user_pause` after explicit pause, and `step` after both step commands. The
+native shutdown test also cancelled a nine-second active wait during plugin
+drain in under three seconds on both architectures.
+
+The first installed checksum smoke exposed a separate lifecycle bug:
+`debuggee.launch` returned on `CB_CREATEPROCESS`, while x64dbg was still
+initializing its debug objects. A resume accepted during that transient state
+never became callback-confirmed before the mutation deadline. The operation was
+not retried; the entire debugger session was closed.
+
+ADR 0002 now requires launch to wait beyond `process_created` for an actionable
+system/breakpoint/exception/step/user pause. After that change, a fresh installed
+session resolved only `{module: "checksum.exe", rva: "0xa78a0"}`, set the
+breakpoint, and reached it through resume -> callback wait. Evidence:
+
+- resolved address `0x8178a0` from runtime module base `0x770000`;
+- pause kind `breakpoint`, type `software`, hit count `1`;
+- instruction pointer `0x8178a0`, active thread `0x1a4c`;
+- pause generation `26`, followed by a callback-confirmed stop;
+- no client-side base-plus-RVA calculation and no blind mutation retry.

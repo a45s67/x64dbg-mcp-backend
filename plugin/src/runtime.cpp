@@ -147,6 +147,8 @@ struct Request {
     std::size_t cursorIndex{0U};
     std::size_t instructionCount{32U};
     std::vector<unsigned char> writeBytes;
+    std::uint64_t afterGeneration{0};
+    std::size_t waitTimeoutMs{5000U};
 };
 
 bool IsMutation(const std::string_view method) {
@@ -355,9 +357,28 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::size_t cursorIndex = 0U;
     std::size_t instructionCount = 32U;
     std::vector<unsigned char> writeBytes;
+    std::uint64_t afterGeneration = 0;
+    std::size_t waitTimeoutMs = 5000U;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
+        }
+    } else if (methodValue == "debugger.wait_for_pause") {
+        json_t* after = json_object_get(payload, "after_generation");
+        json_t* timeout = json_object_get(payload, "timeout_ms");
+        const std::size_t expectedFields = timeout == nullptr ? 1U : 2U;
+        if (json_object_size(payload) != expectedFields || !json_is_integer(after) ||
+            json_integer_value(after) < 0 ||
+            json_integer_value(after) > 9007199254740991LL) {
+            return std::nullopt;
+        }
+        afterGeneration = static_cast<std::uint64_t>(json_integer_value(after));
+        if (timeout != nullptr) {
+            if (!json_is_integer(timeout) || json_integer_value(timeout) < 1 ||
+                json_integer_value(timeout) > 9000) {
+                return std::nullopt;
+            }
+            waitTimeoutMs = static_cast<std::size_t>(json_integer_value(timeout));
         }
     } else if (methodValue == "debuggee.launch") {
         json_t* pathValue = json_object_get(payload, "path");
@@ -509,7 +530,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(expression), std::move(path), std::move(workingDirectory),
                    addressValue, lengthValue, std::move(registerNames), pageLimit,
                    cursorGeneration, cursorIndex, instructionCount,
-                   std::move(writeBytes)};
+                   std::move(writeBytes), afterGeneration, waitTimeoutMs};
 }
 
 bool IsAcceptedHandshakeAck(const std::string_view bytes) {
@@ -530,6 +551,42 @@ std::string HexValue(const std::uint64_t value) {
     std::ostringstream formatted;
     formatted << "0x" << std::hex << std::nouppercase << value;
     return formatted.str();
+}
+
+std::string PauseReasonJson(const PauseObservation& pause) {
+    const char* kind = "unknown";
+    switch (pause.kind) {
+    case PauseReasonKind::processCreated: kind = "process_created"; break;
+    case PauseReasonKind::systemBreakpoint: kind = "system_breakpoint"; break;
+    case PauseReasonKind::breakpoint: kind = "breakpoint"; break;
+    case PauseReasonKind::exception: kind = "exception"; break;
+    case PauseReasonKind::step: kind = "step"; break;
+    case PauseReasonKind::userPause: kind = "user_pause"; break;
+    case PauseReasonKind::unknown: break;
+    }
+    std::string result = "{\"kind\":" + JsonString(kind);
+    if (pause.hasAddress) {
+        result += ",\"address\":" + JsonString(HexValue(pause.address));
+    }
+    if (pause.kind == PauseReasonKind::breakpoint) {
+        const char* type = "unknown";
+        switch (pause.breakpointType) {
+        case 1U: type = "software"; break;
+        case 2U: type = "hardware"; break;
+        case 4U: type = "memory"; break;
+        case 8U: type = "dll"; break;
+        case 16U: type = "exception"; break;
+        default: break;
+        }
+        result += ",\"breakpoint_type\":" + JsonString(type) +
+                  ",\"hit_count\":" + std::to_string(pause.hitCount);
+    }
+    if (pause.kind == PauseReasonKind::exception && pause.hasExceptionCode) {
+        result += ",\"code\":" + JsonString(HexValue(pause.exceptionCode)) +
+                  ",\"first_chance\":" +
+                  std::string(pause.firstChance ? "true" : "false");
+    }
+    return result + "}";
 }
 
 #ifndef MCP_LIFECYCLE_HARNESS
@@ -718,6 +775,11 @@ bool Runtime::IsReady() const noexcept { return pluginState_.load() == PluginSta
 #ifdef MCP_LIFECYCLE_HARNESS
 DWORD Runtime::SidecarProcessIdForTesting() const noexcept {
     return sidecarProcess_ == nullptr ? 0U : GetProcessId(sidecarProcess_);
+}
+
+PauseObservation Runtime::PauseForTesting() noexcept {
+    std::lock_guard lock(stateMutex_);
+    return latestPause_;
 }
 #endif
 
@@ -912,6 +974,79 @@ void Runtime::Worker() noexcept {
                 if (parsed->method == "debugger.state") {
                     return StateResponse(parsed->requestId);
                 }
+                if (parsed->method == "debugger.wait_for_pause") {
+                    if (debuggeeState_.load() == DebuggeeState::absent ||
+                        debuggeeState_.load() == DebuggeeState::exited) {
+                        return ErrorResponse(*parsed, "NO_DEBUGGEE",
+                                             "there is no active debuggee", false, false);
+                    }
+                    const auto waitDeadline = (std::min)(
+                        requestDeadline, std::chrono::steady_clock::now() +
+                                             std::chrono::milliseconds(parsed->waitTimeoutMs));
+                    PauseObservation pause;
+                    {
+                        std::unique_lock lock(stateMutex_);
+                        const bool observed = stateChanged_.wait_until(
+                            lock, waitDeadline, [this, parsed] {
+                                const DebuggeeState state = debuggeeState_.load();
+                                return pluginState_.load() != PluginState::ready ||
+                                       pausedGeneration_.load() > parsed->afterGeneration ||
+                                       state == DebuggeeState::absent ||
+                                       state == DebuggeeState::exited ||
+                                       state == DebuggeeState::stopping;
+                            });
+                        if (pluginState_.load() != PluginState::ready) {
+                            return ErrorResponse(*parsed, "CANCELLED", "plugin is draining", true,
+                                                 false);
+                        }
+                        const DebuggeeState state = debuggeeState_.load();
+                        if (state == DebuggeeState::absent || state == DebuggeeState::exited ||
+                            state == DebuggeeState::stopping) {
+                            return ErrorResponse(*parsed, "NO_DEBUGGEE",
+                                                 "debuggee stopped while waiting", false, false);
+                        }
+                        if (!observed || pausedGeneration_.load() <= parsed->afterGeneration) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "no newer pause was observed", true, false);
+                        }
+                        pause = latestPause_;
+                    }
+                    if (pause.generation == 0U || pause.generation <= parsed->afterGeneration) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "pause observation changed before capture", true,
+                                             false);
+                    }
+                    std::string instructionPointer = "null";
+                    std::uint32_t threadId = activeThreadId_.load();
+#ifndef MCP_LIFECYCLE_HARNESS
+                    if (!DbgIsDebugging() || debuggeeState_.load() != DebuggeeState::paused) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debuggee resumed before snapshot capture", true,
+                                             false);
+                    }
+                    REGDUMP_AVX512 dump{};
+                    if (!DbgGetRegDumpEx(&dump, sizeof(dump))) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "paused register snapshot is unavailable", true,
+                                             false);
+                    }
+                    instructionPointer = JsonString(HexValue(dump.regcontext.cip));
+                    threadId = DbgGetThreadId();
+#endif
+                    if (debuggeeState_.load() != DebuggeeState::paused ||
+                        pausedGeneration_.load() != pause.generation) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "pause changed during snapshot capture", true, false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(pause.generation) +
+                           ",\"status\":\"ok\",\"result\":{\"debuggee_state\":\"paused\"" +
+                           std::string(",\"state_generation\":") +
+                           std::to_string(pause.generation) + ",\"instruction_pointer\":" +
+                           instructionPointer + ",\"active_thread_id\":" +
+                           (threadId == 0U ? "null" : JsonString(HexValue(threadId))) +
+                           ",\"pause_reason\":" + PauseReasonJson(pause) + "}}";
+                }
 #ifndef MCP_LIFECYCLE_HARNESS
                 const bool addressMethod = parsed->method == "address.resolve" ||
                                            parsed->method == "memory.read" ||
@@ -978,16 +1113,18 @@ void Runtime::Worker() noexcept {
                                              "debugger command queue rejected the launch", true,
                                              false);
                     }
-                    if (!WaitForState(DebuggeeState::paused, before, requestDeadline)) {
+                    if (!WaitForActionableLaunchPause(before, requestDeadline)) {
                         return ErrorResponse(*parsed, "TIMEOUT",
-                                             "launch outcome was not callback-confirmed", false,
-                                             true);
+                                             "launch did not reach an actionable debugger pause",
+                                             false, true);
                     }
+                    const std::uint64_t confirmed = ObservedGeneration(DebuggeeState::paused);
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
-                           ",\"state_generation\":" + std::to_string(generation_.load()) +
+                           ",\"state_generation\":" + std::to_string(confirmed) +
                            ",\"status\":\"ok\",\"result\":{\"debuggee_state\":\"paused\",\"path\":" +
                            JsonString(*executable) + ",\"working_directory\":" +
-                           JsonString(*workingDirectory) + "}}";
+                           JsonString(*workingDirectory) + ",\"state_generation\":" +
+                           std::to_string(confirmed) + "}}";
                 }
                 if (parsed->method == "debugger.pause" || parsed->method == "debugger.resume" ||
                     parsed->method == "debugger.step_into" ||
@@ -1034,13 +1171,14 @@ void Runtime::Worker() noexcept {
                                              "mutation outcome was not callback-confirmed", false,
                                              true);
                     }
+                    const std::uint64_t confirmed = ObservedGeneration(expected);
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
-                           ",\"state_generation\":" + std::to_string(generation_.load()) +
+                           ",\"state_generation\":" + std::to_string(confirmed) +
                            ",\"status\":\"ok\",\"result\":{\"debuggee_state\":" +
                            JsonString(expected == DebuggeeState::paused
                                           ? "paused"
                                           : expected == DebuggeeState::running ? "running" : "absent") +
-                           "}}";
+                           ",\"state_generation\":" + std::to_string(confirmed) + "}}";
                 }
                 if (parsed->method == "memory.write") {
                     const duint address = resolvedLocation->address;
@@ -1525,6 +1663,20 @@ bool Runtime::WaitForState(const DebuggeeState expected, const std::uint64_t aft
            ObservedGeneration(expected) > afterGeneration;
 }
 
+bool Runtime::WaitForActionableLaunchPause(
+    const std::uint64_t afterGeneration,
+    const std::chrono::steady_clock::time_point deadline) noexcept {
+    std::unique_lock lock(stateMutex_);
+    return stateChanged_.wait_until(lock, deadline, [this, afterGeneration] {
+        return pluginState_.load() != PluginState::ready ||
+               (pausedGeneration_.load() > afterGeneration &&
+                latestPause_.kind != PauseReasonKind::processCreated);
+    }) &&
+           pluginState_.load() == PluginState::ready &&
+           pausedGeneration_.load() > afterGeneration &&
+           latestPause_.kind != PauseReasonKind::processCreated;
+}
+
 std::uint64_t Runtime::ObservedGeneration(const DebuggeeState state) const noexcept {
     switch (state) {
     case DebuggeeState::paused: return pausedGeneration_.load();
@@ -1539,6 +1691,9 @@ std::uint64_t Runtime::ObservedGeneration(const DebuggeeState state) const noexc
 
 void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) noexcept {
     DebuggeeState next = debuggeeState_.load();
+    PauseObservation pause;
+    bool hasPauseReason = false;
+    bool refineCurrentPause = false;
     switch (callbackType) {
     case CB_INITDEBUG: next = DebuggeeState::starting; break;
     case CB_CREATEPROCESS: {
@@ -1548,10 +1703,56 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
             activeThreadId_.store(info->fdProcessInfo->dwThreadId);
         }
         next = DebuggeeState::paused;
+        pause.kind = PauseReasonKind::processCreated;
+        hasPauseReason = true;
+        break;
+    }
+    case CB_SYSTEMBREAKPOINT:
+        next = DebuggeeState::paused;
+        pause.kind = PauseReasonKind::systemBreakpoint;
+        hasPauseReason = true;
+        refineCurrentPause = true;
+        break;
+    case CB_BREAKPOINT: {
+        next = DebuggeeState::paused;
+        pause.kind = PauseReasonKind::breakpoint;
+        hasPauseReason = true;
+        refineCurrentPause = true;
+        const auto* info = static_cast<const PLUG_CB_BREAKPOINT*>(callbackInfo);
+        if (info != nullptr && info->breakpoint != nullptr) {
+            pause.address = info->breakpoint->addr;
+            pause.hasAddress = true;
+            pause.breakpointType = static_cast<std::uint8_t>(info->breakpoint->type);
+            pause.hitCount = info->breakpoint->hitCount;
+        }
+        break;
+    }
+    case CB_EXCEPTION: {
+        next = DebuggeeState::paused;
+        pause.kind = PauseReasonKind::exception;
+        hasPauseReason = true;
+        refineCurrentPause = true;
+        const auto* info = static_cast<const PLUG_CB_EXCEPTION*>(callbackInfo);
+        if (info != nullptr && info->Exception != nullptr) {
+            pause.exceptionCode = info->Exception->ExceptionRecord.ExceptionCode;
+            pause.hasExceptionCode = true;
+            pause.address = reinterpret_cast<std::uintptr_t>(
+                info->Exception->ExceptionRecord.ExceptionAddress);
+            pause.hasAddress = true;
+            pause.firstChance = info->Exception->dwFirstChance != 0U;
+        }
         break;
     }
     case CB_PAUSEDEBUG:
-    case CB_STEPPED: next = DebuggeeState::paused; break;
+        next = DebuggeeState::paused;
+        pause.kind = PauseReasonKind::userPause;
+        hasPauseReason = true;
+        break;
+    case CB_STEPPED:
+        next = DebuggeeState::paused;
+        pause.kind = PauseReasonKind::step;
+        hasPauseReason = true;
+        break;
     case CB_RESUMEDEBUG: next = DebuggeeState::running; break;
     case CB_STOPPINGDEBUG: next = DebuggeeState::stopping; break;
     case CB_EXITPROCESS: next = DebuggeeState::exited; break;
@@ -1572,10 +1773,31 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     }
     default: return;
     }
+    std::lock_guard lock(stateMutex_);
+    const DebuggeeState previous = debuggeeState_.load();
+    if (next == DebuggeeState::paused && previous == DebuggeeState::paused) {
+        if (callbackType == CB_PAUSEDEBUG) {
+            return;
+        }
+        if (refineCurrentPause ||
+            (callbackType == CB_STEPPED && latestPause_.kind == PauseReasonKind::userPause)) {
+            pause.generation = pausedGeneration_.load();
+            latestPause_ = pause;
+            stateChanged_.notify_all();
+            return;
+        }
+    }
     debuggeeState_.store(next);
     const std::uint64_t observed = generation_.fetch_add(1U) + 1U;
     switch (next) {
-    case DebuggeeState::paused: pausedGeneration_.store(observed); break;
+    case DebuggeeState::paused:
+        pausedGeneration_.store(observed);
+        pause.generation = observed;
+        if (!hasPauseReason) {
+            pause.kind = PauseReasonKind::unknown;
+        }
+        latestPause_ = pause;
+        break;
     case DebuggeeState::running: runningGeneration_.store(observed); break;
     case DebuggeeState::absent: absentGeneration_.store(observed); break;
     case DebuggeeState::starting:

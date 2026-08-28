@@ -3,6 +3,7 @@
 #include <Windows.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -13,12 +14,13 @@
 #include <string_view>
 
 #include "runtime.h"
+#include "_plugins.h"
 
 namespace {
-bool ExerciseStateTool(const unsigned short port) {
+std::string PostMcp(const unsigned short port, const std::string_view body) {
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
-        return false;
+        return {};
     }
     SOCKET socketValue = INVALID_SOCKET;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -40,15 +42,13 @@ bool ExerciseStateTool(const unsigned short port) {
     }
     if (socketValue == INVALID_SOCKET) {
         WSACleanup();
-        return false;
+        return {};
     }
-    constexpr char body[] =
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"debugger.state\",\"arguments\":{}}}";
     const std::string request =
         "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer "
         "0123456789abcdef0123456789abcdef\r\nContent-Type: application/json\r\n"
         "Accept: application/json\r\nConnection: close\r\nContent-Length: " +
-        std::to_string(sizeof(body) - 1U) + "\r\n\r\n" + body;
+        std::to_string(body.size()) + "\r\n\r\n" + std::string(body);
     std::size_t sent = 0;
     while (sent < request.size()) {
         const int chunk = send(socketValue, request.data() + sent,
@@ -56,7 +56,7 @@ bool ExerciseStateTool(const unsigned short port) {
         if (chunk <= 0) {
             closesocket(socketValue);
             WSACleanup();
-            return false;
+            return {};
         }
         sent += static_cast<std::size_t>(chunk);
     }
@@ -74,15 +74,72 @@ bool ExerciseStateTool(const unsigned short port) {
     }
     closesocket(socketValue);
     WSACleanup();
+    return response;
+}
+
+bool ExerciseStateTool(const unsigned short port) {
+    constexpr std::string_view body =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"debugger.state\",\"arguments\":{}}}";
+    const std::string response = PostMcp(port, body);
     return response.starts_with("HTTP/1.1 200") &&
            response.find("\\\"debuggee_state\\\":\\\"absent\\\"") != std::string::npos;
+}
+
+bool ExerciseActiveWaitShutdown(mcp::Runtime& runtime, const unsigned short port) {
+    runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+    std::atomic_bool completed{false};
+    std::thread request([port, &completed] {
+        constexpr std::string_view body =
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"debugger.wait_for_pause\",\"arguments\":{\"after_generation\":9007199254740991,\"timeout_ms\":9000}}}";
+        (void)PostMcp(port, body);
+        completed.store(true);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto start = std::chrono::steady_clock::now();
+    runtime.Stop();
+    request.join();
+    return completed.load() &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(3);
+}
+
+bool ExercisePauseCallbacks(mcp::Runtime& runtime) {
+    runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+    BRIDGEBP breakpoint{};
+    breakpoint.type = bp_normal;
+    breakpoint.addr = static_cast<duint>(0x401000U);
+    breakpoint.hitCount = 3U;
+    PLUG_CB_BREAKPOINT breakpointInfo{&breakpoint};
+    runtime.OnDebuggerEvent(CB_BREAKPOINT, &breakpointInfo);
+    const mcp::PauseObservation specific = runtime.PauseForTesting();
+    runtime.OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
+    const mcp::PauseObservation afterGeneric = runtime.PauseForTesting();
+    if (specific.kind != mcp::PauseReasonKind::breakpoint || !specific.hasAddress ||
+        specific.address != 0x401000U || specific.hitCount != 3U ||
+        specific.generation == 0U || afterGeneric.generation != specific.generation ||
+        afterGeneric.kind != mcp::PauseReasonKind::breakpoint) {
+        return false;
+    }
+
+    runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+    EXCEPTION_DEBUG_INFO exception{};
+    exception.ExceptionRecord.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
+    exception.ExceptionRecord.ExceptionAddress = reinterpret_cast<void*>(0x402000U);
+    exception.dwFirstChance = 1U;
+    PLUG_CB_EXCEPTION exceptionInfo{&exception};
+    runtime.OnDebuggerEvent(CB_EXCEPTION, &exceptionInfo);
+    const mcp::PauseObservation capturedException = runtime.PauseForTesting();
+    return capturedException.kind == mcp::PauseReasonKind::exception &&
+           capturedException.hasExceptionCode &&
+           capturedException.exceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+           capturedException.hasAddress && capturedException.address == 0x402000U &&
+           capturedException.firstChance && capturedException.generation > specific.generation;
 }
 } // namespace
 
 int wmain(const int argc, wchar_t** argv) {
     if (argc < 3 || argc > 4) {
         std::cerr << "usage: lifecycle_harness <server-exe> <unused-port> "
-                     "[sidecar-crash|installed-config]\n";
+                     "[sidecar-crash|installed-config|active-wait-shutdown]\n";
         return 2;
     }
     const bool installedConfig = argc == 4 && std::wstring_view(argv[3]) == L"installed-config";
@@ -150,6 +207,18 @@ int wmain(const int argc, wchar_t** argv) {
         runtime.Stop();
         std::cerr << "end-to-end debugger.state call failed\n";
         return 7;
+    }
+    if (!ExercisePauseCallbacks(runtime)) {
+        runtime.Stop();
+        std::cerr << "callback pause observation contract failed\n";
+        return 9;
+    }
+    if (argc == 4 && std::wstring_view(argv[3]) == L"active-wait-shutdown") {
+        if (!ExerciseActiveWaitShutdown(runtime, static_cast<unsigned short>(parsedPort))) {
+            std::cerr << "active callback wait delayed runtime shutdown\n";
+            return 10;
+        }
+        return 0;
     }
     if (argc == 4 && std::wstring_view(argv[3]) == L"sidecar-crash") {
         const DWORD sidecarId = runtime.SidecarProcessIdForTesting();

@@ -32,8 +32,12 @@ debuggee.launch(path, working_directory?, operation_id)
 - Input is bounded to 32,767 UTF-8 bytes per path and rejects control characters.
 - The native adapter builds only the fixed `InitDebug` command. It does not
   accept an x64dbg command, script, or raw debuggee command-line string.
-- Success requires a callback-confirmed transition created after this request;
-  merely accepting the debugger command is not success.
+- Success requires a callback-confirmed, actionable pause created after this
+  request; merely accepting the debugger command is not success.
+- `CB_CREATEPROCESS` alone is not actionable. x64dbg can still be initializing
+  its debug objects and command queue at that point. The launch remains pending
+  until a later system-breakpoint, breakpoint, exception, step, or explicit
+  pause callback replaces the transient `process_created` reason.
 - A timeout after command acceptance is an ambiguous mutation result. The same
   canonical operation UUID may query/replay the recorded outcome, but neither
   the server nor Gateway starts the launch again blindly.
@@ -61,6 +65,8 @@ a debuggee does not create an additional backend or detached process owner.
 - Schema and native parsing reject relative, missing, oversized, malformed, and
   state-invalid requests before `InitDebug` is queued.
 - x32 and x64 fixtures confirm callback-correlated success and canonical paths.
+- A slower real debuggee proves launch does not expose the transient
+  `process_created` pause as command-ready.
 - Timeout and disconnect tests prove that an accepted launch is never retried.
 - Closing or unloading the debugger during launch leaves no sidecar, plugin
   thread, or backend-owned process.

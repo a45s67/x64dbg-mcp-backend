@@ -38,6 +38,7 @@ numeric address. It never forwards a caller expression to `DbgEval`.
 | Tool | Native API | Required state | Completion and ownership |
 |---|---|---|---|
 | `debugger.state` | `DbgGetRegDumpEx` | paused for CIP; any otherwise | atomic callback snapshot; copied register dump |
+| `debugger.wait_for_pause` | callback snapshot, `DbgGetRegDumpEx`, `DbgGetThreadId` | active debuggee; returns paused | condition-variable wait, max 9 s; copied latest reason; generation rechecked after register capture |
 | `registers.read` | `DbgGetRegDumpEx` | paused | copied fixed-size dump; register-name allowlist |
 | `address.resolve` | `Script::Module::GetList` | paused | unique module/RVA or absolute lookup; `BridgeFree(list.data)` |
 | `memory.read` | `DbgMemRead` | paused | caller-owned buffer, max 64 KiB |
@@ -50,7 +51,13 @@ numeric address. It never forwards a caller expression to `DbgEval`.
 | pause/resume/step/stop | `DbgCmdExec` | operation-specific | fixed command; callback and generation confirmation |
 | `memory.write` | `DbgMemWrite`, `DbgMemRead` | paused | max 4 KiB; read-back verification |
 | breakpoint set/remove | `DbgCmdExec`, `DbgGetBpxTypeAt` | paused | validated address only; bounded observation loop |
-| `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; callback and generation confirmation |
+| `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; ignores transient process-created pause and confirms a later actionable callback |
+
+Pause metadata is copied synchronously from `CB_SYSTEMBREAKPOINT`,
+`CB_BREAKPOINT`, `CB_EXCEPTION`, and `CB_STEPPED`. The plugin retains no callback
+pointer. A following generic `CB_PAUSEDEBUG` cannot overwrite a specific reason
+for the same stop. Stop, disconnect, and unload notify the same condition
+variable used by active observation requests.
 
 ## Unload invariant
 

@@ -813,9 +813,48 @@ fn object(properties: Vec<(&'static str, Value)>, required: Vec<&'static str>) -
 mod tests {
     use std::collections::HashSet;
 
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{catalog, validate_arguments};
+
+    fn next_u64(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state
+    }
+
+    fn generated_argument(state: &mut u64, depth: usize) -> Value {
+        let choice = next_u64(state) % if depth >= 4 { 4 } else { 6 };
+        match choice {
+            0 => Value::Null,
+            1 => Value::Bool(next_u64(state) & 1 == 1),
+            2 => json!(next_u64(state)),
+            3 => {
+                let length = (next_u64(state) % 384) as usize;
+                Value::String(
+                    (0..length)
+                        .map(|_| char::from((next_u64(state) & 0x7f) as u8))
+                        .collect(),
+                )
+            }
+            4 => Value::Array(
+                (0..(next_u64(state) % 10))
+                    .map(|_| generated_argument(state, depth + 1))
+                    .collect(),
+            ),
+            _ => {
+                let mut values = serde_json::Map::new();
+                for index in 0..(next_u64(state) % 10) {
+                    values.insert(
+                        format!("field_{index}"),
+                        generated_argument(state, depth + 1),
+                    );
+                }
+                Value::Object(values)
+            }
+        }
+    }
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
@@ -990,6 +1029,22 @@ mod tests {
             let error = validate_arguments("debugger.resume", &json!({"operation_id":invalid_id}))
                 .unwrap_err();
             assert_eq!(error.field, "operation_id");
+        }
+    }
+
+    #[test]
+    fn deterministic_argument_corpus_exercises_every_tool_validator() {
+        const SEED: u64 = 0x544f_4f4c_5f41_5247;
+        const CASES: usize = 4_096;
+        let mut state = SEED;
+        for case in 0..CASES {
+            let tool = &catalog()[case % catalog().len()];
+            let name = tool["name"].as_str().unwrap();
+            let arguments = generated_argument(&mut state, 0);
+            if let Err(error) = validate_arguments(name, &arguments) {
+                assert!(error.field.len() <= 32, "seed={SEED:#x} case={case}");
+                assert!(error.message.len() <= 128, "seed={SEED:#x} case={case}");
+            }
         }
     }
 }

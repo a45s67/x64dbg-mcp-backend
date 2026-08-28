@@ -8,6 +8,7 @@ use std::{
 };
 
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::sync::Mutex;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 use uuid::Uuid;
 use x64dbg_mcp_server::ipc::{
@@ -16,6 +17,7 @@ use x64dbg_mcp_server::ipc::{
 
 const NONCE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+static START_LOCK: Mutex<()> = Mutex::const_new(());
 
 struct SupervisedSidecar {
     child: Child,
@@ -43,6 +45,9 @@ fn unused_loopback_port() -> u16 {
 }
 
 async fn start_sidecar(shutdown_timeout_ms: u64) -> SupervisedSidecar {
+    // Keep ephemeral-port selection and the child bind atomic relative to the
+    // other parallel cases in this test binary.
+    let start_guard = START_LOCK.lock().await;
     let port = unused_loopback_port();
     let pipe_name = format!(r"\\.\pipe\x64dbg-mcp-test-{}", Uuid::new_v4());
     let mut pipe = ServerOptions::new()
@@ -86,12 +91,26 @@ async fn start_sidecar(shutdown_timeout_ms: u64) -> SupervisedSidecar {
     let ack: HandshakeAck = read_frame(&mut pipe).await.unwrap();
     assert!(ack.accepted);
 
-    SupervisedSidecar {
+    let sidecar = SupervisedSidecar {
         child,
         stdin: Some(stdin),
         pipe,
         port,
-    }
+    };
+
+    let readiness_probe = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match TcpStream::connect((Ipv4Addr::LOCALHOST, sidecar.port)).await {
+                Ok(stream) => break stream,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("HTTP listener did not bind after IPC handshake");
+    drop(readiness_probe);
+    drop(start_guard);
+    sidecar
 }
 
 async fn send_tool_request(port: u16, id: u64, name: &str, arguments: &str) -> TcpStream {

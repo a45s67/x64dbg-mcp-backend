@@ -177,10 +177,49 @@ fn rpc_error(id: Option<Value>, code: i32, message: &'static str) -> Response {
 #[cfg(test)]
 mod contract_tests {
     use axum::body::to_bytes;
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use super::handle;
     use crate::adapter::DisconnectedAdapter;
+
+    fn next_u64(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(2_862_933_555_777_941_757)
+            .wrapping_add(3_037_000_493);
+        *state
+    }
+
+    fn generated_json(state: &mut u64, depth: usize) -> Value {
+        let choice = next_u64(state) % if depth >= 5 { 4 } else { 7 };
+        match choice {
+            0 => Value::Null,
+            1 => Value::Bool(next_u64(state) & 1 == 1),
+            2 => json!(next_u64(state)),
+            3 => {
+                let length = (next_u64(state) % 96) as usize;
+                Value::String(
+                    (0..length)
+                        .map(|_| char::from(0x20 + (next_u64(state) % 95) as u8))
+                        .collect(),
+                )
+            }
+            4 => Value::Array(
+                (0..(next_u64(state) % 6))
+                    .map(|_| generated_json(state, depth + 1))
+                    .collect(),
+            ),
+            _ => {
+                let mut values = serde_json::Map::new();
+                for index in 0..(next_u64(state) % 6) {
+                    values.insert(
+                        format!("k{depth}_{index}"),
+                        generated_json(state, depth + 1),
+                    );
+                }
+                Value::Object(values)
+            }
+        }
+    }
 
     async fn assert_golden(request: &str, expected: &str) {
         let response = handle(request.as_bytes(), &DisconnectedAdapter).await;
@@ -239,5 +278,55 @@ mod contract_tests {
         let bytes = to_bytes(deep.into_body(), 4096).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["error"]["code"], -32600);
+    }
+
+    #[tokio::test]
+    async fn deterministic_mcp_body_corpus_returns_bounded_protocol_responses() {
+        const SEED: u64 = 0x4d43_505f_4a53_4f4e;
+        const CASES: usize = 2_048;
+        let mut state = SEED;
+        for case in 0..CASES {
+            let method = match case % 5 {
+                0 => "ping",
+                1 => "initialize",
+                2 => "tools/list",
+                3 => "tools/call",
+                _ => "unknown.method",
+            };
+            let request = json!({
+                "jsonrpc": if case % 17 == 0 { "1.0" } else { "2.0" },
+                "id": case,
+                "method": method,
+                "params": generated_json(&mut state, 0),
+            });
+            let response =
+                handle(&serde_json::to_vec(&request).unwrap(), &DisconnectedAdapter).await;
+            let bytes = to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap_or_else(|error| panic!("seed={SEED:#x} case={case}: {error}"));
+            assert!(bytes.len() <= 64 * 1024, "seed={SEED:#x} case={case}");
+            let value: Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|error| panic!("seed={SEED:#x} case={case}: {error}"));
+            assert_eq!(value["jsonrpc"], "2.0", "seed={SEED:#x} case={case}");
+            assert!(
+                value.get("result").is_some() || value.get("error").is_some(),
+                "seed={SEED:#x} case={case}"
+            );
+        }
+
+        for case in 0..CASES {
+            let length = (next_u64(&mut state) % 4_097) as usize;
+            let mut body = vec![0_u8; length];
+            for byte in &mut body {
+                *byte = u8::try_from(next_u64(&mut state) & 0xff).unwrap();
+            }
+            let response = handle(&body, &DisconnectedAdapter).await;
+            let bytes = to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap_or_else(|error| panic!("seed={SEED:#x} raw_case={case}: {error}"));
+            let value: Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|error| panic!("seed={SEED:#x} raw_case={case}: {error}"));
+            assert_eq!(value["jsonrpc"], "2.0", "seed={SEED:#x} raw_case={case}");
+        }
     }
 }

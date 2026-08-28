@@ -560,3 +560,31 @@ disassembly, compact snapshot, and filtered memory-map reads retained generation
 filter returned one region. Both known strings remained discoverable on their
 first bounded page, `debugger.stop` reported `absent`, and debugger closure left
 the installed sidecar stopped.
+
+## 2026-08-29 deterministic robustness follow-up
+
+ADR 0012 adds fixed-seed, dependency-free malformed-input corpora to the normal
+release gate without claiming they replace coverage-guided fuzzing. Rust now
+executes 4,096 arbitrary bounded IPC frames, 4,096 generated argument shapes
+distributed across all 25 tool validators, and 2,048 structured plus 2,048 raw
+MCP bodies. Accepted IPC values must round-trip canonically, and every MCP body
+must produce bounded protocol JSON. The native UTF-8 test in each architecture
+now escapes 4,096 byte strings up to 256 bytes and checks output size, quoting,
+valid UTF-8, and case-search safety.
+
+Rust coverage increased from 46 to 49 unit/contract tests plus the six supervised
+shutdown cases. Clippy rejected the first corpus implementation's potentially
+truncating test-only integer casts; checked conversions now preserve x32 safety.
+One parallel idle-shutdown repetition also exposed an ephemeral-port test race
+between selection and sidecar bind. The harness now serializes only that startup
+window, proves the HTTP listener is bound, and owns the child before the probe so
+failure cleanup remains deterministic. Five consecutive parallel matrix runs,
+both native seven-test suites, and fresh isolated x32/x64 integration runs then
+passed; both owned sidecars exited and both loopback ports closed.
+
+The installed `checksum.exe` acceptance run again loaded at `0x770000`, resolved
+RVA `0xa78a0` to `0x8178a0`, hit the software breakpoint once, and retained
+generation `27` across pause, registers, memory, disassembly, compact snapshot,
+and filtered map results. Eight compact instructions, one executable module
+region, and both known strings were returned within their bounds. The explicit
+stop reported `absent`, with no mutation retry or remaining sidecar.

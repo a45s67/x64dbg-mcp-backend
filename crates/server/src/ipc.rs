@@ -227,6 +227,13 @@ mod tests {
         }
     }
 
+    fn next_u64(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state
+    }
+
     #[test]
     fn frame_round_trip_is_exact() {
         let message = handshake();
@@ -267,6 +274,46 @@ mod tests {
             decode_frame::<Handshake>(&[1, 0, 0, 0, b'{']),
             Err(FrameError::InvalidPayload)
         );
+    }
+
+    #[test]
+    fn deterministic_malformed_frame_corpus_stays_bounded_and_canonical() {
+        const SEED: u64 = 0x5844_4247_4950_4331;
+        const CASES: usize = 4_096;
+        const MAX_CORPUS_BYTES: usize = 4_096;
+        let mut state = SEED;
+        for case in 0..CASES {
+            let modulus = u64::try_from(MAX_CORPUS_BYTES + 1).unwrap();
+            let length = usize::try_from(next_u64(&mut state) % modulus).unwrap();
+            let mut frame = vec![0_u8; length];
+            for byte in &mut frame {
+                *byte = u8::try_from(next_u64(&mut state) & 0xff).unwrap();
+            }
+            if frame.len() >= LENGTH_PREFIX_BYTES {
+                let available = frame.len() - LENGTH_PREFIX_BYTES;
+                let declared = match case % 6 {
+                    0 => available,
+                    1 => available.saturating_add(1),
+                    2 => available.saturating_sub(1),
+                    3 => 0,
+                    4 => MAX_FRAME_BYTES + 1,
+                    _ => usize::try_from(
+                        u32::try_from(next_u64(&mut state) & u64::from(u32::MAX)).unwrap(),
+                    )
+                    .unwrap(),
+                };
+                let declared = u32::try_from(declared).unwrap_or(u32::MAX);
+                frame[..LENGTH_PREFIX_BYTES].copy_from_slice(&declared.to_le_bytes());
+            }
+            if let Ok(value) = decode_frame::<Value>(&frame) {
+                let canonical = encode_frame(&value)
+                    .unwrap_or_else(|error| panic!("seed={SEED:#x} case={case}: {error}"));
+                let decoded: Value = decode_frame(&canonical)
+                    .unwrap_or_else(|error| panic!("seed={SEED:#x} case={case}: {error}"));
+                assert_eq!(decoded, value, "seed={SEED:#x} case={case}");
+                assert!(canonical.len() <= MAX_FRAME_BYTES + LENGTH_PREFIX_BYTES);
+            }
+        }
     }
 
     #[test]

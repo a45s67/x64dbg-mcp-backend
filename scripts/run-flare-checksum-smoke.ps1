@@ -151,9 +151,20 @@ try {
     $registerSnapshot = Invoke-Tool 'registers.read' @{ names = @('rip', 'rsp') } 36
     $memorySnapshot = Invoke-Tool 'memory.read' @{ address = $moduleRef; length = 16 } 37
     $disassemblySnapshot = Invoke-Tool 'disassembly.read' @{ address = $moduleRef; count = 4 } 38
+    $compactSnapshot = Invoke-Tool 'debugger.snapshot' @{} 39
+    $filteredMap = Invoke-Tool 'memory.map' @{
+        module = [System.IO.Path]::GetFileName($sample).ToUpperInvariant()
+        committed_only = $true; executable_only = $true; compact = $true; limit = 32
+    } 41
     if ($registerSnapshot.state_generation -ne $mainPause.state_generation -or
         $memorySnapshot.state_generation -ne $mainPause.state_generation -or
         $disassemblySnapshot.state_generation -ne $mainPause.state_generation -or
+        $compactSnapshot.state_generation -ne $mainPause.state_generation -or
+        $compactSnapshot.instruction_pointer.address -ne $resolved.address -or
+        @($compactSnapshot.registers.PSObject.Properties).Count -ne 4 -or
+        @($compactSnapshot.disassembly).Count -ne 8 -or
+        @($filteredMap.items).Count -eq 0 -or
+        $filteredMap.state_generation -ne $mainPause.state_generation -or
         $memorySnapshot.location.state_generation -ne $memorySnapshot.state_generation -or
         $disassemblySnapshot.location.state_generation -ne $disassemblySnapshot.state_generation) {
         throw 'Installed read tools did not preserve the stable main-pause generation.'
@@ -200,6 +211,8 @@ try {
         memory_generation = $memorySnapshot.state_generation
         disassembly_generation = $disassemblySnapshot.state_generation
         snapshot_generations_equal = $true
+        compact_snapshot_instructions = @($compactSnapshot.disassembly).Count
+        filtered_executable_regions = @($filteredMap.items).Count
         main_symbols = @($mainSymbols.items).Count
         main_functions = @($mainFunctions.items).Count
         inbound_main_references = @($mainReferences.items).Count

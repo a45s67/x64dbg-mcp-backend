@@ -30,10 +30,12 @@ timeout is different: its outcome may be unknown and must not be resubmitted und
 
 ## Compact paused inspection
 
-Start with `registers.read` for only relevant registers, `disassembly.read` with a small count at
-the instruction pointer, and small `memory.read` calls for concrete addresses. Add paginated
+Start with `debugger.snapshot` for a bounded register/IP/disassembly view, or use
+`registers.read` and `disassembly.read` separately when their independent controls matter. Use
+small `memory.read` calls for concrete addresses. Add paginated
 `modules.list`, `threads.list`, or `breakpoints.list` only when the task needs them. Keep
-`memory.map` narrow by page size and cursor; it is not a default snapshot.
+`memory.map` only when needed, using module/committed/executable filters plus a modest page size;
+it is not part of the default compact snapshot.
 
 All related results should retain the same `state_generation`. If a call returns `BUSY`, discard
 the partial logical snapshot and collect a new one after confirming the current pause.

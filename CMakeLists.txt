@@ -16,6 +16,7 @@ if(BUILD_TESTING)
   add_executable(x64dbg_mcp_lifecycle_test
     plugin/tests/lifecycle_harness.cpp
     plugin/src/debugger_executor.cpp
+    plugin/src/memory_filters.cpp
     plugin/src/runtime.cpp
     plugin/src/utf8.cpp
   )
@@ -54,10 +55,21 @@ if(BUILD_TESTING)
   target_compile_definitions(x64dbg_mcp_utf8_test PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(x64dbg_mcp_utf8_test PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
+
+  add_executable(x64dbg_mcp_memory_filters_test
+    plugin/tests/memory_filters_test.cpp
+    plugin/src/memory_filters.cpp
+  )
+  target_compile_features(x64dbg_mcp_memory_filters_test PRIVATE cxx_std_20)
+  target_include_directories(x64dbg_mcp_memory_filters_test PRIVATE plugin/src)
+  target_compile_definitions(x64dbg_mcp_memory_filters_test PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(x64dbg_mcp_memory_filters_test PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
 endif()
 
 add_library(x64dbg_mcp_plugin SHARED
   plugin/src/debugger_executor.cpp
+  plugin/src/memory_filters.cpp
   plugin/src/plugin.cpp
   plugin/src/runtime.cpp
   plugin/src/utf8.cpp
@@ -108,6 +120,7 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME executor-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_executor_test)
   add_test(NAME utf8-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_utf8_test)
+  add_test(NAME memory-filters-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_memory_filters_test)
   add_test(NAME lifecycle-${MCP_TEST_ARCH}
     COMMAND x64dbg_mcp_lifecycle_test
       "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe" "${MCP_TEST_PORT}")
@@ -126,7 +139,8 @@ if(BUILD_TESTING)
     COMMAND x64dbg_mcp_lifecycle_test
       "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe"
       "${MCP_ACTIVE_WAIT_TEST_PORT}" active-wait-shutdown)
-  set_tests_properties(executor-${MCP_TEST_ARCH} utf8-${MCP_TEST_ARCH} lifecycle-${MCP_TEST_ARCH}
+  set_tests_properties(executor-${MCP_TEST_ARCH} utf8-${MCP_TEST_ARCH}
+    memory-filters-${MCP_TEST_ARCH} lifecycle-${MCP_TEST_ARCH}
     sidecar-crash-${MCP_TEST_ARCH} installed-config-${MCP_TEST_ARCH}
     active-wait-shutdown-${MCP_TEST_ARCH}
     PROPERTIES TIMEOUT 15)

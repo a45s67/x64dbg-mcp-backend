@@ -151,6 +151,7 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | Tool | Kind | Valid state | Purpose / key bounds |
 |---|---|---|---|
 | `debugger.state` | read | any | Backend, lifecycle state, PID/TID, architecture |
+| `debugger.snapshot` | read | paused | Compact pause/register/IP snapshot with at most 64 instructions |
 | `debugger.wait_for_pause` | read | active debuggee | Wait for a newer callback pause; 1-9,000 ms; structured reason |
 | `debugger.pause` | mutate | running | Request pause; bounded wait for callback confirmation |
 | `debugger.resume` | mutate | paused | Resume execution |
@@ -162,7 +163,7 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `address.resolve` | read | paused | Resolve absolute or module/RVA input and return canonical location metadata |
 | `memory.read` | read | paused | Read at most 64 KiB per call; report partial/unreadable ranges |
 | `memory.write` | mutate | paused | Write at most 4 KiB; explicit hex bytes and operation ID |
-| `memory.map` | read | paused | Paginated memory regions, at most 256 per page |
+| `memory.map` | read | paused | Paginated regions, at most 256 per page; optional module/committed/executable/compact filters |
 | `modules.list` | read | paused | Paginated loaded modules, at most 256 per page |
 | `threads.list` | read | paused | Paginated threads, at most 256 per page |
 | `breakpoints.list` | read | paused/running | Paginated breakpoint snapshot |

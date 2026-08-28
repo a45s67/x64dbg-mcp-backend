@@ -39,6 +39,29 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
         .ok_or(invalid("arguments", "must be an object"))?;
     match name {
         "debugger.state" => exact_keys(object, &[], &[]),
+        "debugger.snapshot" => {
+            exact_keys(object, &[], &["registers", "disassembly_count"])?;
+            if let Some(registers) = object.get("registers") {
+                let registers = registers
+                    .as_array()
+                    .filter(|values| (1..=16).contains(&values.len()))
+                    .ok_or(invalid("registers", "must contain 1 to 16 register names"))?;
+                if registers.iter().any(|name| {
+                    name.as_str()
+                        .is_none_or(|value| value.is_empty() || value.len() > 32)
+                }) {
+                    return Err(invalid("registers", "contains an invalid register name"));
+                }
+                let unique = registers
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<std::collections::HashSet<_>>();
+                if unique.len() != registers.len() {
+                    return Err(invalid("registers", "register names must be unique"));
+                }
+            }
+            optional_integer(object, "disassembly_count", 0, 64)
+        }
         "debugger.wait_for_pause" => {
             exact_keys(object, &["after_generation"], &["timeout_ms"])?;
             integer(object, "after_generation", 0, 9_007_199_254_740_991)?;
@@ -107,7 +130,30 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             }
             Ok(())
         }
-        "memory.map" | "modules.list" | "threads.list" | "breakpoints.list" => page(object),
+        "memory.map" => {
+            exact_keys(
+                object,
+                &[],
+                &[
+                    "module",
+                    "committed_only",
+                    "executable_only",
+                    "compact",
+                    "limit",
+                    "cursor",
+                ],
+            )?;
+            if object.contains_key("module") {
+                validate_module_name(object, "module")?;
+            }
+            for field in ["committed_only", "executable_only", "compact"] {
+                if object.get(field).is_some_and(|value| !value.is_boolean()) {
+                    return Err(invalid(field, "must be a boolean"));
+                }
+            }
+            discovery_page(object)
+        }
+        "modules.list" | "threads.list" | "breakpoints.list" => page(object),
         "breakpoints.set" | "breakpoints.remove" => {
             operation(object, &["address"])?;
             validate_address_ref(object, "address")
@@ -362,6 +408,23 @@ fn build_catalog() -> Vec<Value> {
             object(vec![], vec![]),
         ),
         read_tool(
+            "debugger.snapshot",
+            "Capture one compact generation-consistent paused snapshot containing selected registers, pause metadata, the instruction-pointer location, and bounded disassembly.",
+            object(
+                vec![
+                    (
+                        "registers",
+                        json!({"type":"array","items":{"type":"string","minLength":1,"maxLength":32},"minItems":1,"maxItems":16,"uniqueItems":true}),
+                    ),
+                    (
+                        "disassembly_count",
+                        json!({"type":"integer","minimum":0,"maximum":64,"default":8}),
+                    ),
+                ],
+                vec![],
+            ),
+        ),
+        read_tool(
             "debugger.wait_for_pause",
             "Wait on debugger callbacks for a pause newer than after_generation. This is read-only observation; timeout does not make a prior mutation ambiguous.",
             object(
@@ -467,8 +530,24 @@ fn build_catalog() -> Vec<Value> {
         ),
         read_tool(
             "memory.map",
-            "List bounded, paginated memory regions for a paused debuggee.",
-            page_schema(),
+            "List bounded, paginated memory regions for a paused debuggee, optionally filtered by loaded module, committed state, and executable protection.",
+            object(
+                vec![
+                    ("module", module_name_schema()),
+                    ("committed_only", json!({"type":"boolean","default":false})),
+                    ("executable_only", json!({"type":"boolean","default":false})),
+                    ("compact", json!({"type":"boolean","default":false})),
+                    (
+                        "limit",
+                        json!({"type":"integer","minimum":1,"maximum":256,"default":100}),
+                    ),
+                    (
+                        "cursor",
+                        json!({"type":"string","minLength":1,"maxLength":512}),
+                    ),
+                ],
+                vec![],
+            ),
         ),
         read_tool(
             "modules.list",
@@ -740,7 +819,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 24);
+        assert_eq!(catalog().len(), 25);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -755,6 +834,15 @@ mod tests {
     #[test]
     fn validation_enforces_bounds_and_additional_properties() {
         assert!(validate_arguments("debugger.state", &json!({})).is_ok());
+        assert!(
+            validate_arguments(
+                "debugger.snapshot",
+                &json!({"registers":["cip","csp"],"disassembly_count":64})
+            )
+            .is_ok()
+        );
+        assert!(validate_arguments("debugger.snapshot", &json!({"registers":[]})).is_err());
+        assert!(validate_arguments("debugger.snapshot", &json!({"disassembly_count":65})).is_err());
         assert!(
             validate_arguments(
                 "debugger.wait_for_pause",
@@ -801,6 +889,14 @@ mod tests {
         assert!(
             validate_arguments("memory.read", &json!({"address":"0x1000","length":65537})).is_err()
         );
+        assert!(
+            validate_arguments(
+                "memory.map",
+                &json!({"module":"sample.exe","committed_only":true,"executable_only":true,"compact":true,"limit":32})
+            )
+            .is_ok()
+        );
+        assert!(validate_arguments("memory.map", &json!({"committed_only":1})).is_err());
         assert!(
             validate_arguments(
                 "debuggee.launch",

@@ -481,3 +481,31 @@ observed one software breakpoint hit, and retained generation `27` across pause,
 register, memory, and disassembly results. The bounded string recipe found both
 known literals, reported empty discovery databases as `known_only`, and stopped
 the debuggee and sidecar cleanly without a blind mutation retry.
+
+## 2026-08-29 compact snapshot and memory-map follow-up
+
+ADR 0009 adds `debugger.snapshot` for the frequent paused-state question of
+which thread stopped, where its instruction pointer is, and what the nearby
+instructions are. The default response is deliberately fixed at four portable
+registers and eight instructions. It captures one callback generation and
+rechecks that exact paused generation after native register, module, and
+disassembly reads. `memory.map` now supports module-overlap, committed,
+executable-protection, and compact-shape filters with v2 cursors bound to every
+filter and the debugger generation.
+
+Fresh isolated x32 and x64 fixtures each returned an eight-instruction compact
+snapshot and one bounded committed executable region overlapping the fixture
+module. Both rejected a cursor reused with different filters as
+`INVALID_ARGUMENT`, rejected the same-generation cursor after stepping as
+`STALE_CURSOR`, kept the connection usable after both errors, and completed the
+existing mutation-replay, callback, stop, and supervised-shutdown checks. Rust
+kept 44 passing tests; each native architecture now has seven passing tests,
+including pure executable-protection and overflow-safe range-overlap coverage.
+
+The deployed `checksum.exe` acceptance run loaded the image at `0x770000`,
+resolved `{module: "CHECKSUM.EXE", rva: "0xa78a0"}` to `0x8178a0`, and hit the
+software breakpoint once. Pause, registers, memory, disassembly, compact
+snapshot, and filtered memory map all retained generation `27`; the compact
+snapshot contained eight instructions and the module-filtered committed
+executable map returned one region. Both known strings were still found on the
+first bounded page, then the debuggee and plugin-owned sidecar stopped cleanly.

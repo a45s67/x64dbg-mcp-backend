@@ -191,6 +191,14 @@ try {
     }
     $moduleMemory = Invoke-Tool 'memory.read' @{ address = $moduleEntryRef; length = 16 } 42
     $moduleDisassembly = Invoke-Tool 'disassembly.read' @{ address = $moduleEntryRef; count = 4 } 43
+    $compactSnapshot = Invoke-Tool 'debugger.snapshot' @{} 54
+    if ($compactSnapshot.state_generation -ne $state.state_generation -or
+        $compactSnapshot.instruction_pointer.address -ne $expression.value -or
+        $compactSnapshot.instruction_pointer.state_generation -ne $compactSnapshot.state_generation -or
+        @($compactSnapshot.registers.PSObject.Properties).Count -ne 4 -or
+        @($compactSnapshot.disassembly).Count -ne 8) {
+        throw 'Compact debugger snapshot mixed generations or omitted its bounded default fields.'
+    }
     $symbols = Invoke-Tool 'symbols.search' @{
         module = $fixtureModule.name.ToUpperInvariant(); query = 'mcp_fixture'; limit = 32
     } 60
@@ -246,6 +254,46 @@ try {
     $threads = Invoke-Tool 'threads.list' @{ limit = 2 } 8
     $memoryMap = Invoke-Tool 'memory.map' @{ limit = 2 } 9
     $cursorProbe = Invoke-Tool 'memory.map' @{ limit = 1 } 52
+    $filteredMap = Invoke-Tool 'memory.map' @{
+        module = $fixtureModule.name.ToUpperInvariant(); committed_only = $true
+        executable_only = $true; compact = $true; limit = 1
+    } 69
+    if (@($filteredMap.items).Count -ne 1 -or !$filteredMap.next_cursor -or
+        !$filteredMap.next_cursor.StartsWith('v2:')) {
+        throw 'Filtered memory.map did not return one bounded item and a v2 cursor.'
+    }
+    $moduleEnd = $moduleBase + [Convert]::ToUInt64($fixtureModule.size.Substring(2), 16)
+    foreach ($region in @($filteredMap.items)) {
+        $regionBase = [Convert]::ToUInt64($region.base.Substring(2), 16)
+        $regionSize = [Convert]::ToUInt64($region.size.Substring(2), 16)
+        if ($region.state -ne '0x1000' -or $regionBase -ge $moduleEnd -or
+            ($regionBase + $regionSize) -le $moduleBase) {
+            throw 'Filtered memory.map returned a non-committed region outside the fixture module.'
+        }
+        if ($region.PSObject.Properties.Name -contains 'allocation_base' -and
+            $region.allocation_base -eq $region.base) {
+            throw 'Compact memory.map retained a redundant allocation_base.'
+        }
+        if ($region.PSObject.Properties.Name -contains 'info' -and
+            [string]::IsNullOrEmpty($region.info)) {
+            throw 'Compact memory.map retained an empty info field.'
+        }
+    }
+    $mismatchedMapCursor = Invoke-Mcp 'tools/call' @{
+        name = 'memory.map'; arguments = @{
+            module = $fixtureModule.name.ToUpperInvariant(); committed_only = $true
+            executable_only = $true; compact = $false; limit = 1
+            cursor = $filteredMap.next_cursor
+        }
+    } 70
+    if (!$mismatchedMapCursor.isError -or
+        $mismatchedMapCursor.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Memory-map cursor was not bound to its exact filters.'
+    }
+    $afterMapCursorError = Invoke-Tool 'debugger.state' @{} 71
+    if ($afterMapCursorError.plugin_state -ne 'ready') {
+        throw 'A mismatched memory-map cursor damaged the plugin connection.'
+    }
     $breakpoints = Invoke-Tool 'breakpoints.list' @{ limit = 2 } 10
     if (!$state.state_generation -or !$registers.state_generation -or
         !$expression.state_generation -or !$memory.state_generation -or
@@ -262,7 +310,8 @@ try {
         throw 'memory.map did not return a cursor for stale-generation testing.'
     }
     $cursorParts = $cursorProbe.next_cursor.Split(':')
-    if ($cursorParts.Count -ne 3 -or [uint64]$cursorParts[1] -ne $cursorProbe.state_generation) {
+    if ($cursorParts.Count -ne 4 -or $cursorParts[0] -ne 'v2' -or
+        [uint64]$cursorParts[1] -ne $cursorProbe.state_generation) {
         throw 'Pagination cursor generation does not match its snapshot.'
     }
 
@@ -336,7 +385,7 @@ try {
         name = 'memory.map'; arguments = @{ limit = 1; cursor = $cursorProbe.next_cursor }
     } 53
     if (!$staleCursor.isError -or
-        $staleCursor.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        $staleCursor.structuredContent.error.code -ne 'STALE_CURSOR') {
         throw 'A cursor from an older debugger generation was not rejected.'
     }
     $staleDiscoveryCursor = Invoke-Mcp 'tools/call' @{
@@ -376,6 +425,8 @@ try {
         modules = $modules.items.Count
         threads = $threads.items.Count
         memory_regions = $memoryMap.items.Count
+        compact_snapshot_instructions = @($compactSnapshot.disassembly).Count
+        filtered_executable_regions = @($filteredMap.items).Count
         snapshot_generations_present = $true
         address_snapshot_generations_equal = $true
         cursor_generation_matches = $true

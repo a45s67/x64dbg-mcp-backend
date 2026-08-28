@@ -33,7 +33,7 @@ foreach ($reference in @('references\recipes.md', 'references\troubleshooting.md
 }
 
 $published = @(
-    'debugger.state', 'debugger.wait_for_pause', 'debugger.pause', 'debugger.resume',
+    'debugger.state', 'debugger.snapshot', 'debugger.wait_for_pause', 'debugger.pause', 'debugger.resume',
     'debugger.step_into', 'debugger.step_over', 'debugger.stop', 'debuggee.launch',
     'registers.read', 'address.resolve', 'memory.read', 'memory.write', 'memory.map',
     'modules.list', 'threads.list', 'breakpoints.list', 'breakpoints.set',

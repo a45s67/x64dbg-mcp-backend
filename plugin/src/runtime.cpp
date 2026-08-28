@@ -27,6 +27,7 @@
 #include "_scriptapi_module.h"
 #include "_scriptapi_symbol.h"
 #include "jansson/jansson.h"
+#include "memory_filters.h"
 
 namespace mcp {
 namespace {
@@ -143,6 +144,9 @@ struct Request {
     std::size_t minStringLength{4U};
     std::optional<std::uint64_t> cursorFingerprint;
     bool discoveryCursorInvalid{false};
+    bool committedOnly{false};
+    bool executableOnly{false};
+    bool compact{false};
 };
 
 bool IsMutation(const std::string_view method) {
@@ -154,7 +158,7 @@ bool IsMutation(const std::string_view method) {
 }
 
 bool IsPageMethod(const std::string_view method) {
-    return method == "memory.map" || method == "modules.list" || method == "threads.list" ||
+    return method == "modules.list" || method == "threads.list" ||
            method == "breakpoints.list";
 }
 
@@ -406,9 +410,36 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::size_t minStringLength = 4U;
     std::optional<std::uint64_t> cursorFingerprint;
     bool discoveryCursorInvalid = false;
+    bool committedOnly = false;
+    bool executableOnly = false;
+    bool compact = false;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
+        }
+    } else if (methodValue == "debugger.snapshot") {
+        json_t* registers = json_object_get(payload, "registers");
+        json_t* count = json_object_get(payload, "disassembly_count");
+        const std::size_t expectedFields = (registers ? 1U : 0U) + (count ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields) return std::nullopt;
+        instructionCount = 8U;
+        if (registers != nullptr) {
+            if (!json_is_array(registers) || json_array_size(registers) < 1U ||
+                json_array_size(registers) > 16U) return std::nullopt;
+            for (std::size_t index = 0; index < json_array_size(registers); ++index) {
+                json_t* name = json_array_get(registers, index);
+                if (!json_is_string(name) || json_string_length(name) == 0U ||
+                    json_string_length(name) > 32U) return std::nullopt;
+                std::string value(json_string_value(name), json_string_length(name));
+                if (std::find(registerNames.begin(), registerNames.end(), value) !=
+                    registerNames.end()) return std::nullopt;
+                registerNames.push_back(std::move(value));
+            }
+        }
+        if (count != nullptr) {
+            if (!json_is_integer(count) || json_integer_value(count) < 0 ||
+                json_integer_value(count) > 64) return std::nullopt;
+            instructionCount = static_cast<std::size_t>(json_integer_value(count));
         }
     } else if (methodValue == "debugger.wait_for_pause") {
         json_t* after = json_object_get(payload, "after_generation");
@@ -493,6 +524,50 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                     return std::nullopt;
                 }
                 registerNames.push_back(std::move(value));
+            }
+        }
+    } else if (methodValue == "memory.map") {
+        json_t* module = json_object_get(payload, "module");
+        json_t* committed = json_object_get(payload, "committed_only");
+        json_t* executable = json_object_get(payload, "executable_only");
+        json_t* compactValue = json_object_get(payload, "compact");
+        json_t* limit = json_object_get(payload, "limit");
+        json_t* cursor = json_object_get(payload, "cursor");
+        const std::size_t expectedFields = (module ? 1U : 0U) + (committed ? 1U : 0U) +
+                                           (executable ? 1U : 0U) +
+                                           (compactValue ? 1U : 0U) + (limit ? 1U : 0U) +
+                                           (cursor ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields ||
+            (module != nullptr && !IsBoundedModuleName(module)) ||
+            (committed != nullptr && !json_is_boolean(committed)) ||
+            (executable != nullptr && !json_is_boolean(executable)) ||
+            (compactValue != nullptr && !json_is_boolean(compactValue))) return std::nullopt;
+        if (module != nullptr) {
+            moduleFilter.assign(json_string_value(module), json_string_length(module));
+        }
+        committedOnly = json_is_true(committed);
+        executableOnly = json_is_true(executable);
+        compact = json_is_true(compactValue);
+        if (limit != nullptr) {
+            if (!json_is_integer(limit) || json_integer_value(limit) < 1 ||
+                json_integer_value(limit) > 256) return std::nullopt;
+            pageLimit = static_cast<std::size_t>(json_integer_value(limit));
+        }
+        const std::uint64_t expectedFingerprint = DiscoveryFingerprint(
+            methodValue, moduleFilter, committedOnly ? "1" : "0",
+            executableOnly ? "1" : "0", compact ? 1U : 0U);
+        cursorFingerprint = expectedFingerprint;
+        if (cursor != nullptr) {
+            if (!json_is_string(cursor)) return std::nullopt;
+            std::uint64_t cursorGenerationValue = 0U;
+            std::uint64_t fingerprintValue = 0U;
+            const std::string_view cursorText(json_string_value(cursor), json_string_length(cursor));
+            if (!ParseDiscoveryCursor(cursorText, cursorGenerationValue, fingerprintValue,
+                                      cursorIndex)) {
+                discoveryCursorInvalid = true;
+            } else {
+                cursorGeneration = cursorGenerationValue;
+                discoveryCursorInvalid = fingerprintValue != expectedFingerprint;
             }
         }
     } else if (IsDiscoveryMethod(methodValue)) {
@@ -657,7 +732,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    cursorGeneration, cursorIndex, instructionCount,
                    std::move(writeBytes), afterGeneration, waitTimeoutMs,
                    std::move(moduleFilter), std::move(query), std::move(stringEncoding),
-                   minStringLength, cursorFingerprint, discoveryCursorInvalid};
+                   minStringLength, cursorFingerprint, discoveryCursorInvalid,
+                   committedOnly, executableOnly, compact};
 }
 
 bool IsAcceptedHandshakeAck(const std::string_view bytes) {
@@ -1304,6 +1380,99 @@ void Runtime::Worker() noexcept {
                            ",\"pause_reason\":" + PauseReasonJson(pause) + "}}";
                 }
 #ifndef MCP_LIFECYCLE_HARNESS
+                if (parsed->method == "debugger.snapshot") {
+                    const auto snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false,
+                                             false);
+                    }
+                    PauseObservation pause;
+                    {
+                        std::lock_guard lock(stateMutex_);
+                        if (generation_.load() != *snapshot ||
+                            debuggeeState_.load() != DebuggeeState::paused) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "pause changed before snapshot capture", true,
+                                                 false);
+                        }
+                        pause = latestPause_;
+                    }
+                    REGDUMP_AVX512 dump{};
+                    if (!DbgGetRegDumpEx(&dump, sizeof(dump))) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "register snapshot is unavailable", true, false);
+                    }
+                    std::vector<std::string> names = parsed->registerNames;
+                    if (names.empty()) names = {"cip", "csp", "cbp", "eflags"};
+                    std::string registers = "{";
+                    for (std::size_t index = 0; index < names.size(); ++index) {
+                        const auto value = RegisterValue(dump.regcontext, names[index]);
+                        if (!value) {
+                            return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                                 "unknown register name", false, false);
+                        }
+                        if (index != 0U) registers.push_back(',');
+                        registers += JsonString(names[index]) + ":" +
+                                     JsonString(HexValue(*value));
+                    }
+                    registers += "}";
+                    const auto modules = CaptureModuleRecords();
+                    if (!modules) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "module snapshot is invalid", true, false);
+                    }
+                    const duint instructionPointer = dump.regcontext.cip;
+                    const auto location = LocationFromModules(instructionPointer, *modules);
+                    std::string disassembly = "[";
+                    duint address = instructionPointer;
+                    for (std::size_t index = 0; index < parsed->instructionCount; ++index) {
+                        if (std::chrono::steady_clock::now() >= requestDeadline) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "compact snapshot exceeded its deadline", true,
+                                                 false);
+                        }
+                        DISASM_INSTR instruction{};
+                        DbgDisasmAt(address, &instruction);
+                        if (instruction.instr_size <= 0 || instruction.instr_size > 15) {
+                            return ErrorResponse(*parsed, "ACCESS_DENIED",
+                                                 "instruction bytes are not decodable", false,
+                                                 false);
+                        }
+                        const duint size = static_cast<duint>(instruction.instr_size);
+                        if (address > (std::numeric_limits<duint>::max)() - size) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "instruction address overflow", false, false);
+                        }
+                        if (index != 0U) disassembly.push_back(',');
+                        const std::size_t textLength =
+                            strnlen_s(instruction.instruction, sizeof(instruction.instruction));
+                        disassembly += "{\"address\":" + JsonString(HexValue(address)) +
+                                       ",\"size\":" + std::to_string(size) +
+                                       ",\"text\":" +
+                                       JsonString(std::string_view(instruction.instruction,
+                                                                   textLength)) +
+                                       "}";
+                        address += size;
+                    }
+                    disassembly += "]";
+                    const std::uint32_t threadId = DbgGetThreadId();
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during compact snapshot", true,
+                                             false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"debuggee_state\":\"paused\"" +
+                           std::string(",\"state_generation\":") +
+                           std::to_string(*snapshot) + ",\"pause_reason\":" +
+                           PauseReasonJson(pause) + ",\"active_thread_id\":" +
+                           (threadId == 0U ? "null" : JsonString(HexValue(threadId))) +
+                           ",\"instruction_pointer\":" + LocationJson(location, *snapshot) +
+                           ",\"registers\":" + registers +
+                           ",\"disassembly\":" + disassembly + "}}";
+                }
                 const bool addressMethod = parsed->method == "address.resolve" ||
                                            parsed->method == "memory.read" ||
                                            parsed->method == "memory.write" ||
@@ -1332,7 +1501,7 @@ void Runtime::Worker() noexcept {
                                              false);
                     }
                 }
-                if (IsDiscoveryMethod(parsed->method) && parsed->discoveryCursorInvalid) {
+                if (parsed->discoveryCursorInvalid) {
                     return ErrorResponse(*parsed, "INVALID_ARGUMENT",
                                          "cursor does not match the discovery filters", false,
                                          false);
@@ -2231,8 +2400,21 @@ void Runtime::Worker() noexcept {
                     }
                     const std::uint64_t generation = *snapshot;
                     if (parsed->cursorGeneration && *parsed->cursorGeneration != generation) {
-                        return ErrorResponse(*parsed, "INVALID_ARGUMENT", "cursor is stale", false,
+                        return ErrorResponse(*parsed, "STALE_CURSOR", "cursor generation is stale", false,
                                              false);
+                    }
+                    std::optional<ModuleRecord> selectedModule;
+                    if (!parsed->module.empty()) {
+                        const auto modules = CaptureModuleRecords();
+                        if (!modules) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "module snapshot is invalid", true, false);
+                        }
+                        selectedModule = UniqueModule(*modules, parsed->module);
+                        if (!selectedModule) {
+                            return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                                 "module is missing or ambiguous", false, false);
+                        }
                     }
                     MEMMAP map{};
                     if (!DbgMemMap(&map)) {
@@ -2246,39 +2428,70 @@ void Runtime::Worker() noexcept {
                         }
                     } guard{map.page};
                     if (map.count < 0 || (map.count > 0 && map.page == nullptr) ||
-                        map.count > 1'000'000) {
-                        return ErrorResponse(*parsed, "INTERNAL", "memory map is invalid", false,
-                                             false);
+                        map.count > 65536) {
+                        return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                             "memory map exceeds native bounds", false, false);
                     }
                     const std::size_t count = static_cast<std::size_t>(map.count);
                     if (parsed->cursorIndex > count) {
                         return ErrorResponse(*parsed, "INVALID_ARGUMENT", "cursor is invalid",
                                              false, false);
                     }
-                    const std::size_t end =
-                        (std::min)(count, parsed->cursorIndex + parsed->pageLimit);
                     std::string items = "[";
-                    for (std::size_t index = parsed->cursorIndex; index < end; ++index) {
+                    std::size_t index = parsed->cursorIndex;
+                    std::size_t emitted = 0U;
+                    for (; index < count && emitted < parsed->pageLimit; ++index) {
+                        if ((index & 0xffU) == 0U) {
+                            if (std::chrono::steady_clock::now() >= requestDeadline) {
+                                return ErrorResponse(*parsed, "TIMEOUT",
+                                                     "memory-map filtering exceeded its deadline",
+                                                     true, false);
+                            }
+                            if (!PausedSnapshotCurrent(generation)) {
+                                return ErrorResponse(*parsed, "BUSY",
+                                                     "debugger changed during memory-map filtering",
+                                                     true, false);
+                            }
+                        }
                         const MEMPAGE& page = map.page[index];
-                        if (index != parsed->cursorIndex) items.push_back(',');
+                        const std::uint64_t base = reinterpret_cast<std::uintptr_t>(
+                            page.mbi.BaseAddress);
+                        const std::uint64_t size = page.mbi.RegionSize;
+                        if (parsed->committedOnly && page.mbi.State != MEM_COMMIT) continue;
+                        if (parsed->executableOnly &&
+                            !IsExecutableProtection(page.mbi.Protect)) continue;
+                        if (selectedModule) {
+                            const auto overlap = HalfOpenRangesOverlap(
+                                base, size, selectedModule->base, selectedModule->size);
+                            if (!overlap) {
+                                return ErrorResponse(*parsed, "INTERNAL",
+                                                     "memory-map range overflow", false, false);
+                            }
+                            if (!*overlap) continue;
+                        }
+                        if (emitted++ != 0U) items.push_back(',');
                         const std::size_t infoLength = strnlen_s(page.info, sizeof(page.info));
-                        items += "{\"base\":" +
-                                 JsonString(HexValue(reinterpret_cast<std::uintptr_t>(
-                                     page.mbi.BaseAddress))) +
-                                 ",\"size\":" + JsonString(HexValue(page.mbi.RegionSize)) +
-                                 ",\"allocation_base\":" +
-                                 JsonString(HexValue(reinterpret_cast<std::uintptr_t>(
-                                     page.mbi.AllocationBase))) +
-                                 ",\"protect\":" + JsonString(HexValue(page.mbi.Protect)) +
+                        const std::uint64_t allocationBase =
+                            reinterpret_cast<std::uintptr_t>(page.mbi.AllocationBase);
+                        items += "{\"base\":" + JsonString(HexValue(base)) +
+                                 ",\"size\":" + JsonString(HexValue(size));
+                        if (!parsed->compact || allocationBase != base) {
+                            items += ",\"allocation_base\":" +
+                                     JsonString(HexValue(allocationBase));
+                        }
+                        items += ",\"protect\":" + JsonString(HexValue(page.mbi.Protect)) +
                                  ",\"state\":" + JsonString(HexValue(page.mbi.State)) +
-                                 ",\"type\":" + JsonString(HexValue(page.mbi.Type)) +
-                                 ",\"info\":" + JsonString(std::string_view(page.info, infoLength)) +
-                                 "}";
+                                 ",\"type\":" + JsonString(HexValue(page.mbi.Type));
+                        if (!parsed->compact || infoLength != 0U) {
+                            items += ",\"info\":" +
+                                     JsonString(std::string_view(page.info, infoLength));
+                        }
+                        items += "}";
                     }
                     items += "]";
-                    const std::string next = end < count
-                                                 ? JsonString("v1:" + std::to_string(generation) + ":" +
-                                                              std::to_string(end))
+                    const std::string next = index < count
+                                                 ? JsonString(DiscoveryCursor(*parsed, generation,
+                                                                              index))
                                                  : "null";
                     if (!PausedSnapshotCurrent(generation)) {
                         return ErrorResponse(*parsed, "BUSY",

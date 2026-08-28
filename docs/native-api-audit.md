@@ -45,11 +45,12 @@ not mutated anything.
 | Tool | Native API | Required state | Completion and ownership |
 |---|---|---|---|
 | `debugger.state` | `DbgGetRegDumpEx` | paused for CIP; any otherwise | atomic callback snapshot; copied register dump |
+| `debugger.snapshot` | `DbgGetRegDumpEx`, `DbgGetThreadId`, `Script::Module::GetList`, `DbgDisasmAt` | paused | one generation recheck; max 16 registers and 64 instructions; module list released with `BridgeFree` |
 | `debugger.wait_for_pause` | callback snapshot, `DbgGetRegDumpEx`, `DbgGetThreadId` | active debuggee; returns paused | condition-variable wait, max 9 s; copied latest reason; generation rechecked after register capture |
 | `registers.read` | `DbgGetRegDumpEx` | paused | copied fixed-size dump; register-name allowlist |
 | `address.resolve` | `Script::Module::GetList` | paused | unique module/RVA or absolute lookup; `BridgeFree(list.data)` |
 | `memory.read` | `DbgMemRead` | paused | caller-owned buffer, max 64 KiB |
-| `memory.map` | `DbgMemMap` | paused | max 256 returned items; `BridgeFree(map.page)` |
+| `memory.map` | `DbgMemMap`, optional `Script::Module::GetList` | paused | reject native count above 65,536; max 256 filtered items; filter-bound cursor; all Bridge lists released |
 | `modules.list` | `Script::Module::GetList` | paused | validates `ListInfo`; `BridgeFree(list.data)` |
 | `threads.list` | `DbgGetThreadList` | paused | max 256 returned items; `BridgeFree(list.list)` |
 | `breakpoints.list` | `DbgGetBpList` | paused/running | max 256 returned items; `BridgeFree(map.bp)` |

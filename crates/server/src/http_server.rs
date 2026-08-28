@@ -23,6 +23,8 @@ use crate::{
     mcp,
 };
 
+const JSON_UTF8: &str = "application/json; charset=utf-8";
+
 #[derive(Clone)]
 pub struct AppState {
     config: Arc<Config>,
@@ -124,7 +126,7 @@ async fn enforce_http_limits(
 async fn live() -> impl IntoResponse {
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
+        [(header::CONTENT_TYPE, JSON_UTF8)],
         "{\"status\":\"ok\"}",
     )
 }
@@ -138,7 +140,7 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Result<Resp
     let Ok(snapshot) = state.adapter.call("debugger.state", &json!({})).await else {
         return Ok(not_ready());
     };
-    Ok(Json(json!({
+    let mut response = Json(json!({
         "status": "ready",
         "backend": snapshot.get("backend").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
         "plugin_connected": true,
@@ -146,18 +148,22 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Result<Resp
         "protocol_version": "2025-06-18",
         "version": env!("CARGO_PKG_VERSION")
     }))
-    .into_response())
+    .into_response();
+    set_json_utf8(&mut response);
+    Ok(response)
 }
 
 fn not_ready() -> Response {
-    (
+    let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({
             "status": "not_ready",
             "plugin_connected": false
         })),
     )
-        .into_response()
+        .into_response();
+    set_json_utf8(&mut response);
+    response
 }
 
 async fn mcp_get() -> Response {
@@ -181,8 +187,16 @@ async fn mcp_post(
             "request body exceeds configured limit",
         )
     })?;
-    let response = mcp::handle(&body, state.adapter.as_ref()).await;
+    let mut response = mcp::handle(&body, state.adapter.as_ref()).await;
+    set_json_utf8(&mut response);
     bound_response(response, state.config.max_output_bytes).await
+}
+
+fn set_json_utf8(response: &mut Response) {
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static(JSON_UTF8),
+    );
 }
 
 fn require_protocol_version(headers: &HeaderMap) -> Result<(), HttpError> {
@@ -299,7 +313,7 @@ mod tests {
     use serde_json::Value;
     use tower::ServiceExt;
 
-    use super::{AppState, bound_response, router};
+    use super::{AppState, JSON_UTF8, bound_response, router};
     use crate::{adapter::FakeAdapter, config::Config};
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -318,6 +332,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], JSON_UTF8);
         let body = to_bytes(response.into_body(), 128).await.unwrap();
         assert_eq!(&body[..], br#"{"status":"ok"}"#);
     }
@@ -341,6 +356,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], JSON_UTF8);
     }
 
     #[tokio::test]
@@ -401,6 +417,7 @@ mod tests {
             .unwrap();
         let response = app().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], JSON_UTF8);
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["jsonrpc"], "2.0");

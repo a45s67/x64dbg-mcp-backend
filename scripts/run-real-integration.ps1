@@ -3,7 +3,8 @@ param(
     [ValidateSet('x32', 'x64')]
     [string]$Backend,
     [string]$IntegrationRoot,
-    [string]$ServerPath
+    [string]$ServerPath,
+    [string]$FixtureName = 'mcp-debuggee-fixture.exe'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,11 +14,16 @@ if ([string]::IsNullOrWhiteSpace($IntegrationRoot)) {
 if ([string]::IsNullOrWhiteSpace($ServerPath)) {
     $ServerPath = Join-Path $PSScriptRoot '..\target\debug\x64dbg-mcp-server.exe'
 }
+if ([string]::IsNullOrWhiteSpace($FixtureName) -or
+    $FixtureName -ne [System.IO.Path]::GetFileName($FixtureName) -or
+    [System.IO.Path]::GetExtension($FixtureName) -ine '.exe') {
+    throw 'FixtureName must be an .exe leaf filename.'
+}
 $backendRoot = (Resolve-Path -LiteralPath (Join-Path $IntegrationRoot $Backend)).Path
 $server = (Resolve-Path -LiteralPath $ServerPath).Path
 $debuggerName = if ($Backend -eq 'x32') { 'x32dbg-unsigned.exe' } else { 'x64dbg.exe' }
 $debugger = Join-Path $backendRoot $debuggerName
-$fixture = Join-Path $backendRoot 'mcp-debuggee-fixture.exe'
+$fixture = Join-Path $backendRoot $FixtureName
 if (!(Test-Path -LiteralPath $debugger) -or !(Test-Path -LiteralPath $fixture)) {
     throw 'The isolated debugger tree or fixture is missing. Run prepare-integration.ps1 first.'
 }
@@ -40,8 +46,9 @@ $headers = @{ Authorization = "Bearer $token"; Accept = 'application/json' }
 function Invoke-Mcp([string]$Method, $Params, [int]$Id) {
     $request = @{ jsonrpc = '2.0'; id = $Id; method = $Method; params = $Params } |
         ConvertTo-Json -Depth 12 -Compress
+    $requestBytes = [System.Text.Encoding]::UTF8.GetBytes($request)
     $response = Invoke-RestMethod -UseBasicParsing -Method Post -Uri "$baseUri/mcp" `
-        -Headers $headers -ContentType 'application/json' -Body $request -TimeoutSec 40
+        -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $requestBytes -TimeoutSec 40
     if ($response.error) {
         throw "JSON-RPC error from $Method`: $($response.error | ConvertTo-Json -Compress)"
     }
@@ -128,7 +135,8 @@ try {
     $fixtureName = [System.IO.Path]::GetFileName($fixture)
     $fixtureModule = @($modules.items | Where-Object { $_.name -ieq $fixtureName })[0]
     if (!$fixtureModule) {
-        throw 'The launched fixture was not present in modules.list.'
+        $actualModuleNames = @($modules.items | ForEach-Object { $_.name }) -join ', '
+        throw "The launched fixture '$fixtureName' was not present in modules.list; actual: $actualModuleNames"
     }
     $moduleBase = [Convert]::ToUInt64($fixtureModule.base.Substring(2), 16)
     $moduleEntry = [Convert]::ToUInt64($fixtureModule.entry.Substring(2), 16)

@@ -27,6 +27,10 @@ impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         let body: Value = json!({ "error": { "code": self.code, "message": self.message } });
         let mut response = (self.status, Json(body)).into_response();
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json; charset=utf-8"),
+        );
         if self.status == StatusCode::UNAUTHORIZED {
             response.headers_mut().insert(
                 header::WWW_AUTHENTICATE,

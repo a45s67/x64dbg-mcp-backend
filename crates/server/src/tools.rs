@@ -119,7 +119,11 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
         }
         "expression.evaluate" => {
             exact_keys(object, &["expression"], &[])?;
-            string(object, "expression", 1, 1024).map(|_| ())
+            let expression = string(object, "expression", 1, 1024)?;
+            if expression.chars().any(char::is_control) {
+                return Err(invalid("expression", "must not contain control characters"));
+            }
+            Ok(())
         }
         _ => Err(invalid("name", "unknown tool")),
     }
@@ -694,6 +698,9 @@ mod tests {
                 })
             )
             .is_err()
+        );
+        assert!(
+            validate_arguments("expression.evaluate", &json!({"expression":"cip\0junk"})).is_err()
         );
     }
 

@@ -30,8 +30,9 @@ $headers = @{ Authorization = "Bearer $token"; Accept = 'application/json' }
 function Invoke-Mcp([string]$Method, $Params, [int]$Id) {
     $request = @{ jsonrpc = '2.0'; id = $Id; method = $Method; params = $Params } |
         ConvertTo-Json -Depth 12 -Compress
+    $requestBytes = [System.Text.Encoding]::UTF8.GetBytes($request)
     $response = Invoke-RestMethod -UseBasicParsing -Method Post -Uri "$baseUri/mcp" `
-        -Headers $headers -ContentType 'application/json' -Body $request -TimeoutSec 40
+        -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $requestBytes -TimeoutSec 40
     if ($response.error) {
         throw "JSON-RPC error from $Method`: $($response.error | ConvertTo-Json -Compress)"
     }
@@ -86,7 +87,7 @@ try {
         working_directory = Split-Path -Parent $sample
     } 3
     $moduleRef = @{
-        module = [System.IO.Path]::GetFileName($sample)
+        module = [System.IO.Path]::GetFileName($sample).ToUpperInvariant()
         rva = $MainRva
     }
     $resolved = Invoke-Tool 'address.resolve' @{ address = $moduleRef } 4

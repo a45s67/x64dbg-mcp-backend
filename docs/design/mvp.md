@@ -68,7 +68,7 @@ Configuration errors prevent the listener from starting.
   `application/json` (clients MAY also list `text/event-stream`).
 - Implements MCP lifecycle (`initialize`, `notifications/initialized`, `ping`),
   `tools/list`, and `tools/call` for protocol revision `2025-06-18`.
-- Returns a single JSON-RPC response as `application/json`. Notifications return
+- Returns a single JSON-RPC response as `application/json; charset=utf-8`. Notifications return
   HTTP 202 with no body. JSON-RPC batches are rejected with JSON-RPC `-32600`.
 - Unsupported negotiated protocol versions fail initialization. Clients still
   follow the MCP initialization sequence, but the stateless MVP does not retain
@@ -108,6 +108,9 @@ Otherwise HTTP 503. Response is bounded and contains no target path or token:
 
 Unknown paths return 404. Authentication failure returns HTTP 401 with a generic
 body and `WWW-Authenticate: Bearer`; authorization data is never logged.
+All JSON health and structured HTTP error responses also declare
+`application/json; charset=utf-8` for compatibility with clients that do not
+apply JSON's UTF-8 default correctly.
 
 ### Tool result and error envelope
 

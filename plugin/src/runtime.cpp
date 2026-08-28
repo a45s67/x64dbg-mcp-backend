@@ -1,4 +1,5 @@
 #include "runtime.h"
+#include "utf8.h"
 
 #include <bcrypt.h>
 #include <sddl.h>
@@ -97,23 +98,6 @@ bool ReadFrame(const HANDLE pipe, std::string& payload) {
     }
     payload.resize(length);
     return ReadAll(pipe, payload.data(), length);
-}
-
-std::string JsonString(const std::string_view value) {
-    std::string result;
-    result.reserve(value.size() + 2U);
-    result.push_back('"');
-    for (const char character : value) {
-        if (character == '"' || character == '\\') {
-            result.push_back('\\');
-        }
-        if (static_cast<unsigned char>(character) < 0x20U) {
-            return "\"\"";
-        }
-        result.push_back(character);
-    }
-    result.push_back('"');
-    return result;
 }
 
 struct JsonDeleter {
@@ -401,7 +385,15 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             json_string_length(value) == 0U || json_string_length(value) > 1024U) {
             return std::nullopt;
         }
-        expression.assign(json_string_value(value), json_string_length(value));
+        const std::string_view expressionValue(json_string_value(value),
+                                               json_string_length(value));
+        if (std::any_of(expressionValue.begin(), expressionValue.end(), [](const char character) {
+                const auto byte = static_cast<unsigned char>(character);
+                return byte < 0x20U || byte == 0x7fU;
+            })) {
+            return std::nullopt;
+        }
+        expression.assign(expressionValue);
     } else if (methodValue == "address.resolve") {
         if (json_object_size(payload) != 1U ||
             !ParseAddressReference(json_object_get(payload, "address"), addressValue)) {
@@ -643,7 +635,7 @@ AddressResolution ResolveAddress(const AddressReference& reference) {
         if (reference.kind == AddressReferenceKind::moduleRva) {
             const std::size_t nameLength = strnlen_s(module.name, sizeof(module.name));
             const std::string name(module.name, nameLength);
-            if (_stricmp(name.c_str(), reference.module.c_str()) == 0) {
+            if (Utf8OrdinalEqualsIgnoreCase(name, reference.module)) {
                 match = &module;
                 ++matches;
             }

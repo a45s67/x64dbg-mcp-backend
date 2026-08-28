@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$X64dbgRoot = 'C:\tools\x64dbg',
-    [string]$Destination
+    [string]$Destination,
+    [string]$FixtureName = 'mcp-debuggee-fixture.exe'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +12,13 @@ if ([string]::IsNullOrWhiteSpace($Destination)) {
 $resolvedRoot = (Resolve-Path -LiteralPath $X64dbgRoot).Path
 $destinationPath = [System.IO.Path]::GetFullPath($Destination)
 $workspacePath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if ([string]::IsNullOrWhiteSpace($FixtureName) -or
+    $FixtureName -ne [System.IO.Path]::GetFileName($FixtureName) -or
+    [System.IO.Path]::GetExtension($FixtureName) -ine '.exe' -or
+    $FixtureName.Length -gt 240 -or
+    $FixtureName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+    throw 'FixtureName must be a bounded .exe leaf filename.'
+}
 if (!$destinationPath.StartsWith($workspacePath + [System.IO.Path]::DirectorySeparatorChar,
         [System.StringComparison]::OrdinalIgnoreCase)) {
     throw 'Integration destination must remain inside the repository workspace.'
@@ -43,14 +51,14 @@ foreach ($backend in @('x32', 'x64')) {
         throw "Build the $architecture plugin and fixture before preparing integration files."
     }
     Copy-Item -LiteralPath $plugin -Destination $pluginDirectory
-    Copy-Item -LiteralPath $fixture -Destination (Join-Path $target 'mcp-debuggee-fixture.exe')
+    Copy-Item -LiteralPath $fixture -Destination (Join-Path $target $FixtureName)
 }
 
 $forbidden = Get-ChildItem -LiteralPath $destinationPath -Recurse -File |
     Where-Object {
         $_.Name -ine 'x64dbg-mcp-backend.dp32' -and
         $_.Name -ine 'x64dbg-mcp-backend.dp64' -and
-        $_.Name -ine 'mcp-debuggee-fixture.exe' -and
+        $_.Name -ine $FixtureName -and
         ($_.Name -match '(?i)mcp' -or $_.Name -ieq 'mcp_config.json')
     }
 if ($forbidden) {

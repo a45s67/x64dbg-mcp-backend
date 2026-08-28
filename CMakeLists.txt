@@ -17,13 +17,14 @@ if(BUILD_TESTING)
     plugin/tests/lifecycle_harness.cpp
     plugin/src/debugger_executor.cpp
     plugin/src/runtime.cpp
+    plugin/src/utf8.cpp
   )
   target_compile_features(x64dbg_mcp_lifecycle_test PRIVATE cxx_std_20)
   target_include_directories(x64dbg_mcp_lifecycle_test PRIVATE plugin/src)
   target_include_directories(x64dbg_mcp_lifecycle_test SYSTEM PRIVATE "${X64DBG_ROOT}/pluginsdk")
   target_compile_definitions(x64dbg_mcp_lifecycle_test PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX MCP_LIFECYCLE_HARNESS)
-  target_compile_options(x64dbg_mcp_lifecycle_test PRIVATE /W4 /WX /permissive- /EHsc)
+  target_compile_options(x64dbg_mcp_lifecycle_test PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
   target_link_libraries(x64dbg_mcp_lifecycle_test PRIVATE bcrypt advapi32 ws2_32)
 
   add_executable(x64dbg_mcp_executor_test
@@ -34,7 +35,7 @@ if(BUILD_TESTING)
   target_include_directories(x64dbg_mcp_executor_test PRIVATE plugin/src)
   target_compile_definitions(x64dbg_mcp_executor_test PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_compile_options(x64dbg_mcp_executor_test PRIVATE /W4 /WX /permissive- /EHsc)
+  target_compile_options(x64dbg_mcp_executor_test PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
 
   add_executable(x64dbg_mcp_debuggee_fixture WIN32
     plugin/tests/debuggee_fixture.cpp
@@ -42,13 +43,24 @@ if(BUILD_TESTING)
   target_compile_features(x64dbg_mcp_debuggee_fixture PRIVATE cxx_std_20)
   target_compile_definitions(x64dbg_mcp_debuggee_fixture PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_compile_options(x64dbg_mcp_debuggee_fixture PRIVATE /W4 /WX /permissive- /EHsc)
+  target_compile_options(x64dbg_mcp_debuggee_fixture PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
+
+  add_executable(x64dbg_mcp_utf8_test
+    plugin/tests/utf8_test.cpp
+    plugin/src/utf8.cpp
+  )
+  target_compile_features(x64dbg_mcp_utf8_test PRIVATE cxx_std_20)
+  target_include_directories(x64dbg_mcp_utf8_test PRIVATE plugin/src)
+  target_compile_definitions(x64dbg_mcp_utf8_test PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(x64dbg_mcp_utf8_test PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
 endif()
 
 add_library(x64dbg_mcp_plugin SHARED
   plugin/src/debugger_executor.cpp
   plugin/src/plugin.cpp
   plugin/src/runtime.cpp
+  plugin/src/utf8.cpp
 )
 target_compile_features(x64dbg_mcp_plugin PRIVATE cxx_std_20)
 target_include_directories(x64dbg_mcp_plugin SYSTEM PRIVATE "${X64DBG_ROOT}/pluginsdk")
@@ -58,7 +70,7 @@ target_compile_definitions(x64dbg_mcp_plugin PRIVATE
   WIN32_LEAN_AND_MEAN
   NOMINMAX
 )
-target_compile_options(x64dbg_mcp_plugin PRIVATE /W4 /WX /permissive- /EHsc)
+target_compile_options(x64dbg_mcp_plugin PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
 target_link_options(x64dbg_mcp_plugin PRIVATE /Brepro)
 target_link_libraries(x64dbg_mcp_plugin PRIVATE bcrypt advapi32)
 
@@ -95,6 +107,7 @@ if(BUILD_TESTING)
     set(MCP_TEST_PORT 43832)
   endif()
   add_test(NAME executor-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_executor_test)
+  add_test(NAME utf8-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_utf8_test)
   add_test(NAME lifecycle-${MCP_TEST_ARCH}
     COMMAND x64dbg_mcp_lifecycle_test
       "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe" "${MCP_TEST_PORT}")
@@ -113,7 +126,7 @@ if(BUILD_TESTING)
     COMMAND x64dbg_mcp_lifecycle_test
       "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe"
       "${MCP_ACTIVE_WAIT_TEST_PORT}" active-wait-shutdown)
-  set_tests_properties(executor-${MCP_TEST_ARCH} lifecycle-${MCP_TEST_ARCH}
+  set_tests_properties(executor-${MCP_TEST_ARCH} utf8-${MCP_TEST_ARCH} lifecycle-${MCP_TEST_ARCH}
     sidecar-crash-${MCP_TEST_ARCH} installed-config-${MCP_TEST_ARCH}
     active-wait-shutdown-${MCP_TEST_ARCH}
     PROPERTIES TIMEOUT 15)

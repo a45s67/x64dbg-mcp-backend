@@ -389,3 +389,30 @@ module-relative disassembly all reported generation `27`. The memory and
 disassembly location metadata carried the same generation. Both isolated
 architectures also rejected a memory-map cursor after a step advanced debugger
 state, so stale pagination cannot silently mix snapshots.
+
+## 2026-08-29 native UTF-8 follow-up
+
+ADR 0006 replaces byte-wise JSON emission with bounded UTF-8 validation and
+replacement, escapes controls without discarding surrounding text, and compares
+module identities through Windows ordinal Unicode case folding. Embedded controls
+are now rejected before expressions reach NUL-terminated native APIs.
+
+The first Unicode integration request exposed a Windows PowerShell 5 client-body
+encoding bug and was rejected by the server parser before any launch mutation was
+accepted. Sending explicit UTF-8 request bytes fixed that boundary. A later run
+showed response mojibake because PowerShell ignored JSON's default encoding, so all
+MCP, health, and structured-error JSON responses now explicitly declare
+`application/json; charset=utf-8`.
+
+After those fixes, isolated x32dbg and x64dbg both launched
+`München-分析.exe` from an `整合-utf8` directory. `modules.list` preserved the
+lowercase Unicode module name, while `address.resolve` accepted its uppercased
+Unicode spelling and returned the entry RVA. Both runs also completed the full
+snapshot, stale-cursor, mutation-replay, callback wait/pause, stepping, stop, and
+supervised-shutdown checks.
+
+The installed-package acceptance run copied Flare-On 11 `checksum.exe` to
+`Flare-驗證-native-utf8/München-checksum.exe`, then supplied only the uppercased
+module identity `MÜNCHEN-CHECKSUM.EXE` and RVA `0xa78a0`. The backend resolved
+runtime base `0x290000`, hit `0x3378a0` once, reported generation `28` consistently
+for pause/register/memory/disassembly results, and stopped cleanly.

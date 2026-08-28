@@ -63,10 +63,37 @@ url = "http://127.0.0.1:9999/mcp"
     Assert-True ($first -match 'url = "http://127\.0\.0\.1:43132/mcp"') 'x32 URL is incorrect'
     Assert-True ($first -match 'url = "http://\[::1\]:43164/mcp"') 'x64 IPv6 URL is incorrect'
     Assert-True (($output -join "`n") -notmatch [regex]::Escape($token)) 'helper output disclosed the token'
+    $installedSkill = Join-Path $codexHome 'skills\x64dbg-debugging'
+    Assert-True (Test-Path -LiteralPath (Join-Path $installedSkill 'SKILL.md') -PathType Leaf) 'workflow skill was not installed'
+    Assert-True (Test-Path -LiteralPath (Join-Path $installedSkill '.managed-by-x64dbg-mcp-backend') -PathType Leaf) 'workflow skill ownership marker is missing'
+    $installedSkillText = (Get-ChildItem -LiteralPath $installedSkill -Recurse -File |
+        ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
+    Assert-True ($installedSkillText -notmatch [regex]::Escape($token)) 'workflow skill disclosed the bearer token'
+    $skillHash = (Get-FileHash -LiteralPath (Join-Path $installedSkill 'SKILL.md') -Algorithm SHA256).Hash
 
     & $scriptUnderTest -X64dbgRoot $debuggerRoot -CodexHome $codexHome | Out-Null
     $second = [IO.File]::ReadAllText($configPath)
     Assert-True ($first -ceq $second) 'a repeated registration changed the config'
+    Assert-True ((Get-FileHash -LiteralPath (Join-Path $installedSkill 'SKILL.md') -Algorithm SHA256).Hash -eq $skillHash) 'repeated registration changed managed skill content'
+
+    $conflictHome = Join-Path $testRoot 'codex-skill-conflict'
+    $conflictSkill = Join-Path $conflictHome 'skills\x64dbg-debugging'
+    [IO.Directory]::CreateDirectory($conflictSkill) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $conflictSkill 'SKILL.md'), 'user maintained')
+    $conflictFailed = $false
+    try {
+        & $scriptUnderTest -X64dbgRoot $debuggerRoot -CodexHome $conflictHome | Out-Null
+    } catch {
+        $conflictFailed = $_.Exception.Message -match 'unmanaged Codex skill'
+    }
+    Assert-True $conflictFailed 'an unmanaged same-named skill was not preserved'
+    Assert-True (!(Test-Path -LiteralPath (Join-Path $conflictHome 'config.toml'))) 'skill conflict wrote partial Codex config'
+    Assert-True ((Get-Content -Raw (Join-Path $conflictSkill 'SKILL.md')) -eq 'user maintained') 'skill conflict changed user content'
+
+    $skipHome = Join-Path $testRoot 'codex-skip-skill'
+    & $scriptUnderTest -X64dbgRoot $debuggerRoot -CodexHome $skipHome -SkipSkill | Out-Null
+    Assert-True (Test-Path -LiteralPath (Join-Path $skipHome 'config.toml') -PathType Leaf) 'SkipSkill omitted MCP configuration'
+    Assert-True (!(Test-Path -LiteralPath (Join-Path $skipHome 'skills\x64dbg-debugging'))) 'SkipSkill installed a workflow skill'
 
     $newCodexHome = Join-Path $testRoot 'codex-new'
     & $scriptUnderTest -X64dbgRoot $debuggerRoot -CodexHome $newCodexHome | Out-Null
@@ -119,6 +146,7 @@ url = "http://127.0.0.1:9999/mcp"
     Assert-True ($installedCodex -match 'url = "http://127\.0\.0\.1:43132/mcp"') 'Codex installer did not register x32 endpoint'
     Assert-True ($installedCodex -match 'url = "http://127\.0\.0\.1:43164/mcp"') 'Codex installer did not register x64 endpoint'
     Assert-True ([regex]::Matches($installedCodex, 'http_headers = \{ Authorization = "Bearer [^"]+" \}').Count -eq 2) 'Codex installer did not register both static Authorization headers'
+    Assert-True (Test-Path -LiteralPath (Join-Path $installCodexHome 'skills\x64dbg-debugging\SKILL.md') -PathType Leaf) 'Codex registration did not install the packaged workflow skill'
 
     Write-Output 'register-codex contract tests passed'
 } finally {

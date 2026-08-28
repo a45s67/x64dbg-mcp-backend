@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory)]
     [string]$X64dbgRoot,
-    [string]$CodexHome
+    [string]$CodexHome,
+    [switch]$SkipSkill
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,6 +25,19 @@ if ([string]::IsNullOrWhiteSpace($CodexHome)) {
 }
 $codexHomePath = [IO.Path]::GetFullPath($CodexHome)
 $configPath = Join-Path $codexHomePath 'config.toml'
+$skillSource = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\skills\x64dbg-debugging'))
+$skillTarget = Join-Path $codexHomePath 'skills\x64dbg-debugging'
+$skillMarker = '.managed-by-x64dbg-mcp-backend'
+if (!$SkipSkill) {
+    if (!(Test-Path -LiteralPath (Join-Path $skillSource 'SKILL.md') -PathType Leaf) -or
+        !(Test-Path -LiteralPath (Join-Path $skillSource $skillMarker) -PathType Leaf)) {
+        throw "Packaged x64dbg workflow skill is missing: $skillSource"
+    }
+    if ((Test-Path -LiteralPath $skillTarget) -and
+        !(Test-Path -LiteralPath (Join-Path $skillTarget $skillMarker) -PathType Leaf)) {
+        throw "Refusing to overwrite an unmanaged Codex skill: $skillTarget"
+    }
+}
 
 function Read-BackendConfig([string]$Architecture) {
     $path = Join-Path $debuggerRoot "server\x64dbg-mcp-server-$Architecture.toml"
@@ -140,7 +154,14 @@ if ($PSCmdlet.ShouldProcess($configPath, 'Register x32dbg and x64dbg MCP backend
 
     [IO.Directory]::CreateDirectory($codexHomePath) | Out-Null
     [IO.File]::WriteAllLines($configPath, $lines, (New-Object Text.UTF8Encoding($false)))
+    if (!$SkipSkill) {
+        [IO.Directory]::CreateDirectory($skillTarget) | Out-Null
+        Get-ChildItem -LiteralPath $skillSource -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $skillTarget -Recurse -Force
+        }
+    }
     Write-Output "x64dbg: $x64Url"
     Write-Output "x32dbg: $x32Url"
+    if (!$SkipSkill) { Write-Output 'Installed Codex skill: x64dbg-debugging' }
     Write-Output 'Codex MCP registration complete with static Authorization headers. Restart Codex.'
 }

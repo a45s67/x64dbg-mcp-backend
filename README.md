@@ -41,6 +41,10 @@ Bounded discovery is available through `symbols.search`, `functions.list`,
 paginated, module/RVA aware, and explicitly report `completeness: "known_only"`;
 the read tools never silently trigger debugger analysis.
 
+Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
+It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer
+tokens or machine-specific target data in instruction files.
+
 Build a release with `powershell -File scripts/package.ps1`, then follow the
 [installation and client setup guide](docs/install.md). The installed package
 uses `server\x64dbg-mcp-server.exe`; no Rust, C++ runtime, or build tool is needed

@@ -23,6 +23,9 @@ if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $archive)) {
 Push-Location $workspace
 try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $workspace 'scripts\test-skill.ps1')
+    if ($LASTEXITCODE -ne 0) { throw 'Codex skill contract tests failed.' }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
         -File (Join-Path $workspace 'scripts\test-register-codex.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'Codex registration contract tests failed.' }
     & cargo.exe test --offline --locked --workspace --all-targets
@@ -37,7 +40,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'x64 plugin build failed.' }
 
     New-Item -ItemType Directory -Path $stage | Out-Null
-    foreach ($relative in @('x32\plugins', 'x64\plugins', 'server', 'config', 'docs', 'docs\adr', 'docs\contracts', 'LICENSES', 'scripts')) {
+    foreach ($relative in @('x32\plugins', 'x64\plugins', 'server', 'config', 'docs', 'docs\adr', 'docs\contracts', 'LICENSES', 'scripts', 'skills')) {
         New-Item -ItemType Directory -Path (Join-Path $stage $relative) -Force | Out-Null
     }
     Copy-Item -LiteralPath 'build\windows-x86\x64dbg-mcp-backend.dp32' `
@@ -57,12 +60,14 @@ try {
     Copy-Item -LiteralPath 'docs\native-api-audit.md' -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath 'scripts\install.ps1' -Destination (Join-Path $stage 'scripts')
     Copy-Item -LiteralPath 'scripts\register-codex.ps1' -Destination (Join-Path $stage 'scripts')
+    Copy-Item -LiteralPath 'skills\x64dbg-debugging' -Destination (Join-Path $stage 'skills') -Recurse
 
     @{
         name = 'x64dbg-mcp-backend'
         version = $Version
         mcp_protocol = '2025-06-18'
         ipc_protocol = @{ major = 1; minor = 0 }
+        skills = @{ 'x64dbg-debugging' = '0.1.0' }
         x64dbg_baseline = @{ release = '2026.05.27'; commit = '9c8ca1cae0b6d56cc44f31fddcb10e3b02ffbb87' }
         targets = @('x32dbg', 'x64dbg')
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stage 'version.json') -Encoding UTF8

@@ -456,3 +456,28 @@ an ASCII/UTF-8 candidate instead of causing adjacent valid text to be discarded;
 UTF-16 surrogate validity and long-candidate deadline/generation checks were
 tightened at the same time. The rebuilt installed artifact repeated the same
 checksum workflow at generation `26`, found both literals, and shut down cleanly.
+
+## 2026-08-29 workflow-skill follow-up
+
+ADR 0008 packages the independently versioned `x64dbg-debugging` Codex skill.
+Its entrypoint keeps only shared state, module/RVA, callback-wait, known-only,
+and no-blind-retry invariants; detailed recipes and troubleshooting are loaded
+from separate references. The skill contains no token, port, target path, or
+sample-specific RVA.
+
+The release gate validates UTF-8, frontmatter bounds, version metadata, resolved
+references, published tool names, ownership marker, absence of token assignments,
+and unfinished placeholders. The skill creator's Python validator could not run
+because the available Python environment lacks PyYAML, so equivalent
+repository-specific checks were added as a dependency-free PowerShell contract
+instead of adding a runtime prerequisite. Registration tests covered first install, idempotent
+update, `-SkipSkill`, token non-disclosure, and refusal to overwrite an unmanaged
+same-named skill without writing a partial Codex config.
+
+All four installed skill files matched their packaged SHA-256 values. Following
+the packaged breakpoint recipe against the deployed backend again loaded
+`checksum.exe` at `0x770000`, resolved `main.main` RVA `0xa78a0` to `0x8178a0`,
+observed one software breakpoint hit, and retained generation `27` across pause,
+register, memory, and disassembly results. The bounded string recipe found both
+known literals, reported empty discovery databases as `known_only`, and stopped
+the debuggee and sidecar cleanly without a blind mutation retry.

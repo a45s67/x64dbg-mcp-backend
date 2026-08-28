@@ -12,8 +12,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
 The installer verifies that both x32 and x64 debugger directories exist, copies
 the matching `.dp32` and `.dp64` plugins, installs the shared static sidecar, and
 creates two TOML configuration files. It generates one cryptographically random
-48-byte bearer secret and prints it once. Store that value in the client's secret
-manager; do not put it in source control or command-line arguments.
+48-byte bearer secret and stores it only in those configuration files. The installer
+does not print the secret; do not put it in source control or command-line arguments.
 
 Default endpoints are:
 
@@ -51,8 +51,9 @@ ready. It does not expose the token or target path.
 
 Register both installed Streamable HTTP endpoints with one command. The helper
 reads and validates the installed x32/x64 configuration, stores the Authorization
-header directly in the user-level Codex `config.toml`, and replaces existing
-entries with the same names. No token environment variable is required:
+header directly in the user-level Codex `config.toml`, installs the versioned
+`x64dbg-debugging` workflow skill, and replaces existing managed entries with the
+same names. No token environment variable is required:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
@@ -66,6 +67,10 @@ Gateway-only installation, run only `install.ps1`.
 Restart an already-running Codex process after changing its configuration. Opening
 x64dbg/x32dbg is what starts the backend; Codex connects to the selected endpoint
 afterward.
+
+The helper refuses to overwrite an existing `x64dbg-debugging` skill unless it has
+this package's ownership marker. Pass `-SkipSkill` when only the MCP registrations
+should be changed.
 
 ## Dynamic Analysis Gateway
 

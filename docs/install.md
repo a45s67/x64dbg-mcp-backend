@@ -60,8 +60,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 codex mcp list
 ```
 
-For a new install, add `-RegisterCodex` to `install.ps1` to copy the backend and
-register both endpoints in the same command.
+The debugger installer and Codex registration are intentionally separate. For a
+Gateway-only installation, run only `install.ps1`.
 
 Restart an already-running Codex process after changing its configuration. Opening
 x64dbg/x32dbg is what starts the backend; Codex connects to the selected endpoint

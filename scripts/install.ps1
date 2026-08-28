@@ -4,8 +4,7 @@ param(
     [string]$X64dbgRoot,
     [int]$X32Port = 43132,
     [int]$X64Port = 43164,
-    [string]$PackageRoot,
-    [switch]$RegisterCodex
+    [string]$PackageRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -69,8 +68,4 @@ allowed_origins = []
     Write-Output "Installed backend. Bearer token (store securely): $token"
     Write-Output "x32 endpoint: http://127.0.0.1:$X32Port/mcp"
     Write-Output "x64 endpoint: http://127.0.0.1:$X64Port/mcp"
-}
-
-if ($RegisterCodex) {
-    & (Join-Path $PSScriptRoot 'register-codex.ps1') -X64dbgRoot $X64dbgRoot
 }

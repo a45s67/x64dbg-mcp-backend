@@ -197,6 +197,69 @@ debugger.snapshot(
 
 Default to a compact paused-state snapshot and keep memory maps opt-in.
 
+## P1: ship an x64dbg workflow skill with the backend/plugin
+
+Observed: the MCP tools expose debugger primitives, but the client had no
+x64dbg-specific operating guidance comparable to the IDA MCP IDAPython skill.
+This made important conventions discoverable only by trial and error: the
+debugger must already own a debuggee, mutating calls require canonical UUID
+operation IDs, reads generally require a paused target, and IDA image addresses
+must be translated for ASLR before setting breakpoints.
+
+Package a small versioned skill alongside the backend (or in the encompassing
+Codex plugin) rather than embedding workflow prose in every tool description.
+The backend remains the capability layer; the skill is the policy and recipe
+layer.
+
+Suggested skill contents:
+
+- A state-machine table for absent, starting, running, paused, and stopped
+  debuggees, including legal tools and recovery actions for each state.
+- Module-relative address recipes: prefer `{module, rva}` or
+  `address.resolve` when implemented; until then, query `modules.list` and
+  calculate the relocated address explicitly.
+- Safe mutation rules: generate a new canonical lowercase UUID, preserve it
+  across ambiguous retries, and never retry a different mutation with the same
+  ID.
+- A callback-oriented breakpoint loop: set breakpoint, resume, wait for pause,
+  validate pause reason/IP, then capture a compact snapshot.
+- Go-specific triage: use retained Go symbols when available, break at
+  `main.main` rather than stepping from the PE/runtime entry point, and document
+  the Go register ABI implications for arguments and return values.
+- Bounded output recipes for memory maps, disassembly, strings, and snapshots.
+- Troubleshooting for sidecar readiness, stale debugger generations,
+  authentication failures, and target-loading/bootstrap limitations.
+
+Acceptance criteria:
+
+- The skill is versioned independently of the executable and names the minimum
+  compatible backend protocol/version.
+- Every recipe references actual published tool names and is covered by a small
+  end-to-end fixture or recorded contract example.
+- The skill does not silently broaden mutation authority; launch, write,
+  breakpoint, resume, and stop operations remain explicit.
+- Installation/registration makes the skill discoverable together with the MCP
+  server without requiring users to copy private tokens into skill files.
+
+## P2: improve transport and bootstrap diagnostics
+
+Observed: liveness succeeded while the authenticated readiness endpoint
+reported `debugger_state=absent`, accurately separating transport/plugin health
+from target availability. A manual MCP POST without an explicit
+`Accept: application/json` header failed with `INVALID_ACCEPT`; adding the
+header fixed the request. Starting a second x64dbg process with the target path
+did not transfer the target to the already-running headless instance.
+
+Suggested improvements:
+
+- Add the required `Accept` header to manual request examples and return the
+  accepted media types in the validation error.
+- Extend readiness or `debugger.state` with a short `next_actions`/diagnostic
+  code for the absent-debuggee case, pointing clients to `debuggee.launch` once
+  implemented or explicitly stating that UI loading is currently required.
+- Document single-instance target handoff behavior and provide a supported,
+  non-destructive way to load a target into an already-running debugger.
+
 ## Successful behavior worth preserving
 
 - `debugger.state` clearly separated plugin and debuggee state.

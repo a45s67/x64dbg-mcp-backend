@@ -3,6 +3,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $scriptUnderTest = Join-Path $PSScriptRoot 'register-codex.ps1'
+$installerUnderTest = Join-Path $PSScriptRoot 'install.ps1'
 $systemTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $testRoot = Join-Path $systemTemp ('x64dbg-mcp-register-test-' + [guid]::NewGuid().ToString('N'))
 
@@ -85,6 +86,39 @@ url = "http://127.0.0.1:9999/mcp"
     }
     Assert-True $failed 'mismatched backend tokens were not rejected'
     Assert-True (!(Test-Path -LiteralPath (Join-Path $mismatchHome 'config.toml'))) 'mismatch failure wrote a partial config'
+
+    $packageRoot = Join-Path $testRoot 'package'
+    $installRoot = Join-Path $testRoot 'install-target'
+    $installCodexHome = Join-Path $testRoot 'codex-from-installer'
+    foreach ($directory in @(
+        (Join-Path $packageRoot 'server'),
+        (Join-Path $packageRoot 'x32\plugins'),
+        (Join-Path $packageRoot 'x64\plugins'),
+        (Join-Path $installRoot 'x32\plugins'),
+        (Join-Path $installRoot 'x64\plugins')
+    )) {
+        [IO.Directory]::CreateDirectory($directory) | Out-Null
+    }
+    [IO.File]::WriteAllText((Join-Path $packageRoot 'server\x64dbg-mcp-server.exe'), 'server')
+    [IO.File]::WriteAllText((Join-Path $packageRoot 'x32\plugins\x64dbg-mcp-backend.dp32'), 'x32')
+    [IO.File]::WriteAllText((Join-Path $packageRoot 'x64\plugins\x64dbg-mcp-backend.dp64'), 'x64')
+    & $installerUnderTest -X64dbgRoot $installRoot -PackageRoot $packageRoot | Out-Null
+    Assert-True (!(Test-Path -LiteralPath (Join-Path $installCodexHome 'config.toml'))) 'debugger installer modified Codex configuration'
+    & $scriptUnderTest -X64dbgRoot $installRoot -CodexHome $installCodexHome | Out-Null
+
+    Assert-True ((Get-Content -Raw (Join-Path $installRoot 'x32\plugins\x64dbg-mcp-backend.dp32')) -eq 'x32') 'installer did not deploy x32 plugin'
+    Assert-True ((Get-Content -Raw (Join-Path $installRoot 'x64\plugins\x64dbg-mcp-backend.dp64')) -eq 'x64') 'installer did not deploy x64 plugin'
+    Assert-True ((Get-Content -Raw (Join-Path $installRoot 'server\x64dbg-mcp-server.exe')) -eq 'server') 'installer did not deploy the shared sidecar'
+    $installedX32 = Get-Content -Raw (Join-Path $installRoot 'server\x64dbg-mcp-server-x32.toml')
+    $installedX64 = Get-Content -Raw (Join-Path $installRoot 'server\x64dbg-mcp-server-x64.toml')
+    $null = $installedX32 -match '(?m)^bearer_token = "([^"]+)"$'
+    $installedToken = $Matches[1]
+    Assert-True (![string]::IsNullOrWhiteSpace($installedToken)) 'installer did not generate a token'
+    Assert-True ($installedX64 -match ('(?m)^bearer_token = "' + [regex]::Escape($installedToken) + '"$')) 'x32 and x64 installed tokens differ'
+    $installedCodex = [IO.File]::ReadAllText((Join-Path $installCodexHome 'config.toml'))
+    Assert-True ($installedCodex -match 'url = "http://127\.0\.0\.1:43132/mcp"') 'Codex installer did not register x32 endpoint'
+    Assert-True ($installedCodex -match 'url = "http://127\.0\.0\.1:43164/mcp"') 'Codex installer did not register x64 endpoint'
+    Assert-True ([regex]::Matches($installedCodex, 'http_headers = \{ Authorization = "Bearer [^"]+" \}').Count -eq 2) 'Codex installer did not register both static Authorization headers'
 
     Write-Output 'register-codex contract tests passed'
 } finally {

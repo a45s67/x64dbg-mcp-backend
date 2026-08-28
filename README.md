@@ -11,6 +11,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0002-debuggee-launch.md`](docs/adr/0002-debuggee-launch.md)
 - [`docs/adr/0003-structured-address-references.md`](docs/adr/0003-structured-address-references.md)
 - [`docs/adr/0004-callback-pause-observation.md`](docs/adr/0004-callback-pause-observation.md)
+- [`docs/adr/0005-generation-consistent-snapshots.md`](docs/adr/0005-generation-consistent-snapshots.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
 - [`docs/install.md`](docs/install.md)

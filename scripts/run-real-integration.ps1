@@ -185,7 +185,26 @@ try {
     $moduleDisassembly = Invoke-Tool 'disassembly.read' @{ address = $moduleEntryRef; count = 4 } 43
     $threads = Invoke-Tool 'threads.list' @{ limit = 2 } 8
     $memoryMap = Invoke-Tool 'memory.map' @{ limit = 2 } 9
+    $cursorProbe = Invoke-Tool 'memory.map' @{ limit = 1 } 52
     $breakpoints = Invoke-Tool 'breakpoints.list' @{ limit = 2 } 10
+    if (!$state.state_generation -or !$registers.state_generation -or
+        !$expression.state_generation -or !$memory.state_generation -or
+        !$disassembly.state_generation -or !$modules.state_generation -or
+        !$threads.state_generation -or !$memoryMap.state_generation -or
+        !$breakpoints.state_generation) {
+        throw 'A read snapshot omitted its state_generation.'
+    }
+    if ($memory.state_generation -ne $memory.location.state_generation -or
+        $disassembly.state_generation -ne $disassembly.location.state_generation) {
+        throw 'Address-consuming read returned mixed snapshot generations.'
+    }
+    if (!$cursorProbe.next_cursor) {
+        throw 'memory.map did not return a cursor for stale-generation testing.'
+    }
+    $cursorParts = $cursorProbe.next_cursor.Split(':')
+    if ($cursorParts.Count -ne 3 -or [uint64]$cursorParts[1] -ne $cursorProbe.state_generation) {
+        throw 'Pagination cursor generation does not match its snapshot.'
+    }
 
     $writeOperation = [Guid]::NewGuid().ToString()
     $write = Invoke-Tool 'memory.write' @{
@@ -253,6 +272,13 @@ try {
         $stepIntoObservation.pause_reason.kind -ne 'step') {
         throw 'Step-into callback reason or generation was not retained.'
     }
+    $staleCursor = Invoke-Mcp 'tools/call' @{
+        name = 'memory.map'; arguments = @{ limit = 1; cursor = $cursorProbe.next_cursor }
+    } 53
+    if (!$staleCursor.isError -or
+        $staleCursor.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'A cursor from an older debugger generation was not rejected.'
+    }
     $stepOver = Invoke-Tool 'debugger.step_over' @{ operation_id = [Guid]::NewGuid().ToString() } 18
     $stepOverObservation = Invoke-Tool 'debugger.wait_for_pause' @{
         after_generation = $stepInto.state_generation; timeout_ms = 1500
@@ -280,6 +306,10 @@ try {
         modules = $modules.items.Count
         threads = $threads.items.Count
         memory_regions = $memoryMap.items.Count
+        snapshot_generations_present = $true
+        address_snapshot_generations_equal = $true
+        cursor_generation_matches = $true
+        stale_cursor_rejected = $true
         breakpoints = $breakpoints.items.Count
         resolved_entry = $resolvedEntry.address
         resolved_module = $resolvedEntry.module

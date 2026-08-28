@@ -197,6 +197,9 @@ transition or its deadline; an accepted command is not reported as completed.
 Callback-confirmed mutations include their confirmed generation in the tool
 result. Clients pass that value to `debugger.wait_for_pause`; an observation
 timeout is retryable and never changes the already-confirmed mutation outcome.
+State-sensitive reads capture the generation before native collection and
+recheck it afterward. A callback during collection returns retryable `BUSY`;
+the backend never labels mixed-generation data with a newer generation.
 
 ### Threads and queues
 

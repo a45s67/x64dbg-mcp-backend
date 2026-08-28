@@ -77,6 +77,12 @@ contains required integer `after_generation` and optional integer `timeout_ms`
 `process_created`, `system_breakpoint`, `breakpoint`, `exception`, `step`,
 `user_pause`, or `unknown`.
 
+Every successful state-sensitive read includes `state_generation` inside its
+`result` (the outer IPC field is transport metadata and is not forwarded as MCP
+structured content). A callback during collection returns `BUSY` with
+`retryable: true`; no mixed-generation result is emitted. Pagination cursor
+generation must equal the checked result generation.
+
 ## Response
 
 Success:

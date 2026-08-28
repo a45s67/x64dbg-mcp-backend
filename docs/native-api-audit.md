@@ -33,6 +33,13 @@ native operation. The resolver validates list ownership, exact case-insensitive
 module-name uniqueness, RVA bounds, and addition overflow before producing the
 numeric address. It never forwards a caller expression to `DbgEval`.
 
+Every enabled state-sensitive read follows ADR 0005: capture generation/state
+under the callback mutex, release it for the bounded Bridge call and data copy,
+then recheck under the mutex. Mid-read churn returns retryable `BUSY`. Page
+cursors are minted only after this check. Address-taking mutations repeat the
+generation/state check immediately before mutation submission; a mismatch has
+not mutated anything.
+
 ## Enabled calls
 
 | Tool | Native API | Required state | Completion and ownership |

@@ -89,9 +89,13 @@ impl DebuggerAdapter for FakeAdapter {
                 .get("expression")
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
-                .map(
-                    |expression| json!({ "expression": expression, "value": "0x0000000140001000" }),
-                )
+                .map(|expression| {
+                    json!({
+                        "expression": expression,
+                        "value": "0x0000000140001000",
+                        "state_generation": 7
+                    })
+                })
                 .ok_or_else(|| ToolError {
                     code: "INVALID_ARGUMENT",
                     message: "expression must be a non-empty string",

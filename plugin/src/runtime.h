@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "debugger_executor.h"
@@ -53,6 +54,8 @@ public:
 #ifdef MCP_LIFECYCLE_HARNESS
     [[nodiscard]] DWORD SidecarProcessIdForTesting() const noexcept;
     [[nodiscard]] PauseObservation PauseForTesting() noexcept;
+    [[nodiscard]] std::optional<std::uint64_t> BeginPausedSnapshotForTesting() noexcept;
+    [[nodiscard]] bool PausedSnapshotCurrentForTesting(std::uint64_t generation) noexcept;
 #endif
 
 private:
@@ -60,12 +63,18 @@ private:
     bool LaunchSidecar();
     void Worker() noexcept;
     void CloseHandleValue(HANDLE& handle) noexcept;
-    std::string StateResponse(const std::string& requestId) const;
+    std::string StateResponse(const std::string& requestId);
     bool WaitForState(DebuggeeState expected, std::uint64_t afterGeneration,
                       std::chrono::steady_clock::time_point deadline) noexcept;
     bool WaitForActionableLaunchPause(std::uint64_t afterGeneration,
                                       std::chrono::steady_clock::time_point deadline) noexcept;
     [[nodiscard]] std::uint64_t ObservedGeneration(DebuggeeState state) const noexcept;
+    [[nodiscard]] std::optional<std::uint64_t> BeginPausedSnapshot() noexcept;
+    [[nodiscard]] std::optional<std::uint64_t> BeginActiveSnapshot() noexcept;
+    [[nodiscard]] bool PausedSnapshotCurrent(std::uint64_t generation) noexcept;
+    [[nodiscard]] bool ActiveSnapshotCurrent(std::uint64_t generation) noexcept;
+    [[nodiscard]] bool PauseObservationCurrent(std::uint64_t generation,
+                                               std::uint64_t pauseGeneration) noexcept;
 
     std::atomic<PluginState> pluginState_{PluginState::stopped};
     std::atomic<DebuggeeState> debuggeeState_{DebuggeeState::absent};

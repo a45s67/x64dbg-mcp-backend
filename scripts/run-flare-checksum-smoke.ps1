@@ -126,6 +126,16 @@ try {
         $mainPause.state_generation -le $launch.state_generation) {
         throw 'Main pause snapshot is missing generation-consistent breakpoint metadata.'
     }
+    $registerSnapshot = Invoke-Tool 'registers.read' @{ names = @('rip', 'rsp') } 36
+    $memorySnapshot = Invoke-Tool 'memory.read' @{ address = $moduleRef; length = 16 } 37
+    $disassemblySnapshot = Invoke-Tool 'disassembly.read' @{ address = $moduleRef; count = 4 } 38
+    if ($registerSnapshot.state_generation -ne $mainPause.state_generation -or
+        $memorySnapshot.state_generation -ne $mainPause.state_generation -or
+        $disassemblySnapshot.state_generation -ne $mainPause.state_generation -or
+        $memorySnapshot.location.state_generation -ne $memorySnapshot.state_generation -or
+        $disassemblySnapshot.location.state_generation -ne $disassemblySnapshot.state_generation) {
+        throw 'Installed read tools did not preserve the stable main-pause generation.'
+    }
 
     $stopSubmitted = $true
     $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 40
@@ -140,6 +150,10 @@ try {
         instruction_pointer = $mainPause.instruction_pointer
         active_thread_id = $mainPause.active_thread_id
         state_generation = $mainPause.state_generation
+        registers_generation = $registerSnapshot.state_generation
+        memory_generation = $memorySnapshot.state_generation
+        disassembly_generation = $disassemblySnapshot.state_generation
+        snapshot_generations_equal = $true
         stopped = $stop.debuggee_state -eq 'absent'
     } | ConvertTo-Json -Depth 5
 } finally {

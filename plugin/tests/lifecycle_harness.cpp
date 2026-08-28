@@ -111,6 +111,10 @@ bool ExercisePauseCallbacks(mcp::Runtime& runtime) {
     PLUG_CB_BREAKPOINT breakpointInfo{&breakpoint};
     runtime.OnDebuggerEvent(CB_BREAKPOINT, &breakpointInfo);
     const mcp::PauseObservation specific = runtime.PauseForTesting();
+    const std::optional<std::uint64_t> snapshot = runtime.BeginPausedSnapshotForTesting();
+    if (!snapshot || !runtime.PausedSnapshotCurrentForTesting(*snapshot)) {
+        return false;
+    }
     runtime.OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
     const mcp::PauseObservation afterGeneric = runtime.PauseForTesting();
     if (specific.kind != mcp::PauseReasonKind::breakpoint || !specific.hasAddress ||
@@ -121,6 +125,9 @@ bool ExercisePauseCallbacks(mcp::Runtime& runtime) {
     }
 
     runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+    if (runtime.PausedSnapshotCurrentForTesting(*snapshot)) {
+        return false;
+    }
     EXCEPTION_DEBUG_INFO exception{};
     exception.ExceptionRecord.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
     exception.ExceptionRecord.ExceptionAddress = reinterpret_cast<void*>(0x402000U);

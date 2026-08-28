@@ -379,3 +379,13 @@ breakpoint, and reached it through resume -> callback wait. Evidence:
 - instruction pointer `0x8178a0`, active thread `0x1a4c`;
 - pause generation `26`, followed by a callback-confirmed stop;
 - no client-side base-plus-RVA calculation and no blind mutation retry.
+
+## 2026-08-29 consistent-snapshot follow-up
+
+ADR 0005 adds optimistic generation capture/recheck to all state-sensitive
+reads. In the installed checksum session, the main breakpoint pause, `rip/rsp`
+register snapshot, 16-byte module-relative memory read, and four-instruction
+module-relative disassembly all reported generation `27`. The memory and
+disassembly location metadata carried the same generation. Both isolated
+architectures also rejected a memory-map cursor after a step advanced debugger
+state, so stale pagination cannot silently mix snapshots.

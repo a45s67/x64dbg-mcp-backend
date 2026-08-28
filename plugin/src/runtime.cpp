@@ -126,6 +126,8 @@ struct Request {
     std::uint64_t deadlineUnixMs;
     bool mutation;
     std::string expression;
+    std::string path;
+    std::string workingDirectory;
     duint address{0};
     std::size_t length{0};
     std::vector<std::string> registerNames;
@@ -140,7 +142,8 @@ bool IsMutation(const std::string_view method) {
     return method == "debugger.pause" || method == "debugger.resume" ||
            method == "debugger.step_into" || method == "debugger.step_over" ||
            method == "debugger.stop" || method == "memory.write" ||
-           method == "breakpoints.set" || method == "breakpoints.remove";
+           method == "breakpoints.set" || method == "breakpoints.remove" ||
+           method == "debuggee.launch";
 }
 
 bool IsPageMethod(const std::string_view method) {
@@ -175,6 +178,48 @@ bool ParseAddress(json_t* value, duint& output) {
     const auto conversion =
         std::from_chars(text.data() + 2, text.data() + text.size(), output, 16);
     return conversion.ec == std::errc{} && conversion.ptr == text.data() + text.size();
+}
+
+bool IsBoundedPathString(json_t* value) {
+    if (!json_is_string(value) || json_string_length(value) < 3U ||
+        json_string_length(value) > 32767U) {
+        return false;
+    }
+    const std::string_view text(json_string_value(value), json_string_length(value));
+    return std::none_of(text.begin(), text.end(), [](const char character) {
+        return static_cast<unsigned char>(character) < 0x20U || character == 0x7f;
+    });
+}
+
+std::optional<std::string> CanonicalUtf8Path(const std::string_view input,
+                                             const bool requireDirectory) {
+    try {
+        const std::u8string encoded(reinterpret_cast<const char8_t*>(input.data()), input.size());
+        const std::filesystem::path supplied(encoded);
+        if (!supplied.is_absolute()) {
+            return std::nullopt;
+        }
+        std::error_code error;
+        const std::filesystem::path canonical = std::filesystem::canonical(supplied, error);
+        if (error || (requireDirectory ? !std::filesystem::is_directory(canonical, error)
+                                       : !std::filesystem::is_regular_file(canonical, error)) ||
+            error) {
+            return std::nullopt;
+        }
+        const std::u8string canonicalEncoded = canonical.u8string();
+        std::string result(reinterpret_cast<const char*>(canonicalEncoded.data()),
+                           canonicalEncoded.size());
+        if (result.empty() || result.find('"') != std::string::npos ||
+            std::any_of(result.begin(), result.end(), [](const char character) {
+                return static_cast<unsigned char>(character) < 0x20U || character == 0x7f;
+            })) {
+            return std::nullopt;
+        }
+        std::replace(result.begin(), result.end(), '\\', '/');
+        return result;
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 bool IsUuid(const std::string_view value) {
@@ -230,6 +275,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         return std::nullopt;
     }
     std::string expression;
+    std::string path;
+    std::string workingDirectory;
     duint addressValue = 0;
     std::size_t lengthValue = 0;
     std::vector<std::string> registerNames;
@@ -241,6 +288,21 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
+        }
+    } else if (methodValue == "debuggee.launch") {
+        json_t* pathValue = json_object_get(payload, "path");
+        json_t* directoryValue = json_object_get(payload, "working_directory");
+        const std::size_t expectedFields = directoryValue == nullptr ? 2U : 3U;
+        if (json_object_size(payload) != expectedFields ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !IsBoundedPathString(pathValue) ||
+            (directoryValue != nullptr && !IsBoundedPathString(directoryValue))) {
+            return std::nullopt;
+        }
+        path.assign(json_string_value(pathValue), json_string_length(pathValue));
+        if (directoryValue != nullptr) {
+            workingDirectory.assign(json_string_value(directoryValue),
+                                    json_string_length(directoryValue));
         }
     } else if (methodValue == "expression.evaluate") {
         json_t* value = json_object_get(payload, "expression");
@@ -389,8 +451,9 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     }
     return Request{std::string(requestIdValue), std::string(methodValue),
                    static_cast<std::uint64_t>(json_integer_value(deadline)), mutation,
-                   std::move(expression), addressValue, lengthValue, std::move(registerNames),
-                   pageLimit, cursorGeneration, cursorIndex, instructionCount,
+                   std::move(expression), std::move(path), std::move(workingDirectory),
+                   addressValue, lengthValue, std::move(registerNames), pageLimit,
+                   cursorGeneration, cursorIndex, instructionCount,
                    std::move(writeBytes)};
 }
 
@@ -693,6 +756,55 @@ void Runtime::Worker() noexcept {
                     return StateResponse(parsed->requestId);
                 }
 #ifndef MCP_LIFECYCLE_HARNESS
+                if (parsed->method == "debuggee.launch") {
+                    if (debuggeeState_.load() != DebuggeeState::absent || DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "launch requires no current debuggee", false, false);
+                    }
+                    const std::optional<std::string> executable =
+                        CanonicalUtf8Path(parsed->path, false);
+                    if (!executable) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "path must name an existing absolute regular file",
+                                             false, false);
+                    }
+                    std::string requestedDirectory = parsed->workingDirectory;
+                    if (requestedDirectory.empty()) {
+                        const std::u8string encoded(
+                            reinterpret_cast<const char8_t*>(executable->data()),
+                            executable->size());
+                        const std::filesystem::path executablePath(encoded);
+                        const std::u8string parent = executablePath.parent_path().u8string();
+                        requestedDirectory.assign(reinterpret_cast<const char*>(parent.data()),
+                                                  parent.size());
+                    }
+                    const std::optional<std::string> workingDirectory =
+                        CanonicalUtf8Path(requestedDirectory, true);
+                    if (!workingDirectory) {
+                        return ErrorResponse(
+                            *parsed, "INVALID_ARGUMENT",
+                            "working_directory must name an existing absolute directory", false,
+                            false);
+                    }
+                    const std::uint64_t before = generation_.load();
+                    const std::string command = "init \"" + *executable + "\", \"\", \"" +
+                                                *workingDirectory + "\"";
+                    if (!DbgCmdExec(command.c_str())) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected the launch", true,
+                                             false);
+                    }
+                    if (!WaitForState(DebuggeeState::paused, before, requestDeadline)) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "launch outcome was not callback-confirmed", false,
+                                             true);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(generation_.load()) +
+                           ",\"status\":\"ok\",\"result\":{\"debuggee_state\":\"paused\",\"path\":" +
+                           JsonString(*executable) + ",\"working_directory\":" +
+                           JsonString(*workingDirectory) + "}}";
+                }
                 if (parsed->method == "debugger.pause" || parsed->method == "debugger.resume" ||
                     parsed->method == "debugger.step_into" ||
                     parsed->method == "debugger.step_over" || parsed->method == "debugger.stop") {

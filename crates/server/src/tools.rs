@@ -41,6 +41,15 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
         "debugger.state" => exact_keys(object, &[], &[]),
         "debugger.pause" | "debugger.resume" | "debugger.step_into" | "debugger.step_over"
         | "debugger.stop" => operation(object, &[]),
+        "debuggee.launch" => {
+            exact_keys(object, &["operation_id", "path"], &["working_directory"])?;
+            validate_operation_id(object)?;
+            validate_path(object, "path")?;
+            if object.contains_key("working_directory") {
+                validate_path(object, "working_directory")?;
+            }
+            Ok(())
+        }
         "registers.read" => {
             exact_keys(object, &[], &["names"])?;
             if let Some(names) = object.get("names") {
@@ -139,6 +148,10 @@ fn operation(
     required.push("operation_id");
     required.extend_from_slice(fields);
     exact_keys(object, &required, &[])?;
+    validate_operation_id(object)
+}
+
+fn validate_operation_id(object: &serde_json::Map<String, Value>) -> Result<(), ValidationError> {
     let id = string(object, "operation_id", 36, 36)?;
     let parsed = Uuid::parse_str(id).map_err(|_| invalid("operation_id", "must be a UUID"))?;
     if parsed.hyphenated().to_string() != id {
@@ -146,6 +159,17 @@ fn operation(
             "operation_id",
             "must be a canonical lowercase UUID",
         ));
+    }
+    Ok(())
+}
+
+fn validate_path(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+) -> Result<(), ValidationError> {
+    let value = string(object, field, 3, 32_767)?;
+    if value.chars().any(char::is_control) {
+        return Err(invalid(field, "must not contain control characters"));
     }
     Ok(())
 }
@@ -247,6 +271,21 @@ fn build_catalog() -> Vec<Value> {
             "debugger.stop",
             "Stop the current debug session and wait for callback confirmation.",
             operation_schema(vec![]),
+            true,
+        ),
+        mutation_tool(
+            "debuggee.launch",
+            "Load an existing executable into this debugger instance and wait for a callback-confirmed initial pause. Requires no current debuggee and never accepts arbitrary debugger commands.",
+            operation_schema_with_optional(
+                vec![(
+                    "path",
+                    json!({"type":"string","minLength":3,"maxLength":32767}),
+                )],
+                vec![(
+                    "working_directory",
+                    json!({"type":"string","minLength":3,"maxLength":32767}),
+                )],
+            ),
             true,
         ),
         read_tool(
@@ -413,6 +452,20 @@ fn operation_schema(mut properties: Vec<(&'static str, Value)>) -> Value {
     object(properties, required)
 }
 
+fn operation_schema_with_optional(
+    required_properties: Vec<(&'static str, Value)>,
+    optional_properties: Vec<(&'static str, Value)>,
+) -> Value {
+    let mut properties = required_properties;
+    let required_names = properties.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+    properties.extend(optional_properties);
+    let mut schema = operation_schema(properties);
+    let mut required = vec![json!("operation_id")];
+    required.extend(required_names.into_iter().map(|name| json!(name)));
+    schema["required"] = Value::Array(required);
+    schema
+}
+
 fn object(properties: Vec<(&'static str, Value)>, required: Vec<&'static str>) -> Value {
     let properties = properties
         .into_iter()
@@ -436,7 +489,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 17);
+        assert_eq!(catalog().len(), 18);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -460,6 +513,27 @@ mod tests {
         );
         assert!(
             validate_arguments("memory.read", &json!({"address":"0x1000","length":65537})).is_err()
+        );
+        assert!(
+            validate_arguments(
+                "debuggee.launch",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "path":"C:\\samples\\fixture.exe"
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "debuggee.launch",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "path":"C:\\samples\\fixture.exe",
+                    "arguments":"unbounded raw command line"
+                })
+            )
+            .is_err()
         );
         assert!(
             validate_arguments(

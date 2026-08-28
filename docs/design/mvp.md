@@ -150,6 +150,7 @@ truncated only at item boundaries and reports `next_cursor`.
 | `debugger.step_into` | mutate | paused | One instruction, then bounded wait for pause |
 | `debugger.step_over` | mutate | paused | One instruction, then bounded wait for pause |
 | `debugger.stop` | mutate | starting/running/paused | Stop current debug session |
+| `debuggee.launch` | destructive mutation | absent | Canonicalize and load an existing executable, then wait for a callback-confirmed initial pause |
 | `registers.read` | read | paused | Selected registers or bounded complete register set |
 | `memory.read` | read | paused | Read at most 64 KiB per call; report partial/unreadable ranges |
 | `memory.write` | mutate | paused | Write at most 4 KiB; explicit hex bytes and operation ID |
@@ -352,6 +353,10 @@ Exit: all automated suites pass and no process, thread, or handle leak remains.
 Post-MVP work (separate ADRs): SSE/resumption, remote bind with TLS/OAuth, multiple
 same-type debugger instances, resources/prompts, attach/launch, scripting, and
 arbitrary command execution.
+
+The first post-MVP exception is the bounded `debuggee.launch` mutation accepted
+in ADR 0002. It deliberately does not expose arbitrary commands or raw command
+line arguments.
 
 ## References
 

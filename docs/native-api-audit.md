@@ -17,13 +17,15 @@ retained. Bridge-allocated lists are freed with `BridgeFree` inside the same wor
 item. Count, pointer, element-size, decoder-length, address-overflow, and output
 bounds are checked before dereference or iteration.
 
-Mutating debugger commands are never executed with `DbgCmdExecDirect` and no
-caller input becomes a command. The executor submits one fixed command through
-`DbgCmdExec`, x64dbg's documented asynchronous command queue, then waits for a
-later registered debugger callback and a greater `state_generation`. Breakpoint
-commands contain only a validated, re-formatted numeric address and are confirmed
-through `DbgGetBpxTypeAt`. Timeout after submission is reported as unknown and is
-never retried automatically.
+Mutating debugger commands are never executed with `DbgCmdExecDirect`. The
+executor submits an allowlisted command through `DbgCmdExec`, x64dbg's documented
+asynchronous command queue, then waits for a later registered debugger callback
+and a greater `state_generation`. Breakpoint commands contain only a validated,
+re-formatted numeric address. `debuggee.launch` contains only canonical existing
+paths in fixed quoted `InitDebug` positions; Windows-forbidden quotes and control
+characters cannot enter the command and raw command-line arguments are not
+accepted. Timeout after submission is reported as unknown and is never retried
+automatically.
 
 ## Enabled calls
 
@@ -41,6 +43,7 @@ never retried automatically.
 | pause/resume/step/stop | `DbgCmdExec` | operation-specific | fixed command; callback and generation confirmation |
 | `memory.write` | `DbgMemWrite`, `DbgMemRead` | paused | max 4 KiB; read-back verification |
 | breakpoint set/remove | `DbgCmdExec`, `DbgGetBpxTypeAt` | paused | validated address only; bounded observation loop |
+| `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; callback and generation confirmation |
 
 ## Unload invariant
 

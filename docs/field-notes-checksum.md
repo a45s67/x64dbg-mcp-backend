@@ -43,6 +43,14 @@ Acceptance criteria:
 - Report plugin/sidecar initialization failures with actionable diagnostics.
 - Preserve mutation idempotency through `operation_id`.
 
+Implemented in ADR 0002 as the first post-MVP capability. The initial contract
+accepts `path`, optional `working_directory`, and `operation_id`; raw command-line
+arguments and a configurable entry-break policy remain deferred until their
+quoting and debugger semantics can be tested precisely. The isolated x32dbg
+fixture passed the callback-confirmed launch workflow on 2026-08-29. The matching
+x64dbg real-integration run remains required when no other x64 backend instance
+owns the MVP single-instance mutex.
+
 ### Recover after sidecar or debugger restart
 
 Observed: closing x64dbg removed the listener at `127.0.0.1:43164`. Subsequent

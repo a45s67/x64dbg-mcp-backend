@@ -70,7 +70,7 @@ try {
     $env:X64DBG_MCP_SERVER_PATH = $server
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $debugger
-    $startInfo.Arguments = "`"$fixture`""
+    $startInfo.Arguments = ''
     $startInfo.WorkingDirectory = $backendRoot
     $startInfo.UseShellExecute = $false
     $debuggerProcess = [System.Diagnostics.Process]::Start($startInfo)
@@ -94,12 +94,27 @@ try {
     $null = Invoke-Mcp 'initialize' @{
         protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'real-integration'; version = '1' }
     } 1
-    $state = $null
-    do {
-        $state = Invoke-Tool 'debugger.state' @{} 2
-        if ($state.debuggee_state -eq 'paused') { break }
-        Start-Sleep -Milliseconds 100
-    } until ([DateTime]::UtcNow -ge $deadline)
+    $beforeLaunch = Invoke-Tool 'debugger.state' @{} 2
+    if ($beforeLaunch.debuggee_state -ne 'absent') {
+        throw "Isolated debugger did not start without a debuggee; actual=$($beforeLaunch.debuggee_state)"
+    }
+    $invalidLaunch = Invoke-Mcp 'tools/call' @{
+        name = 'debuggee.launch'
+        arguments = @{
+            operation_id = [Guid]::NewGuid().ToString()
+            path = '.\relative-fixture.exe'
+        }
+    } 3
+    if (!$invalidLaunch.isError -or
+        $invalidLaunch.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'debuggee.launch did not reject a relative path before queuing InitDebug.'
+    }
+    $launch = Invoke-Tool 'debuggee.launch' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        path = $fixture
+        working_directory = $backendRoot
+    } 4
+    $state = Invoke-Tool 'debugger.state' @{} 5
     if ($state.debuggee_state -ne 'paused') {
         throw "Fixture did not reach paused state; actual=$($state.debuggee_state)"
     }
@@ -158,6 +173,7 @@ try {
     $report = [ordered]@{
         backend = $Backend
         architecture = $state.architecture
+        launched_path = $launch.path
         process_id = $state.process_id
         registers = @($registers.registers.PSObject.Properties).Count
         memory_bytes = $memory.bytes_read

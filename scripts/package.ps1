@@ -23,6 +23,9 @@ if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $archive)) {
 Push-Location $workspace
 try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $workspace 'scripts\test-install.ps1')
+    if ($LASTEXITCODE -ne 0) { throw 'Installer contract tests failed.' }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
         -File (Join-Path $workspace 'scripts\test-skill.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'Codex skill contract tests failed.' }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass `
@@ -60,6 +63,7 @@ try {
     Copy-Item -LiteralPath 'docs\native-api-audit.md' -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath 'scripts\install.ps1' -Destination (Join-Path $stage 'scripts')
     Copy-Item -LiteralPath 'scripts\register-codex.ps1' -Destination (Join-Path $stage 'scripts')
+    Copy-Item -LiteralPath 'scripts\verify-package.ps1' -Destination (Join-Path $stage 'scripts')
     Copy-Item -LiteralPath 'skills\x64dbg-debugging' -Destination (Join-Path $stage 'skills') -Recurse
 
     @{
@@ -108,6 +112,9 @@ try {
             "$hash  $relative"
         }
     $checksums | Set-Content -LiteralPath (Join-Path $stage 'checksums.txt') -Encoding ASCII
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $workspace 'scripts\test-package.ps1') -PackageRoot $stage
+    if ($LASTEXITCODE -ne 0) { throw 'Package verifier contract tests failed.' }
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archiveStream = [System.IO.File]::Open($archive, [System.IO.FileMode]::CreateNew)

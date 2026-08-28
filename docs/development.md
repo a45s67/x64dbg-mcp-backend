@@ -33,6 +33,7 @@ Run the server checks and build the sidecar with:
 cargo test --offline --workspace --all-targets
 cargo clippy --offline --workspace --all-targets -- -D warnings
 cargo build --release --locked
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-install.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-register-codex.ps1
 ```
 

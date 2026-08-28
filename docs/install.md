@@ -11,9 +11,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
 
 The installer verifies that both x32 and x64 debugger directories exist, copies
 the matching `.dp32` and `.dp64` plugins, installs the shared static sidecar, and
-creates two TOML configuration files. It generates one cryptographically random
-48-byte bearer secret and stores it only in those configuration files. The installer
-does not print the secret; do not put it in source control or command-line arguments.
+creates two TOML configuration files. A first install generates one
+cryptographically random 48-byte bearer secret and stores it only in those
+configuration files. A normal reinstall preserves the existing shared secret and
+any port not explicitly supplied, so an update does not silently break registered
+clients. The installer does not print the secret; do not put it in source control
+or command-line arguments.
+
+If the two installed configurations contain different tokens, installation fails
+before copying files. Reconcile the files or deliberately create a new shared
+credential with `-RotateToken`, then refresh Codex or Gateway registration. Use
+`-WhatIf` to inspect the copy operation without writing anything.
 
 Default endpoints are:
 
@@ -24,6 +32,20 @@ Use `-X32Port` and `-X64Port` to select different, non-equal ports. Start the
 desired debugger normally. Its plugin launches the sidecar automatically after
 plugin initialization. Closing or unloading the debugger plugin shuts down its
 sidecar; there is no detached server process to start separately.
+
+## Verify the extracted package
+
+Before installation, verify every packaged file, required layout, version/SBOM
+metadata, and the x86/x64 PE machine types offline:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\verify-package.ps1
+```
+
+This uses only built-in PowerShell/.NET and makes no network or filesystem
+changes. Checksums establish integrity relative to the included manifest; they
+do not replace publisher code signing.
 
 Never install the x32 and x64 backends on the same port. The MVP permits one
 debugger instance per backend type, so a second x32dbg or x64dbg instance reports

@@ -588,3 +588,30 @@ generation `27` across pause, registers, memory, disassembly, compact snapshot,
 and filtered map results. Eight compact instructions, one executable module
 region, and both known strings were returned within their bounds. The explicit
 stop reported `absent`, with no mutation retry or remaining sidecar.
+
+## 2026-08-29 idempotent install and package-verification follow-up
+
+ADR 0013 separates routine binary updates from credential rotation. A first
+install still generates one random 48-byte token, but a normal reinstall now
+preserves a valid shared token and any port not explicitly supplied. A partial
+single-config repair reuses the remaining credential. Divergent x32/x64 tokens
+fail before binary copies, while `-RotateToken` is the only intentional rotation
+path. Installation remains plain copy plus TOML writes and still performs no ACL,
+environment, Codex, or unrelated-plugin mutation.
+
+The disposable installer contract covers first install, idempotent binary update,
+explicit ports, partial repair, mismatch failure without partial writes, explicit
+rotation, equal-port rejection, secret non-disclosure, and `-WhatIf`. The shipped
+offline verifier strictly checks every manifest path and SHA-256, rejects missing
+or unlisted files, validates version and CycloneDX metadata, and parses PE headers
+to require x86 dp32 plus x64 dp64/sidecar. The package gate verified the real
+34-file release, then proved a tampered file and an unlisted file fail validation.
+
+Reinstalling that extracted package over `C:\tools\x64dbg` reported the token as
+preserved; an in-process before/after comparison confirmed equality without
+printing it. Codex registration was refreshed using the same static header. The
+installed `checksum.exe` acceptance run then loaded at `0x770000`, resolved RVA
+`0xa78a0` to `0x8178a0`, hit the breakpoint once, and retained generation `27`
+across all paused snapshots. It returned eight compact instructions, one filtered
+executable region, both known strings, and an explicit stopped state with no
+remaining sidecar.

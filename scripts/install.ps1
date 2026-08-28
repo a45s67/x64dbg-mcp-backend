@@ -4,16 +4,13 @@ param(
     [string]$X64dbgRoot,
     [int]$X32Port = 43132,
     [int]$X64Port = 43164,
-    [string]$PackageRoot
+    [string]$PackageRoot,
+    [switch]$RotateToken
 )
 
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
     $PackageRoot = Join-Path $PSScriptRoot '..'
-}
-if ($X32Port -lt 1 -or $X32Port -gt 65535 -or $X64Port -lt 1 -or
-    $X64Port -gt 65535 -or $X32Port -eq $X64Port) {
-    throw 'X32Port and X64Port must be distinct values from 1 through 65535.'
 }
 $package = (Resolve-Path -LiteralPath $PackageRoot).Path
 $root = (Resolve-Path -LiteralPath $X64dbgRoot).Path
@@ -37,17 +34,67 @@ foreach ($required in @($serverSource, $x32Source, $x64Source)) {
 }
 
 $serverDirectory = Join-Path $debuggerRoot 'server'
+$x32ConfigPath = Join-Path $serverDirectory 'x64dbg-mcp-server-x32.toml'
+$x64ConfigPath = Join-Path $serverDirectory 'x64dbg-mcp-server-x64.toml'
+
+function Read-InstalledConfig([string]$Path) {
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $text = Get-Content -LiteralPath $Path -Raw
+    $portMatch = [regex]::Match($text, '(?m)^port = ([0-9]+)\r?$')
+    $tokenMatch = [regex]::Match($text, '(?m)^bearer_token = "([^"\r\n]+)"\r?$')
+    if (!$portMatch.Success -or !$tokenMatch.Success) {
+        throw "Installed backend configuration is invalid: $Path"
+    }
+    $port = 0
+    if (![int]::TryParse($portMatch.Groups[1].Value, [ref]$port) -or
+        $port -lt 1 -or $port -gt 65535) {
+        throw "Installed backend port is invalid: $Path"
+    }
+    $token = $tokenMatch.Groups[1].Value
+    $tokenBytes = [Text.Encoding]::UTF8.GetByteCount($token)
+    if ($tokenBytes -lt 32 -or $tokenBytes -gt 4096 -or
+        $token.IndexOfAny([char[]](0..31)) -ge 0) {
+        throw "Installed backend bearer token is invalid: $Path"
+    }
+    [pscustomobject]@{ Port = $port; Token = $token }
+}
+
+$x32Installed = Read-InstalledConfig $x32ConfigPath
+$x64Installed = Read-InstalledConfig $x64ConfigPath
+$effectiveX32Port = if ($PSBoundParameters.ContainsKey('X32Port')) {
+    $X32Port
+} elseif ($x32Installed) { $x32Installed.Port } else { 43132 }
+$effectiveX64Port = if ($PSBoundParameters.ContainsKey('X64Port')) {
+    $X64Port
+} elseif ($x64Installed) { $x64Installed.Port } else { 43164 }
+if ($effectiveX32Port -lt 1 -or $effectiveX32Port -gt 65535 -or
+    $effectiveX64Port -lt 1 -or $effectiveX64Port -gt 65535 -or
+    $effectiveX32Port -eq $effectiveX64Port) {
+    throw 'X32Port and X64Port must be distinct values from 1 through 65535.'
+}
+
+$installedTokens = @(@($x32Installed, $x64Installed) |
+    Where-Object { $null -ne $_ } | ForEach-Object { $_.Token } | Select-Object -Unique)
+if (!$RotateToken -and $installedTokens.Count -gt 1) {
+    throw 'Installed x32 and x64 bearer tokens differ. Reconcile them or use -RotateToken.'
+}
+$tokenWasGenerated = $RotateToken -or $installedTokens.Count -eq 0
+if ($tokenWasGenerated) {
+    $randomBytes = New-Object byte[] 48
+    $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $generator.GetBytes($randomBytes) } finally { $generator.Dispose() }
+    $token = [Convert]::ToBase64String($randomBytes)
+} else {
+    $token = $installedTokens[0]
+}
+
 if ($PSCmdlet.ShouldProcess($debuggerRoot, 'Install x64dbg MCP backend')) {
     New-Item -ItemType Directory -Path $serverDirectory -Force | Out-Null
     Copy-Item -LiteralPath $serverSource -Destination $serverDirectory -Force
     Copy-Item -LiteralPath $x32Source -Destination (Join-Path $debuggerRoot 'x32\plugins') -Force
     Copy-Item -LiteralPath $x64Source -Destination (Join-Path $debuggerRoot 'x64\plugins') -Force
 
-    $tokenBytes = New-Object byte[] 48
-    $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    try { $generator.GetBytes($tokenBytes) } finally { $generator.Dispose() }
-    $token = [Convert]::ToBase64String($tokenBytes)
-    foreach ($entry in @(@('x32', $X32Port), @('x64', $X64Port))) {
+    foreach ($entry in @(@('x32', $effectiveX32Port), @('x64', $effectiveX64Port))) {
         $configPath = Join-Path $serverDirectory "x64dbg-mcp-server-$($entry[0]).toml"
         @"
 bind = "127.0.0.1"
@@ -65,7 +112,8 @@ max_output_bytes = 1048576
 allowed_origins = []
 "@ | Set-Content -LiteralPath $configPath -Encoding ASCII -NoNewline
     }
-    Write-Output 'Installed backend. Bearer token generated and stored in the two server config files.'
-    Write-Output "x32 endpoint: http://127.0.0.1:$X32Port/mcp"
-    Write-Output "x64 endpoint: http://127.0.0.1:$X64Port/mcp"
+    $tokenAction = if ($tokenWasGenerated) { 'generated' } else { 'preserved' }
+    Write-Output "Installed backend. Bearer token $tokenAction and stored in the two server config files."
+    Write-Output "x32 endpoint: http://127.0.0.1:$effectiveX32Port/mcp"
+    Write-Output "x64 endpoint: http://127.0.0.1:$effectiveX64Port/mcp"
 }

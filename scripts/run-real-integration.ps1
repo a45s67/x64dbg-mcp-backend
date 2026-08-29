@@ -75,6 +75,7 @@ $previous = @{
     Port = $env:X64DBG_MCP_PORT
     Token = $env:X64DBG_MCP_TOKEN
     Server = $env:X64DBG_MCP_SERVER_PATH
+    Rate = $env:X64DBG_MCP_MAX_REQUESTS_PER_SECOND
 }
 $debuggerProcess = $null
 try {
@@ -82,6 +83,10 @@ try {
     $env:X64DBG_MCP_PORT = [string]$port
     $env:X64DBG_MCP_TOKEN = $token
     $env:X64DBG_MCP_SERVER_PATH = $server
+    # This qualification intentionally performs more than 100 calls in a
+    # second on fast hosts. Keep the production default unchanged while using
+    # the documented hard-bounded test ceiling for this isolated instance.
+    $env:X64DBG_MCP_MAX_REQUESTS_PER_SECOND = '1000'
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $debugger
     $startInfo.Arguments = ''
@@ -155,6 +160,20 @@ try {
     Write-Verbose 'Debuggee is paused'
 
     $registers = Invoke-Tool 'registers.read' @{} 3
+    $callstack = Invoke-Tool 'callstack.read' @{ limit = 50 } 201
+    if (!$callstack.thread_id -or @($callstack.frames).Count -gt 50 -or
+        $callstack.native_frame_count -lt @($callstack.frames).Count -or
+        $callstack.completeness -notin @('native_bounded', 'inconclusive') -or
+        $callstack.state_generation -ne $state.state_generation) {
+        throw 'Native call-stack read was not bounded and generation-consistent.'
+    }
+    $specificCallstack = Invoke-Tool 'callstack.read' @{
+        thread_id = $callstack.thread_id; limit = 1
+    } 202
+    if ($specificCallstack.thread_id -ne $callstack.thread_id -or
+        @($specificCallstack.frames).Count -gt 1) {
+        throw 'Exact-thread call-stack selection did not honor its bound.'
+    }
     $expression = Invoke-Tool 'expression.evaluate' @{ expression = 'cip' } 4
     $memory = Invoke-Tool 'memory.read' @{ address = $expression.value; length = 16 } 5
     $disassembly = Invoke-Tool 'disassembly.read' @{ address = $expression.value; count = 4 } 6
@@ -252,6 +271,60 @@ try {
         ($trackedPatchReplay | ConvertTo-Json -Compress -Depth 12)) {
         throw 'Tracked assembly patch was not bounded, padded, or replay-safe.'
     }
+    $secondPatchInstruction = $moduleDisassembly.items[2]
+    $secondPatchMemory = Invoke-Tool 'memory.read' @{
+        address = @{ absolute = $secondPatchInstruction.address }
+        length = [int]$secondPatchInstruction.size
+    } 209
+    $secondPatchAssembly = if ($secondPatchMemory.data_hex.StartsWith('cc')) { 'nop' } else { 'int3' }
+    $secondPatch = Invoke-Tool 'assembly.patch' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = @{ absolute = $secondPatchInstruction.address }
+        instruction = $secondPatchAssembly
+        expected_bytes_hex = $secondPatchMemory.data_hex; fill_nop = $true
+    } 210
+    $patchPageOne = Invoke-Tool 'patches.list' @{
+        module = $fixtureModule.name; limit = 1
+    } 211
+    if (@($patchPageOne.items).Count -ne 1 -or !$patchPageOne.next_cursor -or
+        !$patchPageOne.next_cursor.StartsWith('v3:')) {
+        throw 'Disjoint patch ranges did not produce a bounded v3 cursor.'
+    }
+    $patchPageTwo = Invoke-Tool 'patches.list' @{
+        module = $fixtureModule.name; limit = 1; cursor = $patchPageOne.next_cursor
+    } 212
+    if (@($patchPageTwo.items).Count -ne 1 -or $patchPageTwo.next_cursor -or
+        $patchPageTwo.snapshot_fingerprint -ne $patchPageOne.snapshot_fingerprint) {
+        throw 'Patch pagination mixed snapshots or returned an invalid second page.'
+    }
+    $null = Invoke-Tool 'patches.restore' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = @{ absolute = $secondPatchInstruction.address }
+        expected_patched_bytes_hex = $secondPatch.patched_bytes_hex
+        expected_original_bytes_hex = $secondPatchMemory.data_hex
+    } 213
+    $stalePatchCursor = Invoke-Mcp 'tools/call' @{
+        name = 'patches.list'; arguments = @{
+            module = $fixtureModule.name; limit = 1; cursor = $patchPageOne.next_cursor
+        }
+    } 214
+    if (!$stalePatchCursor.isError -or
+        $stalePatchCursor.structuredContent.error.code -ne 'STALE_CURSOR') {
+        throw 'Patch pagination did not reject database churn without a generation change.'
+    }
+    $listedPatches = Invoke-Tool 'patches.list' @{
+        module = $fixtureModule.name.ToUpperInvariant(); limit = 256
+    } 203
+    $listedEntryPatch = @($listedPatches.items | Where-Object {
+        $_.start.address -eq $trackedPatch.address
+    })[0]
+    if (!$listedEntryPatch -or !$listedEntryPatch.current_matches_patch -or
+        $listedEntryPatch.original_bytes_hex -ne $patchOriginalHex -or
+        $listedEntryPatch.patched_bytes_hex -ne $trackedPatch.patched_bytes_hex -or
+        $listedPatches.completeness -ne 'tracked_only' -or
+        !$listedPatches.snapshot_fingerprint) {
+        throw 'Tracked patch listing did not return the verified adjacent range.'
+    }
     $overlappingPatch = Invoke-Mcp 'tools/call' @{
         name = 'assembly.patch'; arguments = @{
             operation_id = [Guid]::NewGuid().ToString(); address = $moduleEntryRef
@@ -278,6 +351,13 @@ try {
         ($restoredPatchReplay | ConvertTo-Json -Compress -Depth 12)) {
         throw 'Tracked patch restore did not exactly recover the fixture bytes.'
     }
+    $patchesAfterRestore = Invoke-Tool 'patches.list' @{
+        module = $fixtureModule.name; limit = 256
+    } 204
+    if (@($patchesAfterRestore.items).Count -ne 0 -or
+        $patchesAfterRestore.completeness -ne 'tracked_only') {
+        throw 'Patch listing retained restored patch records.'
+    }
     $compactSnapshot = Invoke-Tool 'debugger.snapshot' @{} 54
     if ($compactSnapshot.state_generation -ne $state.state_generation -or
         $compactSnapshot.instruction_pointer.address -ne $expression.value -or
@@ -302,6 +382,27 @@ try {
         !$markerSymbol -or !$markerSymbol.location.rva) {
         throw 'Fixture analysis and marker exports were not available as structured symbols.'
     }
+    $resolvedSymbolByName = Invoke-Tool 'symbols.resolve' @{
+        module = $fixtureModule.name.ToUpperInvariant(); name = $analysisSymbol.name
+    } 205
+    $resolvedSymbolByAddress = Invoke-Tool 'symbols.resolve' @{
+        address = @{ absolute = $analysisSymbol.location.address }
+    } 206
+    if ($resolvedSymbolByName.resolution -ne 'found' -or
+        $resolvedSymbolByName.total_matches -ne 1 -or
+        $resolvedSymbolByName.matches[0].location.address -ne $analysisSymbol.location.address -or
+        $resolvedSymbolByAddress.resolution -eq 'missing' -or
+        @($resolvedSymbolByAddress.matches | Where-Object {
+            $_.name -ceq $analysisSymbol.name
+        }).Count -eq 0) {
+        throw 'Exact symbol resolution did not agree by name and runtime address.'
+    }
+    $missingSymbol = Invoke-Tool 'symbols.resolve' @{
+        module = $fixtureModule.name; name = '__mcp_definitely_missing_symbol__'
+    } 207
+    if ($missingSymbol.resolution -ne 'missing' -or $missingSymbol.total_matches -ne 0) {
+        throw 'Missing exact symbol resolution was not an explicit successful result.'
+    }
     $analysisRef = @{
         module = $fixtureModule.name.ToUpperInvariant()
         rva = $analysisSymbol.location.rva
@@ -318,6 +419,13 @@ try {
         $analysis.requested_location.address -ne $analysisSymbol.location.address -or
         !$analysis.function.start.module -or !$analysis.function.end.module) {
         throw 'Explicit function analysis omitted generation-consistent structured results.'
+    }
+    $knownFunction = Invoke-Tool 'functions.at' @{ address = $analysisRef } 208
+    if (!$knownFunction.found -or !$knownFunction.function.contains_query -or
+        $knownFunction.function.start.address -ne $analysis.function.start.address -or
+        $knownFunction.function.end_inclusive.address -ne $analysis.function.end.address -or
+        $knownFunction.completeness -ne 'known_only') {
+        throw 'Known-function lookup did not return the analyzed containing function.'
     }
     $analysisReplay = Invoke-Tool 'analysis.function' @{
         operation_id = $analysisOperation; address = $analysisRef
@@ -878,6 +986,12 @@ try {
         module_instructions = $moduleDisassembly.items.Count
         symbols = $symbols.items.Count
         functions = $functions.items.Count
+        callstack_frames = @($callstack.frames).Count
+        callstack_completeness = $callstack.completeness
+        patches_verified = $true
+        patch_cursor_snapshot_bound = $true
+        exact_symbol_resolution = $true
+        known_function_lookup = $true
         analysis_function_start = $analysis.function.start.address
         analysis_function_end = $analysis.function.end.address
         analysis_already_known = $analysis.already_known
@@ -940,5 +1054,6 @@ try {
     $env:X64DBG_MCP_PORT = $previous.Port
     $env:X64DBG_MCP_TOKEN = $previous.Token
     $env:X64DBG_MCP_SERVER_PATH = $previous.Server
+    $env:X64DBG_MCP_MAX_REQUESTS_PER_SECOND = $previous.Rate
     Write-Verbose 'Integration cleanup finished'
 }

@@ -174,6 +174,10 @@ struct Request {
     std::vector<unsigned char> expectedBytes;
     std::vector<unsigned char> expectedOriginalBytes;
     bool fillNop{false};
+    bool addressProvided{false};
+    std::optional<std::uint32_t> targetThreadId;
+    std::string symbolName;
+    std::optional<std::uint64_t> cursorSnapshotFingerprint;
 };
 
 bool IsMutation(const std::string_view method) {
@@ -243,6 +247,36 @@ bool ParseDiscoveryCursor(const std::string_view cursor, std::uint64_t& generati
            fingerprintResult.ec == std::errc{} &&
            fingerprintResult.ptr == cursor.data() + second && indexResult.ec == std::errc{} &&
            indexResult.ptr == cursor.data() + cursor.size();
+}
+
+bool ParsePatchCursor(const std::string_view cursor, std::uint64_t& generation,
+                      std::uint64_t& filterFingerprint,
+                      std::uint64_t& snapshotFingerprint, std::size_t& index) {
+    if (!cursor.starts_with("v3:") || cursor.size() > 160U) return false;
+    const auto first = cursor.find(':', 3U);
+    const auto second = first == std::string_view::npos
+                            ? std::string_view::npos
+                            : cursor.find(':', first + 1U);
+    const auto third = second == std::string_view::npos
+                           ? std::string_view::npos
+                           : cursor.find(':', second + 1U);
+    if (first == std::string_view::npos || second == std::string_view::npos ||
+        third == std::string_view::npos) return false;
+    const auto generationResult =
+        std::from_chars(cursor.data() + 3U, cursor.data() + first, generation, 10);
+    const auto filterResult = std::from_chars(cursor.data() + first + 1U,
+                                              cursor.data() + second,
+                                              filterFingerprint, 16);
+    const auto snapshotResult = std::from_chars(cursor.data() + second + 1U,
+                                                cursor.data() + third,
+                                                snapshotFingerprint, 16);
+    const auto indexResult = std::from_chars(cursor.data() + third + 1U,
+                                             cursor.data() + cursor.size(), index, 10);
+    return generationResult.ec == std::errc{} &&
+           generationResult.ptr == cursor.data() + first &&
+           filterResult.ec == std::errc{} && filterResult.ptr == cursor.data() + second &&
+           snapshotResult.ec == std::errc{} && snapshotResult.ptr == cursor.data() + third &&
+           indexResult.ec == std::errc{} && indexResult.ptr == cursor.data() + cursor.size();
 }
 
 bool ParseCursor(const std::string_view cursor, std::uint64_t& generation, std::size_t& index) {
@@ -467,6 +501,10 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::vector<unsigned char> expectedBytes;
     std::vector<unsigned char> expectedOriginalBytes;
     bool fillNop = false;
+    bool addressProvided = false;
+    std::optional<std::uint32_t> targetThreadId;
+    std::string symbolName;
+    std::optional<std::uint64_t> cursorSnapshotFingerprint;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
@@ -561,6 +599,33 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             !ParseAddressReference(json_object_get(payload, "address"), addressValue)) {
             return std::nullopt;
         }
+        addressProvided = true;
+    } else if (methodValue == "functions.at") {
+        if (json_object_size(payload) != 1U ||
+            !ParseAddressReference(json_object_get(payload, "address"), addressValue)) {
+            return std::nullopt;
+        }
+        addressProvided = true;
+    } else if (methodValue == "symbols.resolve") {
+        json_t* address = json_object_get(payload, "address");
+        json_t* module = json_object_get(payload, "module");
+        json_t* name = json_object_get(payload, "name");
+        if (address != nullptr) {
+            if (json_object_size(payload) != 1U || module != nullptr || name != nullptr ||
+                !ParseAddressReference(address, addressValue)) return std::nullopt;
+            addressProvided = true;
+        } else {
+            if (json_object_size(payload) != 2U || !IsBoundedModuleName(module) ||
+                !json_is_string(name) || json_string_length(name) == 0U ||
+                json_string_length(name) > 256U) return std::nullopt;
+            const std::string_view nameValue(json_string_value(name), json_string_length(name));
+            if (std::any_of(nameValue.begin(), nameValue.end(), [](const char character) {
+                    const auto byte = static_cast<unsigned char>(character);
+                    return byte < 0x20U || byte == 0x7fU;
+                })) return std::nullopt;
+            moduleFilter.assign(json_string_value(module), json_string_length(module));
+            symbolName.assign(nameValue);
+        }
     } else if (methodValue == "analysis.function") {
         if (json_object_size(payload) != 2U ||
             !json_is_string(json_object_get(payload, "operation_id")) ||
@@ -652,6 +717,60 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             } else {
                 cursorGeneration = cursorGenerationValue;
                 discoveryCursorInvalid = fingerprintValue != expectedFingerprint;
+            }
+        }
+    } else if (methodValue == "callstack.read") {
+        json_t* thread = json_object_get(payload, "thread_id");
+        json_t* limit = json_object_get(payload, "limit");
+        const std::size_t expectedFields = (thread ? 1U : 0U) + (limit ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields) return std::nullopt;
+        pageLimit = 32U;
+        if (thread != nullptr) {
+            std::uint64_t parsedThread = 0U;
+            if (!ParseCanonicalHex64(thread, parsedThread) || parsedThread > 0xffffffffULL) {
+                return std::nullopt;
+            }
+            targetThreadId = static_cast<std::uint32_t>(parsedThread);
+        }
+        if (limit != nullptr) {
+            if (!json_is_integer(limit) || json_integer_value(limit) < 1 ||
+                json_integer_value(limit) > 50) return std::nullopt;
+            pageLimit = static_cast<std::size_t>(json_integer_value(limit));
+        }
+    } else if (methodValue == "patches.list") {
+        json_t* module = json_object_get(payload, "module");
+        json_t* limit = json_object_get(payload, "limit");
+        json_t* cursor = json_object_get(payload, "cursor");
+        const std::size_t expectedFields = (module ? 1U : 0U) + (limit ? 1U : 0U) +
+                                           (cursor ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields ||
+            (module != nullptr && !IsBoundedModuleName(module))) return std::nullopt;
+        if (module != nullptr) {
+            moduleFilter.assign(json_string_value(module), json_string_length(module));
+        }
+        if (limit != nullptr) {
+            if (!json_is_integer(limit) || json_integer_value(limit) < 1 ||
+                json_integer_value(limit) > 256) return std::nullopt;
+            pageLimit = static_cast<std::size_t>(json_integer_value(limit));
+        }
+        const std::uint64_t expectedFingerprint =
+            DiscoveryFingerprint(methodValue, moduleFilter, "", "", 0U);
+        cursorFingerprint = expectedFingerprint;
+        if (cursor != nullptr) {
+            if (!json_is_string(cursor) || json_string_length(cursor) == 0U ||
+                json_string_length(cursor) > 512U) return std::nullopt;
+            std::uint64_t cursorGenerationValue = 0U;
+            std::uint64_t filterFingerprint = 0U;
+            std::uint64_t snapshotFingerprint = 0U;
+            const std::string_view cursorText(json_string_value(cursor),
+                                              json_string_length(cursor));
+            if (!ParsePatchCursor(cursorText, cursorGenerationValue, filterFingerprint,
+                                  snapshotFingerprint, cursorIndex)) {
+                discoveryCursorInvalid = true;
+            } else {
+                cursorGeneration = cursorGenerationValue;
+                cursorSnapshotFingerprint = snapshotFingerprint;
+                discoveryCursorInvalid = filterFingerprint != expectedFingerprint;
             }
         }
     } else if (IsDiscoveryMethod(methodValue)) {
@@ -882,7 +1001,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    committedOnly, executableOnly, compact, std::move(registerName),
                    registerWriteValue, std::move(breakpointAccess), breakpointSize,
                    std::move(instruction), std::move(expectedBytes),
-                   std::move(expectedOriginalBytes), fillNop};
+                   std::move(expectedOriginalBytes), fillNop, addressProvided,
+                   targetThreadId, std::move(symbolName), cursorSnapshotFingerprint};
 }
 
 bool IsCanonicalUuid(const std::string_view value) {
@@ -1128,6 +1248,15 @@ std::string DiscoveryCursor(const Request& request, const std::uint64_t generati
     std::ostringstream cursor;
     cursor << "v2:" << generation << ':' << std::hex << std::nouppercase
            << request.cursorFingerprint.value_or(0U) << ':' << std::dec << index;
+    return cursor.str();
+}
+
+std::string PatchCursor(const Request& request, const std::uint64_t generation,
+                        const std::uint64_t snapshotFingerprint, const std::size_t index) {
+    std::ostringstream cursor;
+    cursor << "v3:" << generation << ':' << std::hex << std::nouppercase
+           << request.cursorFingerprint.value_or(0U) << ':' << snapshotFingerprint << ':'
+           << std::dec << index;
     return cursor.str();
 }
 
@@ -1655,6 +1784,9 @@ void Runtime::Worker() noexcept {
                            ",\"disassembly\":" + disassembly + "}}";
                 }
                 const bool addressMethod = parsed->method == "address.resolve" ||
+                                           parsed->method == "functions.at" ||
+                                           (parsed->method == "symbols.resolve" &&
+                                            parsed->addressProvided) ||
                                            parsed->method == "analysis.function" ||
                                            parsed->method == "memory.read" ||
                                            parsed->method == "memory.write" ||
@@ -1700,6 +1832,62 @@ void Runtime::Worker() noexcept {
                            ",\"state_generation\":" + std::to_string(resolvedGeneration) +
                            ",\"status\":\"ok\",\"result\":" +
                            LocationJson(*resolvedLocation, resolvedGeneration) + "}";
+                }
+                if (parsed->method == "functions.at") {
+                    const auto modules = CaptureModuleRecords();
+                    if (!modules) {
+                        return ErrorResponse(*parsed, "INTERNAL", "module snapshot is invalid",
+                                             true, false);
+                    }
+                    Script::Function::FunctionInfo function{};
+                    const bool found = Script::Function::GetInfo(resolvedLocation->address,
+                                                                  &function);
+                    std::string functionJson = "null";
+                    if (found) {
+                        const std::string functionModule(
+                            function.mod, strnlen_s(function.mod, sizeof(function.mod)));
+                        const auto owner = UniqueModule(*modules, functionModule);
+                        if (!owner || function.rvaStart > function.rvaEnd ||
+                            function.rvaEnd >= owner->size ||
+                            owner->base > (std::numeric_limits<duint>::max)() -
+                                              function.rvaEnd) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "function record is outside its module", false,
+                                                 false);
+                        }
+                        const duint startAddress = owner->base + function.rvaStart;
+                        const duint endAddress = owner->base + function.rvaEnd;
+                        if (resolvedLocation->address < startAddress ||
+                            resolvedLocation->address > endAddress) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "function record does not contain the query",
+                                                 false, false);
+                        }
+                        functionJson =
+                            "{\"start\":" +
+                            LocationJson(LocationFromModules(startAddress, *modules),
+                                         resolvedGeneration) +
+                            ",\"end_inclusive\":" +
+                            LocationJson(LocationFromModules(endAddress, *modules),
+                                         resolvedGeneration) +
+                            ",\"instruction_count\":" +
+                            std::to_string(function.instructioncount) + ",\"manual\":" +
+                            (function.manual ? "true" : "false") +
+                            ",\"contains_query\":true}";
+                    }
+                    if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during function lookup", true,
+                                             false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(resolvedGeneration) +
+                           ",\"status\":\"ok\",\"result\":{\"query\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"found\":" + (found ? "true" : "false") +
+                           ",\"function\":" + functionJson +
+                           ",\"completeness\":\"known_only\",\"state_generation\":" +
+                           std::to_string(resolvedGeneration) + "}}";
                 }
                 if (parsed->method == "assembly.preview" ||
                     parsed->method == "assembly.patch" ||
@@ -3052,6 +3240,265 @@ void Runtime::Worker() noexcept {
                            ",\"completeness\":\"known_only\",\"state_generation\":" +
                            std::to_string(*snapshot) + "}}";
                 }
+                if (parsed->method == "patches.list") {
+                    const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false, false);
+                    }
+                    if (parsed->cursorGeneration && *parsed->cursorGeneration != *snapshot) {
+                        return ErrorResponse(*parsed, "STALE_CURSOR", "cursor generation is stale",
+                                             false, false);
+                    }
+                    const auto modules = CaptureModuleRecords();
+                    if (!modules) {
+                        return ErrorResponse(*parsed, "INTERNAL", "module snapshot is invalid",
+                                             true, false);
+                    }
+                    std::optional<ModuleRecord> selectedModule;
+                    if (!parsed->module.empty()) {
+                        selectedModule = UniqueModule(*modules, parsed->module);
+                        if (!selectedModule) {
+                            return ErrorResponse(*parsed, "NOT_FOUND",
+                                                 "module is not uniquely loaded", false, false);
+                        }
+                    }
+                    const DBGFUNCTIONS* functions = DbgFunctions();
+                    if (functions == nullptr || functions->PatchEnum == nullptr) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "native patch enumeration is unavailable", false,
+                                             false);
+                    }
+                    std::size_t firstBytes = 0U;
+                    functions->PatchEnum(nullptr, &firstBytes);
+                    if (firstBytes % sizeof(DBGPATCHINFO) != 0U) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "patch size probe is inconsistent", true, false);
+                    }
+                    const std::size_t recordCount = firstBytes / sizeof(DBGPATCHINFO);
+                    if (recordCount > 65536U) {
+                        return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                             "patch database exceeds native bounds", false,
+                                             false);
+                    }
+                    std::vector<DBGPATCHINFO> nativeRecords(recordCount);
+                    std::size_t enumeratedBytes = firstBytes;
+                    if (recordCount != 0U &&
+                        (!functions->PatchEnum(nativeRecords.data(), &enumeratedBytes) ||
+                         enumeratedBytes != firstBytes)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "patch database changed during enumeration", true,
+                                             false);
+                    }
+                    std::size_t finalBytes = 0U;
+                    functions->PatchEnum(nullptr, &finalBytes);
+                    if (finalBytes != firstBytes) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "patch database changed after enumeration", true,
+                                             false);
+                    }
+                    std::vector<TrackedPatchByte> records;
+                    records.reserve(recordCount);
+                    for (const auto& native : nativeRecords) {
+                        const std::size_t moduleLength = strnlen_s(native.mod, sizeof(native.mod));
+                        if (moduleLength == 0U || moduleLength == sizeof(native.mod) ||
+                            native.oldbyte == native.newbyte) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "patch enumeration contains an invalid record",
+                                                 true, false);
+                        }
+                        const std::string moduleName(native.mod, moduleLength);
+                        const auto owner = UniqueModule(*modules, moduleName);
+                        const auto location = LocationFromModules(native.addr, *modules);
+                        if (!owner || !location.module ||
+                            !Utf8OrdinalEqualsIgnoreCase(owner->name, *location.module)) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "patch record is outside its named module", true,
+                                                 false);
+                        }
+                        records.push_back(TrackedPatchByte{owner->name, native.addr,
+                                                           native.oldbyte, native.newbyte});
+                    }
+                    std::sort(records.begin(), records.end(), [](const auto& left,
+                                                                  const auto& right) {
+                        if (left.address != right.address) return left.address < right.address;
+                        return left.module < right.module;
+                    });
+                    const std::uint64_t fingerprint = TrackedPatchFingerprint(records);
+                    if (parsed->cursorSnapshotFingerprint &&
+                        *parsed->cursorSnapshotFingerprint != fingerprint) {
+                        return ErrorResponse(*parsed, "STALE_CURSOR",
+                                             "patch snapshot changed between pages", false,
+                                             false);
+                    }
+                    if (selectedModule) {
+                        std::erase_if(records, [&](const auto& record) {
+                            return !Utf8OrdinalEqualsIgnoreCase(record.module,
+                                                                 selectedModule->name);
+                        });
+                    }
+                    const auto ranges = NormalizeTrackedPatches(std::move(records));
+                    if (!ranges) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "patch records cannot form stable ranges", true,
+                                             false);
+                    }
+                    if (parsed->cursorIndex > ranges->size()) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT", "cursor is invalid",
+                                             false, false);
+                    }
+                    const std::size_t end =
+                        (std::min)(ranges->size(), parsed->cursorIndex + parsed->pageLimit);
+                    std::string items = "[";
+                    for (std::size_t index = parsed->cursorIndex; index < end; ++index) {
+                        if (std::chrono::steady_clock::now() >= requestDeadline) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "patch listing exceeded its deadline", true,
+                                                 false);
+                        }
+                        const auto& range = (*ranges)[index];
+                        std::vector<unsigned char> current(range.patched.size());
+                        if (!DbgMemRead(range.address, current.data(),
+                                        static_cast<duint>(current.size()))) {
+                            return ErrorResponse(*parsed, "ACCESS_DENIED",
+                                                 "current patch bytes are not readable", false,
+                                                 false);
+                        }
+                        if (index != parsed->cursorIndex) items.push_back(',');
+                        items += "{\"start\":" +
+                                 LocationJson(LocationFromModules(range.address, *modules),
+                                              *snapshot) +
+                                 ",\"length\":" + std::to_string(range.patched.size()) +
+                                 ",\"original_bytes_hex\":" + JsonString(Hex(range.original)) +
+                                 ",\"patched_bytes_hex\":" + JsonString(Hex(range.patched)) +
+                                 ",\"current_bytes_hex\":" + JsonString(Hex(current)) +
+                                 ",\"current_matches_patch\":" +
+                                 (current == range.patched ? "true" : "false") + "}";
+                    }
+                    items += "]";
+                    const std::string next =
+                        end < ranges->size()
+                            ? JsonString(PatchCursor(*parsed, *snapshot, fingerprint, end))
+                            : "null";
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during patch listing", true,
+                                             false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"items\":" + items +
+                           ",\"next_cursor\":" + next +
+                           ",\"completeness\":\"tracked_only\",\"snapshot_fingerprint\":" +
+                           JsonString(HexValue(fingerprint)) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) + "}}";
+                }
+                if (parsed->method == "symbols.resolve") {
+                    const std::optional<std::uint64_t> snapshot = parsed->addressProvided
+                                                                      ? resolvedGeneration
+                                                                      : BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false, false);
+                    }
+                    const auto modules = CaptureModuleRecords();
+                    if (!modules) {
+                        return ErrorResponse(*parsed, "INTERNAL", "module snapshot is invalid",
+                                             true, false);
+                    }
+                    std::optional<ModuleRecord> selectedModule;
+                    if (parsed->addressProvided) {
+                        if (resolvedLocation->module) {
+                            selectedModule = UniqueModule(*modules, *resolvedLocation->module);
+                        }
+                    } else {
+                        selectedModule = UniqueModule(*modules, parsed->module);
+                        if (!selectedModule) {
+                            return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                                 "module is missing or ambiguous", false, false);
+                        }
+                    }
+                    ListInfo list{};
+                    if (!Script::Symbol::GetList(&list)) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "symbol database is unavailable", true, false);
+                    }
+                    struct ResolveSymbolGuard {
+                        void* p;
+                        ~ResolveSymbolGuard() { if (p) BridgeFree(p); }
+                    } guard{list.data};
+                    if (list.count < 0 || list.count > 65536 ||
+                        (list.count > 0 && list.data == nullptr) ||
+                        list.size != static_cast<std::size_t>(list.count) *
+                                         sizeof(Script::Symbol::SymbolInfo)) {
+                        return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                             "symbol database exceeds native bounds", false,
+                                             false);
+                    }
+                    const auto* values =
+                        static_cast<const Script::Symbol::SymbolInfo*>(list.data);
+                    std::size_t totalMatches = 0U;
+                    std::string matches = "[";
+                    for (int index = 0; index < list.count; ++index) {
+                        if ((index & 0xff) == 0 &&
+                            std::chrono::steady_clock::now() >= requestDeadline) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "symbol resolution exceeded its deadline", true,
+                                                 false);
+                        }
+                        const auto& symbol = values[index];
+                        const std::string_view symbolModule(
+                            symbol.mod, strnlen_s(symbol.mod, sizeof(symbol.mod)));
+                        const std::string_view name(
+                            symbol.name, strnlen_s(symbol.name, sizeof(symbol.name)));
+                        if (!selectedModule ||
+                            !Utf8OrdinalEqualsIgnoreCase(symbolModule,
+                                                         selectedModule->name) ||
+                            symbol.rva >= selectedModule->size ||
+                            selectedModule->base >
+                                (std::numeric_limits<duint>::max)() - symbol.rva) {
+                            continue;
+                        }
+                        const duint symbolAddress = selectedModule->base + symbol.rva;
+                        const bool match = parsed->addressProvided
+                                               ? symbolAddress == resolvedLocation->address
+                                               : name == parsed->symbolName;
+                        if (!match) continue;
+                        ++totalMatches;
+                        if (totalMatches > 32U) continue;
+                        if (totalMatches != 1U) matches.push_back(',');
+                        const char* type = symbol.type == Script::Symbol::Function
+                                               ? "function"
+                                               : symbol.type == Script::Symbol::Import
+                                                     ? "import"
+                                                     : "export";
+                        matches += "{\"name\":" + JsonString(name) + ",\"type\":" +
+                                   JsonString(type) + ",\"manual\":" +
+                                   (symbol.manual ? "true" : "false") +
+                                   ",\"location\":" +
+                                   LocationJson(LocationFromModules(symbolAddress, *modules),
+                                                *snapshot) +
+                                   "}";
+                    }
+                    matches += "]";
+                    const char* resolution = totalMatches == 0U
+                                                 ? "missing"
+                                                 : totalMatches == 1U ? "found" : "ambiguous";
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during symbol resolution", true,
+                                             false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"resolution\":" +
+                           JsonString(resolution) + ",\"matches\":" + matches +
+                           ",\"total_matches\":" + std::to_string(totalMatches) +
+                           ",\"matches_truncated\":" +
+                           (totalMatches > 32U ? "true" : "false") +
+                           ",\"completeness\":\"known_only\",\"state_generation\":" +
+                           std::to_string(*snapshot) + "}}";
+                }
                 if (parsed->method == "symbols.search" ||
                     parsed->method == "functions.list") {
                     const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
@@ -3325,6 +3772,97 @@ void Runtime::Worker() noexcept {
                            ",\"items\":" + items + ",\"next_cursor\":" + next +
                            ",\"completeness\":\"known_only\",\"state_generation\":" +
                            std::to_string(resolvedGeneration) + "}}";
+                }
+                if (parsed->method == "callstack.read") {
+                    const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false, false);
+                    }
+                    const std::uint32_t requestedThread =
+                        parsed->targetThreadId.value_or(DbgGetThreadId());
+                    if (requestedThread == 0U) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "no current debugger thread is available", false,
+                                             false);
+                    }
+                    THREADLIST list{};
+                    DbgGetThreadList(&list);
+                    struct CallstackThreadGuard {
+                        THREADALLINFO* value;
+                        ~CallstackThreadGuard() { if (value) BridgeFree(value); }
+                    } threadGuard{list.list};
+                    if (list.count < 0 || list.count > 65536 ||
+                        (list.count > 0 && list.list == nullptr)) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "thread snapshot is invalid", false, false);
+                    }
+                    HANDLE threadHandle = nullptr;
+                    for (int index = 0; index < list.count; ++index) {
+                        if (list.list[index].BasicInfo.ThreadId == requestedThread) {
+                            threadHandle = list.list[index].BasicInfo.Handle;
+                            break;
+                        }
+                    }
+                    if (threadHandle == nullptr || threadHandle == INVALID_HANDLE_VALUE) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "thread_id is not present in this debuggee", false,
+                                             false);
+                    }
+                    const DBGFUNCTIONS* functions = DbgFunctions();
+                    if (functions == nullptr || functions->GetCallStackByThread == nullptr) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "native call-stack API is unavailable", false,
+                                             false);
+                    }
+                    DBGCALLSTACK stack{};
+                    functions->GetCallStackByThread(threadHandle, &stack);
+                    struct CallstackGuard {
+                        DBGCALLSTACKENTRY* value;
+                        ~CallstackGuard() { if (value) BridgeFree(value); }
+                    } stackGuard{stack.entries};
+                    if (stack.total < 0 || stack.total > 50 ||
+                        (stack.total > 0 && stack.entries == nullptr)) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "native call-stack snapshot is invalid", false,
+                                             false);
+                    }
+                    const auto modules = CaptureModuleRecords();
+                    if (!modules) {
+                        return ErrorResponse(*parsed, "INTERNAL", "module snapshot is invalid",
+                                             true, false);
+                    }
+                    const std::size_t nativeCount = static_cast<std::size_t>(stack.total);
+                    const std::size_t emitted = (std::min)(nativeCount, parsed->pageLimit);
+                    std::string frames = "[";
+                    for (std::size_t index = 0; index < emitted; ++index) {
+                        if (index != 0U) frames.push_back(',');
+                        const auto& frame = stack.entries[index];
+                        frames += "{\"index\":" + std::to_string(index) +
+                                  ",\"stack_address\":" + JsonString(HexValue(frame.addr)) +
+                                  ",\"instruction\":" +
+                                  LocationJson(LocationFromModules(frame.from, *modules),
+                                               *snapshot) +
+                                  ",\"return_to\":" +
+                                  LocationJson(LocationFromModules(frame.to, *modules),
+                                               *snapshot) +
+                                  "}";
+                    }
+                    frames += "]";
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during call-stack capture", true,
+                                             false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"thread_id\":" +
+                           JsonString(HexValue(requestedThread)) + ",\"frames\":" + frames +
+                           ",\"native_frame_count\":" + std::to_string(nativeCount) +
+                           ",\"truncated\":" + (emitted < nativeCount ? "true" : "false") +
+                           ",\"completeness\":" +
+                           JsonString(nativeCount == 0U ? "inconclusive" : "native_bounded") +
+                           ",\"state_generation\":" + std::to_string(*snapshot) + "}}";
                 }
                 if (parsed->method == "threads.list") {
                     const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();

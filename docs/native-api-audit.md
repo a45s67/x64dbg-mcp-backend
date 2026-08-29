@@ -60,6 +60,7 @@ not mutated anything.
 | `memory.map` | `DbgMemMap`, optional `Script::Module::GetList` | paused | reject native count above 65,536; max 256 filtered items; filter-bound cursor; all Bridge lists released |
 | `modules.list` | `Script::Module::GetList` | paused | validates `ListInfo`; `BridgeFree(list.data)` |
 | `threads.list` | `DbgGetThreadList` | paused | max 256 returned items; `BridgeFree(list.list)` |
+| `callstack.read` | `DbgGetThreadList`, `DBGFUNCTIONS::GetCallStackByThread` | paused | exact current/supplied thread handle; native maximum 50 frames; both Bridge allocations released; empty result labeled inconclusive |
 | `breakpoints.list` | `DbgGetBpList`, `MemBpSize` | paused/running | max 256 returned items; `BridgeFree(map.bp)`; typed hardware access/size/slot and memory access/size |
 | `disassembly.read` | `DbgDisasmAt` | paused | max 256 instructions; size must be 1-15 |
 | `expression.evaluate` | `DbgFunctions()->ValFromString` | paused | max 1024-byte expression; no command execution |
@@ -73,12 +74,15 @@ not mutated anything.
 | `assembly.preview` | `DBGFUNCTIONS::Assemble` | paused | one printable ASCII instruction; fixed 16-byte output and 256-byte printable error bound; no memory or patch call |
 | `assembly.patch` | `Assemble`, `PatchInRange`, `DbgMemRead`, `MemPatch`, `PatchGetEx` | paused | exact 1-16 byte compare-before-write; no overlapping tracked patch; one mutation call; exact memory and per-byte patch-record verification |
 | `patches.restore` | `DbgMemRead`, `PatchGetEx`, `PatchRestoreRange`, `PatchInRange` | paused | exact patched/original preconditions; one inclusive range restore; exact read-back and empty patch-range confirmation |
+| `patches.list` | `PatchEnum`, `DbgMemRead`, `Script::Module::GetList` | paused | same-executor-thread byte-size probe/enumeration/reprobe; max 65,536 zero-initialized records and current bytes; sorted adjacent ranges; content-fingerprint cursor; all Bridge lists released |
 | `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; ignores transient process-created pause and confirms a later actionable callback |
 | `debuggee.attach` | `DbgCmdExec` (`attach 0x<pid>`) | absent | rejects debugger/sidecar PIDs; matching pre-attach `CB_ATTACH` PID, then a newer paused callback and current PID; no enumeration or process handle retained |
 | `debuggee.detach` | `DbgCmdExec` (`detach`) | attached and paused/running | matching `CB_DETACH`, then newer `CB_STOPDEBUG`; preserves the externally owned process; generic stop is rejected |
 | `analysis.function` | `DbgCmdExec` (`analr`), private command fence, `Script::Function::GetInfo` | paused | one resolved function in a module no larger than 128 MiB; queue-fence plus marker and generation confirmation; no GUI selection |
 | `symbols.search` | `Script::Symbol::GetList` | paused | `BridgeFree(list.data)`; rejects count above 65,536; bounded literal filtering and generation recheck |
+| `symbols.resolve` | `Script::Symbol::GetList`, `Script::Module::GetList` | paused | exact case-sensitive name or exact runtime address; max 65,536 records scanned and 32 matches returned; both lists released; missing and ambiguous are explicit success states |
 | `functions.list` | `Script::Function::GetList`, `Script::Symbol::GetList` | paused | both lists released with `BridgeFree`; each rejects count above 65,536; bounded name join and generation recheck |
+| `functions.at` | `Script::Function::GetInfo`, `Script::Module::GetList` | paused | one known-only containing marker; validates module ownership and inclusive range; module list released; never queues analysis |
 | `strings.search` | `DbgMemRead`, Windows NLS literal span | paused | caller-owned 64 KiB chunks, 4 KiB fallback, at most 1 MiB/request; deadline/generation checks, cursor-bound `context_bytes`, and UTF-8-safe before/match/after |
 | `references.to` | `DbgGetXrefCountAt`, `DbgXrefGet` | paused | `BridgeFree(info.references)`; rejects count above 65,536; inbound known-only references |
 
@@ -111,6 +115,12 @@ canonical `instance_id` received after authenticated IPC negotiation, copies it
 under the existing state mutex into `debugger.state`, and clears it during owned
 shutdown. The public mutation precondition is enforced and removed by Rust
 before native IPC dispatch, so it does not broaden the native parser or executor.
+
+ADRs 0024-0027 add only paused-state reads on the existing serialized executor.
+Call-stack and patch buffers follow their documented Bridge/native ownership;
+patch size probe and enumeration cannot move between OS threads. Exact symbol
+and function lookup never trigger analysis and preserve explicit known-only or
+inconclusive completeness.
 
 ADR 0007 discovery is enabled after schema, generation/deadline, filter-bound cursor, Unicode,
 ownership, and isolated dual-architecture gates passed. It never triggers

@@ -894,3 +894,47 @@ The backend still publishes 37 tools; this safety stage changes mutation inputs
 rather than adding tools. The backend and managed skill advance to 0.8.0. The
 offline-verified package SHA-256 is
 `fd8f1c8da3c916a55d6c0ebdbb9d5f4f2df7ec4cda7e23e8097be3c5c5b886f1`.
+
+## 2026-08-30 bounded read-only analysis ergonomics follow-up
+
+ADRs 0024-0027 admit four atomic paused-state reads. `callstack.read` selects
+the current or one exact thread handle and uses x64dbg's native unwind with a
+50-frame ceiling. `patches.list` interprets the native byte-size probe on the
+same serialized executor thread as enumeration, re-probes for churn, validates
+at most 65,536 zero-initialized records, merges adjacent bytes, reads current
+memory, and binds pagination to the complete patch snapshot fingerprint.
+`symbols.resolve` performs exact module/name or address matching with explicit
+found, missing, and ambiguous results. `functions.at` reports only an existing
+containing function and never queues analysis.
+
+The Rust sidecar passes 52 unit/contract tests and seven supervised-shutdown
+tests. Both native architectures pass all 11 lifecycle/policy tests. This stage
+also found that CMake's Release configuration defined `NDEBUG` for compact
+assert-based native policy tests; the test targets now explicitly keep those
+assertions active. Fresh isolated x64 and x32 workflows returned respectively
+five and four native frames, selected the same thread explicitly with a
+one-frame output bound, resolved the fixture symbol by exact name and address,
+reported an explicit missing symbol, and returned the function produced by the
+separate analysis mutation. Each workflow created two disjoint reversible patch
+ranges, followed a `v3` one-item cursor, restored one range without changing the
+debugger generation, and received `STALE_CURSOR` when reusing the old
+content-bound cursor. Both then restored all bytes, stopped, and left no owned
+debugger or sidecar process.
+
+The installed 0.9.0 `checksum.exe` qualification used instance
+`e63105a5-ac9c-428b-97f9-a2ed8568cb45`, resolved
+`CHECKSUM.EXE+0xa78a0` to `0x4478a0` from relocated base `0x3a0000`, and
+retained generation 27. Native unwind returned three frames for thread
+`0x1a84`. Exact `main.main` resolution returned the successful known-only
+`missing` state because this debug session retained no matching symbol; after
+the explicit analysis mutation, `functions.at` returned the known range
+`0x4478a0` through `0x44806b`. The installed patch list verified the reversible
+four-byte patch at `0x4478a8` before exact restore. Existing register,
+hardware/memory breakpoint, discovery, stop, and no-blind-retry qualifications
+also passed, and the debugger-owned sidecar exited.
+
+The backend now publishes 41 tools and the backend/managed skill advance to
+0.9.0. Installation preserved both bearer-token config files, installed package
+binaries match their source hashes, and Codex registration was refreshed with
+static Authorization headers. The offline-verified 49-file package SHA-256 is
+`418a53bf79039ad11dd04cef9a9a981f9f32dbe2ce3635c4889377a393fca218`.

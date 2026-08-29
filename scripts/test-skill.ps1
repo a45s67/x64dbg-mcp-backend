@@ -17,8 +17,8 @@ $frontmatter = [regex]::Match($skill, '(?s)^---\n(.*?)\n---\n')
 Assert-Skill $frontmatter.Success 'SKILL.md frontmatter is malformed'
 Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^name: x64dbg-debugging$') 'skill name is missing or invalid'
 Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^description: .{20,1024}$') 'skill description is missing or unbounded'
-Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  version: "0\.8\.0"$') 'independent skill version is missing'
-Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  minimum-backend-version: "0\.8\.0"$') 'minimum backend version is missing'
+Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  version: "0\.9\.0"$') 'independent skill version is missing'
+Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  minimum-backend-version: "0\.9\.0"$') 'minimum backend version is missing'
 Assert-Skill (Test-Path -LiteralPath $markerPath -PathType Leaf) 'managed ownership marker is missing'
 
 $allText = Get-ChildItem -LiteralPath $skillRoot -Recurse -File | ForEach-Object {
@@ -38,17 +38,19 @@ $published = @(
     'debugger.state', 'debugger.snapshot', 'debugger.wait_for_pause', 'debugger.pause', 'debugger.resume',
     'debugger.step_into', 'debugger.step_over', 'debugger.step_out', 'debugger.stop', 'debuggee.launch',
     'debuggee.attach', 'debuggee.detach',
-    'registers.read', 'registers.write', 'address.resolve', 'memory.read', 'memory.write', 'memory.map',
+    'registers.read', 'registers.write', 'address.resolve', 'analysis.function',
+    'memory.read', 'memory.write', 'memory.map',
     'modules.list', 'threads.list', 'breakpoints.list', 'breakpoints.set',
     'breakpoints.remove', 'breakpoints.hardware.set', 'breakpoints.hardware.remove',
     'breakpoints.memory.set', 'breakpoints.memory.remove',
-    'assembly.preview', 'assembly.patch', 'patches.restore',
+    'assembly.preview', 'assembly.patch', 'patches.restore', 'patches.list',
     'disassembly.read', 'expression.evaluate', 'symbols.search',
-    'functions.list', 'strings.search', 'references.to'
+    'functions.list', 'functions.at', 'callstack.read', 'symbols.resolve',
+    'strings.search', 'references.to'
 )
 $mentioned = [regex]::Matches(
     $combined,
-    '(?<![a-z_])(?:debugger|debuggee|registers|address|memory|modules|threads|breakpoints|assembly|patches|disassembly|expression|symbols|functions|strings|references)(?:\.[a-z_]+)+'
+    '(?<![a-z_])(?:debugger|debuggee|registers|address|memory|modules|threads|callstack|breakpoints|assembly|patches|disassembly|expression|symbols|functions|strings|references|analysis)(?:\.[a-z_]+)+'
 ) | ForEach-Object Value | Sort-Object -Unique
 foreach ($tool in $mentioned) {
     Assert-Skill ($tool -in $published) "skill references unpublished tool $tool"

@@ -30,6 +30,10 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0021-native-mutation-fuzzing-and-asan.md`](docs/adr/0021-native-mutation-fuzzing-and-asan.md)
 - [`docs/adr/0022-defer-fuzzing-pending-toolchain-survey.md`](docs/adr/0022-defer-fuzzing-pending-toolchain-survey.md)
 - [`docs/adr/0023-backend-instance-identity.md`](docs/adr/0023-backend-instance-identity.md)
+- [`docs/adr/0024-bounded-native-callstack.md`](docs/adr/0024-bounded-native-callstack.md)
+- [`docs/adr/0025-bounded-patch-enumeration.md`](docs/adr/0025-bounded-patch-enumeration.md)
+- [`docs/adr/0026-exact-symbol-resolution.md`](docs/adr/0026-exact-symbol-resolution.md)
+- [`docs/adr/0027-known-function-at-address.md`](docs/adr/0027-known-function-at-address.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/development-roadmap.md`](docs/development-roadmap.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
@@ -82,6 +86,11 @@ to match instead of deleting address-only state.
 Assembly preview is read-only. Tracked code patches require exact original bytes,
 are limited to one 16-byte instruction span, and restore only from verified x64dbg
 patch metadata.
+`patches.list` exposes those tracked bytes as verified adjacent ranges with
+snapshot-bound pagination. `callstack.read` uses x64dbg's native unwind for the
+current or one exact thread and labels an empty result inconclusive. Exact
+`symbols.resolve` and `functions.at` queries avoid scanning pages when the
+caller already knows a name or address; both remain bounded known-only reads.
 
 Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
 It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer

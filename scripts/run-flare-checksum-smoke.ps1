@@ -172,6 +172,9 @@ try {
         throw 'Main pause snapshot is missing generation-consistent breakpoint metadata.'
     }
     $registerSnapshot = Invoke-Tool 'registers.read' @{ names = @('rip', 'rsp') } 36
+    $callstackSnapshot = Invoke-Tool 'callstack.read' @{
+        thread_id = $mainPause.active_thread_id; limit = 32
+    } 35
     $memorySnapshot = Invoke-Tool 'memory.read' @{ address = $moduleRef; length = 16 } 37
     $disassemblySnapshot = Invoke-Tool 'disassembly.read' @{ address = $moduleRef; count = 4 } 38
     $compactSnapshot = Invoke-Tool 'debugger.snapshot' @{} 39
@@ -191,6 +194,12 @@ try {
         $memorySnapshot.location.state_generation -ne $memorySnapshot.state_generation -or
         $disassemblySnapshot.location.state_generation -ne $disassemblySnapshot.state_generation) {
         throw 'Installed read tools did not preserve the stable main-pause generation.'
+    }
+    if ($callstackSnapshot.thread_id -ne $mainPause.active_thread_id -or
+        @($callstackSnapshot.frames).Count -gt 32 -or
+        $callstackSnapshot.completeness -notin @('native_bounded', 'inconclusive') -or
+        $callstackSnapshot.state_generation -ne $mainPause.state_generation) {
+        throw 'Installed native call-stack read was not bounded and generation-consistent.'
     }
 
     # Patch the next instruction, verify x64dbg tracking, and restore it before execution.
@@ -219,6 +228,17 @@ try {
         ($trackedPatch | ConvertTo-Json -Compress -Depth 12) -ne
         ($trackedPatchReplay | ConvertTo-Json -Compress -Depth 12)) {
         throw 'Installed tracked patch was not previewed, verified, or replay-safe.'
+    }
+    $installedPatchList = Invoke-Tool 'patches.list' @{
+        module = [System.IO.Path]::GetFileName($sample); limit = 32
+    } 127
+    $installedPatch = @($installedPatchList.items | Where-Object {
+        $_.start.address -eq $trackedPatch.address
+    })[0]
+    if (!$installedPatch -or !$installedPatch.current_matches_patch -or
+        $installedPatch.patched_bytes_hex -ne $trackedPatch.patched_bytes_hex -or
+        $installedPatchList.completeness -ne 'tracked_only') {
+        throw 'Installed patch listing did not verify checksum.exe tracked bytes.'
     }
     $restoreArguments = @{
         operation_id = [Guid]::NewGuid().ToString(); address = $patchAddress
@@ -274,6 +294,25 @@ try {
     }
     if (!$mainAnalysisFound) {
         throw 'Installed explicit analysis marker was not visible through functions.list.'
+    }
+    $mainFunctionAt = Invoke-Tool 'functions.at' @{ address = $moduleRef } 55
+    if (!$mainFunctionAt.found -or !$mainFunctionAt.function.contains_query -or
+        $mainFunctionAt.function.start.address -ne $mainAnalysis.function.start.address -or
+        $mainFunctionAt.function.end_inclusive.address -ne $mainAnalysis.function.end.address) {
+        throw 'Installed known-function lookup disagreed with explicit checksum.exe analysis.'
+    }
+    $exactSymbolName = if (@($mainSymbols.items).Count -gt 0) {
+        $mainSymbols.items[0].name
+    } else {
+        'main.main'
+    }
+    $mainSymbolExact = Invoke-Tool 'symbols.resolve' @{
+        module = $moduleName; name = $exactSymbolName
+    } 56
+    if ($mainSymbolExact.resolution -notin @('found', 'missing', 'ambiguous') -or
+        $mainSymbolExact.completeness -ne 'known_only' -or
+        ($mainSymbols.items.Count -gt 0 -and $mainSymbolExact.resolution -eq 'missing')) {
+        throw 'Installed exact symbol resolution did not preserve explicit known-only semantics.'
     }
     $mainReferences = Invoke-Tool 'references.to' @{ address = $moduleRef; limit = 32 } 52
     $keyString = Find-InstalledString $moduleName 'FlareOn2024' 60
@@ -428,6 +467,11 @@ try {
         filtered_executable_regions = @($filteredMap.items).Count
         main_symbols = @($mainSymbols.items).Count
         main_functions = @($mainFunctions.items).Count
+        callstack_frames = @($callstackSnapshot.frames).Count
+        callstack_completeness = $callstackSnapshot.completeness
+        tracked_patch_list_verified = $true
+        known_function_lookup = $true
+        exact_symbol_resolution = $mainSymbolExact.resolution
         analysis_function_start = $mainAnalysis.function.start.address
         analysis_function_end = $mainAnalysis.function.end.address
         analysis_already_known = $mainAnalysis.already_known

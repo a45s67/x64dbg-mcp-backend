@@ -91,6 +91,8 @@ Use module-scoped literal filters and modest page limits:
   usually `context_bytes=32` to keep `before`/`match`/`after` compact; follow `next_cursor` with
   the exact same context setting when necessary;
 - `references.to` for inbound references already in the analysis database.
+- `symbols.resolve` for an exact case-sensitive name in one module or an exact runtime address;
+- `functions.at` for the already-known containing function at one address.
 
 If a known concrete address is missing from function discovery and analysis is explicitly
 authorized, call `analysis.function` once with module/RVA and a fresh operation UUID. Then query
@@ -100,6 +102,17 @@ GUI-selection-based whole-module analysis, and preserve the operation ID after a
 Cursors bind the method, exact filters, module spelling, and debugger generation. Reuse the exact
 arguments on the next page. Restart discovery after `STALE_CURSOR`; do not merge pages from
 different generations.
+
+## Call stacks and tracked patches
+
+Use `callstack.read` while paused. Omit `thread_id` for the active thread or copy an exact ID from
+`threads.list`; keep `limit` modest. `native_bounded` means x64dbg returned native unwind frames,
+while `inconclusive` means the native API returned none—not proof that no caller exists.
+
+Use `patches.list` to inspect x64dbg-tracked modifications as adjacent ranges. Compare
+`current_matches_patch` before relying on metadata, and preserve the exact module filter when
+following `next_cursor`. Its cursor binds the full patch snapshot even when debugger generation
+does not change; `STALE_CURSOR` means restart enumeration and never merge the old pages.
 
 ## Go binaries
 

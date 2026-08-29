@@ -165,7 +165,7 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             }
             Ok(())
         }
-        "address.resolve" => {
+        "address.resolve" | "functions.at" => {
             exact_keys(object, &["address"], &[])?;
             validate_address_ref(object, "address")
         }
@@ -214,6 +214,21 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             discovery_page(object)
         }
         "modules.list" | "threads.list" | "breakpoints.list" => page(object),
+        "callstack.read" => {
+            exact_keys(object, &[], &["thread_id", "limit"])?;
+            if object.contains_key("thread_id") {
+                validate_thread_id(object)?;
+            }
+            optional_integer(object, "limit", 1, 50)
+        }
+        "patches.list" => {
+            exact_keys(object, &[], &["module", "limit", "cursor"])?;
+            if object.contains_key("module") {
+                validate_module_name(object, "module")?;
+            }
+            discovery_page(object)
+        }
+        "symbols.resolve" => validate_symbol_resolution(object),
         "analysis.function" | "breakpoints.set" | "breakpoints.remove" => {
             operation(object, &["address"])?;
             validate_address_ref(object, "address")
@@ -587,6 +602,45 @@ fn one_of_integer(
         .ok_or(invalid(field, "is not an accepted integer value"))
 }
 
+fn validate_thread_id(object: &serde_json::Map<String, Value>) -> Result<(), ValidationError> {
+    let value = string(object, "thread_id", 3, 10)?;
+    if !value.starts_with("0x")
+        || !value[2..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid(
+            "thread_id",
+            "must be a canonical lowercase 32-bit hexadecimal value",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_symbol_resolution(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), ValidationError> {
+    let by_name = object.contains_key("module") || object.contains_key("name");
+    let by_address = object.contains_key("address");
+    if by_name == by_address {
+        return Err(invalid(
+            "arguments",
+            "must contain exactly one of module/name or address",
+        ));
+    }
+    if by_address {
+        exact_keys(object, &["address"], &[])?;
+        return validate_address_ref(object, "address");
+    }
+    exact_keys(object, &["module", "name"], &[])?;
+    validate_module_name(object, "module")?;
+    let name = string(object, "name", 1, 256)?;
+    if name.chars().any(char::is_control) {
+        return Err(invalid("name", "must not contain control characters"));
+    }
+    Ok(())
+}
+
 fn optional_integer(
     object: &serde_json::Map<String, Value>,
     field: &'static str,
@@ -821,6 +875,41 @@ fn build_catalog() -> Vec<Value> {
             "Read a bounded, paginated breakpoint snapshot.",
             page_schema(),
         ),
+        read_tool(
+            "callstack.read",
+            "Read at most 50 native x64dbg call-stack frames for the current or one exact thread while paused. Empty native results remain explicitly inconclusive.",
+            object(
+                vec![
+                    (
+                        "thread_id",
+                        json!({"type":"string","pattern":"^0x[0-9a-f]{1,8}$","minLength":3,"maxLength":10}),
+                    ),
+                    (
+                        "limit",
+                        json!({"type":"integer","minimum":1,"maximum":50,"default":32}),
+                    ),
+                ],
+                vec![],
+            ),
+        ),
+        read_tool(
+            "patches.list",
+            "List x64dbg-tracked patches as bounded adjacent ranges, with current-memory verification and snapshot-bound pagination.",
+            object(
+                vec![
+                    ("module", module_name_schema()),
+                    (
+                        "limit",
+                        json!({"type":"integer","minimum":1,"maximum":256,"default":100}),
+                    ),
+                    (
+                        "cursor",
+                        json!({"type":"string","minLength":1,"maxLength":512}),
+                    ),
+                ],
+                vec![],
+            ),
+        ),
         mutation_tool(
             "breakpoints.set",
             "Create a software breakpoint at an absolute or module-relative address while paused.",
@@ -960,9 +1049,37 @@ fn build_catalog() -> Vec<Value> {
             discovery_schema(),
         ),
         read_tool(
+            "symbols.resolve",
+            "Resolve either one exact case-sensitive symbol name in one module or one runtime address against x64dbg's bounded known-symbol database.",
+            json!({
+                "type":"object",
+                "additionalProperties":false,
+                "oneOf":[
+                    {
+                        "required":["module","name"],
+                        "properties":{
+                            "module":module_name_schema(),
+                            "name":{"type":"string","minLength":1,"maxLength":256}
+                        },
+                        "additionalProperties":false
+                    },
+                    {
+                        "required":["address"],
+                        "properties":{"address":address_ref()},
+                        "additionalProperties":false
+                    }
+                ]
+            }),
+        ),
+        read_tool(
             "functions.list",
             "List current x64dbg analyzed functions in one loaded module, optionally filtering by an exact literal substring.",
             discovery_schema(),
+        ),
+        read_tool(
+            "functions.at",
+            "Return the one already-known x64dbg function containing an absolute or module-relative address without triggering analysis.",
+            object(vec![("address", address_ref())], vec!["address"]),
         ),
         read_tool(
             "strings.search",
@@ -1248,7 +1365,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 37);
+        assert_eq!(catalog().len(), 41);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -1574,6 +1691,50 @@ mod tests {
             validate_arguments(
                 "references.to",
                 &json!({"address":{"module":"sample.exe","rva":"0x1000"},"limit":100})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "callstack.read",
+                &json!({"thread_id":"0xffffffff","limit":50})
+            )
+            .is_ok()
+        );
+        assert!(validate_arguments("callstack.read", &json!({"thread_id":"0X1"})).is_err());
+        assert!(validate_arguments("callstack.read", &json!({"limit":51})).is_err());
+        assert!(
+            validate_arguments(
+                "patches.list",
+                &json!({"module":"checksum.exe","limit":256,"cursor":"opaque"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "symbols.resolve",
+                &json!({"module":"checksum.exe","name":"main"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "symbols.resolve",
+                &json!({"address":{"module":"checksum.exe","rva":"0x1000"}})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "symbols.resolve",
+                &json!({"module":"checksum.exe","name":"main","address":"0x1000"})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "functions.at",
+                &json!({"address":{"module":"checksum.exe","rva":"0x1000"}})
             )
             .is_ok()
         );

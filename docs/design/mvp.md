@@ -105,7 +105,7 @@ Otherwise HTTP 503. Response is bounded and contains no target path or token:
   "diagnostic_code":null,
   "next_actions":[],
   "protocol_version":"2025-06-18",
-  "version":"0.8.0"
+  "version":"0.9.0"
 }
 ```
 
@@ -182,6 +182,7 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `memory.map` | read | paused | Paginated regions, at most 256 per page; optional module/committed/executable/compact filters |
 | `modules.list` | read | paused | Paginated loaded modules, at most 256 per page |
 | `threads.list` | read | paused | Paginated threads, at most 256 per page |
+| `callstack.read` | read | paused | Current or exact thread; at most 50 native frames; explicit completeness |
 | `breakpoints.list` | read | paused/running | Paginated snapshot with typed hardware/memory fields |
 | `breakpoints.set` | mutate | paused | Create software breakpoint with explicit address |
 | `breakpoints.remove` | mutate | paused | Remove a software breakpoint by explicit address |
@@ -192,10 +193,13 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `assembly.preview` | read | paused | Assemble one instruction at its runtime address without changing memory |
 | `assembly.patch` | destructive mutate | paused | Compare-before-write one 1-16 byte instruction span and verify patch metadata |
 | `patches.restore` | destructive mutate | paused | Restore an exact tracked span only when memory and patch metadata match |
+| `patches.list` | read | paused | Adjacent tracked ranges; max 256/page; current-byte verification and snapshot-bound cursor |
 | `disassembly.read` | read | paused | At most 256 decoded instructions from an address |
 | `expression.evaluate` | read | paused | Evaluate x64dbg expression; no command execution |
 | `symbols.search` | read | paused | Search up to 65,536 retained symbols with bounded, filter-bound pagination |
+| `symbols.resolve` | read | paused | Exact module/name or runtime address; explicit missing/ambiguous; at most 32 matches |
 | `functions.list` | read | paused | List retained analyzed functions and exact-start symbol names; known-only |
+| `functions.at` | read | paused | Return one already-known containing function without triggering analysis |
 | `strings.search` | read | paused | Scan at most 1 MiB per request for bounded ASCII/UTF-8 or UTF-16LE strings with configurable match context |
 | `references.to` | read | paused | Paginate up to 65,536 retained inbound xrefs for an address |
 

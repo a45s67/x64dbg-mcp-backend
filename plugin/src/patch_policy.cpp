@@ -1,6 +1,8 @@
 #include "patch_policy.h"
 
 #include <charconv>
+#include <algorithm>
+#include <cstdint>
 #include <limits>
 
 namespace mcp {
@@ -55,6 +57,56 @@ bool PatchRecordMatches(const DBGPATCHINFO& record,
                         const unsigned char original,
                         const unsigned char patched) noexcept {
     return record.addr == address && record.oldbyte == original && record.newbyte == patched;
+}
+
+std::optional<std::vector<TrackedPatchRange>>
+NormalizeTrackedPatches(std::vector<TrackedPatchByte> records) {
+    if (records.size() > 65536U) return std::nullopt;
+    std::sort(records.begin(), records.end(), [](const auto& left, const auto& right) {
+        if (left.address != right.address) return left.address < right.address;
+        return left.module < right.module;
+    });
+    std::vector<TrackedPatchRange> ranges;
+    ranges.reserve(records.size());
+    for (const auto& record : records) {
+        if (record.module.empty() || record.original == record.patched) return std::nullopt;
+        const bool canExtend = !ranges.empty() &&
+                               static_cast<duint>(ranges.back().patched.size()) <=
+                                   std::numeric_limits<duint>::max() - ranges.back().address;
+        if (canExtend && record.address == ranges.back().address +
+                                               static_cast<duint>(ranges.back().patched.size()) &&
+            record.module == ranges.back().module) {
+            ranges.back().original.push_back(record.original);
+            ranges.back().patched.push_back(record.patched);
+            continue;
+        }
+        if (!ranges.empty() &&
+            (!canExtend || record.address < ranges.back().address +
+                                             static_cast<duint>(ranges.back().patched.size()))) {
+            return std::nullopt;
+        }
+        ranges.push_back(TrackedPatchRange{record.module, record.address,
+                                           {record.original}, {record.patched}});
+    }
+    return ranges;
+}
+
+std::uint64_t TrackedPatchFingerprint(const std::span<const TrackedPatchByte> records) noexcept {
+    std::uint64_t hash = 14695981039346656037ULL;
+    const auto addByte = [&hash](const unsigned char value) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    };
+    for (const auto& record : records) {
+        for (const unsigned char byte : record.module) addByte(byte);
+        addByte(0xffU);
+        for (std::size_t shift = 0U; shift < sizeof(record.address) * 8U; shift += 8U) {
+            addByte(static_cast<unsigned char>(record.address >> shift));
+        }
+        addByte(record.original);
+        addByte(record.patched);
+    }
+    return hash;
 }
 
 } // namespace mcp

@@ -4,7 +4,7 @@
   "result": {
     "protocolVersion": "2025-06-18",
     "capabilities": {"tools": {"listChanged": false}},
-    "serverInfo": {"name": "x64dbg-mcp-backend", "version": "0.8.0"},
+    "serverInfo": {"name": "x64dbg-mcp-backend", "version": "0.9.0"},
     "_meta": {
       "x64dbg-mcp-backend/instance_id": "11111111-2222-4333-8444-555555555555"
     }

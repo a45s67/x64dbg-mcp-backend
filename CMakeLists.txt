@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(x64dbg_mcp_backend VERSION 0.8.0 LANGUAGES CXX)
+project(x64dbg_mcp_backend VERSION 0.9.0 LANGUAGES CXX)
 include(CTest)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -111,6 +111,20 @@ if(BUILD_TESTING)
   target_compile_definitions(x64dbg_mcp_patch_policy_test PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(x64dbg_mcp_patch_policy_test PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
+
+  # CMake's Release flags define NDEBUG. These native tests intentionally use
+  # assert for compact policy checks, so keep assertions active in every test
+  # configuration rather than producing successful no-op executables.
+  foreach(MCP_ASSERT_TEST
+      x64dbg_mcp_executor_test
+      x64dbg_mcp_command_fence_test
+      x64dbg_mcp_utf8_test
+      x64dbg_mcp_memory_filters_test
+      x64dbg_mcp_register_policy_test
+      x64dbg_mcp_breakpoint_policy_test
+      x64dbg_mcp_patch_policy_test)
+    target_compile_options(${MCP_ASSERT_TEST} PRIVATE /UNDEBUG)
+  endforeach()
 endif()
 
 add_library(x64dbg_mcp_plugin SHARED

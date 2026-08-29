@@ -233,7 +233,7 @@ no stale request, x32/x64 lifecycle and isolated integration pass, and the
 installed `checksum.exe` qualification preserves identity through all mutation
 families and clean shutdown.
 
-### Stage 2: bounded read-only analysis ergonomics
+### Stage 2: bounded read-only analysis ergonomics (completed in 0.9.0)
 
 Add these tools, each behind its own completed admission checklist:
 
@@ -253,6 +253,15 @@ merge adjacent byte records into bounded ranges.
 
 Exit: all four tools pass contract, native ownership, generation-churn, isolated
 x32/x64, shutdown, and real-sample tests without adding a mutation surface.
+
+Completed on 2026-08-30 under ADRs 0024-0027. The catalog now contains 41
+atomic tools. Native x32/x64 tests keep assertions enabled in Release builds;
+isolated integration covers current and explicit-thread unwind, empty and
+bounded patch ranges, disjoint range pagination, snapshot churn without a
+debugger generation change, exact symbol name/address agreement, explicit
+missing symbols, and known function containment. All four operations execute
+on the existing serialized debugger executor and add no connection thread or
+mutation path.
 
 ### Stage 3: structured debuggee launch arguments
 

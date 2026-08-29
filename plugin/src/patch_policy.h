@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
@@ -24,5 +25,24 @@ PreparePatchBytes(std::span<const unsigned char> assembled,
                                       duint address,
                                       unsigned char original,
                                       unsigned char patched) noexcept;
+
+struct TrackedPatchByte {
+    std::string module;
+    duint address{0};
+    unsigned char original{0};
+    unsigned char patched{0};
+};
+
+struct TrackedPatchRange {
+    std::string module;
+    duint address{0};
+    std::vector<unsigned char> original;
+    std::vector<unsigned char> patched;
+};
+
+[[nodiscard]] std::optional<std::vector<TrackedPatchRange>>
+NormalizeTrackedPatches(std::vector<TrackedPatchByte> records);
+[[nodiscard]] std::uint64_t
+TrackedPatchFingerprint(std::span<const TrackedPatchByte> records) noexcept;
 
 } // namespace mcp

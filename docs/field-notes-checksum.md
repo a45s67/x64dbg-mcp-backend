@@ -781,3 +781,51 @@ The backend and managed skill advance to 0.5.0. Package SHA-256 is
 `80290feb663e4acdd3c00b5b579f3d1209111c22b57cf3b85a6bedd51e446cde`.
 Deployment preserved the installed bearer token and refreshed both static Codex
 registrations.
+
+## 2026-08-29 typed hardware and memory breakpoint follow-up
+
+ADR 0019 keeps software breakpoints separate and adds four atomic typed tools:
+hardware set/remove and memory set/remove. Hardware requests use explicit
+execute/write/read-write access, architecture-supported 1/2/4/8-byte sizes,
+natural alignment, and a four-slot preflight. Memory requests use explicit
+access/read/write/execute semantics and an exact 1-65536 byte range contained in
+one current memory region. Remove requires the same access and size observed at
+the address, preventing an address-only command from deleting externally changed
+state.
+
+The native executor composes only fixed `bphws`/`bphwc` and
+`bpmrange`/`bpmc` commands from validated enum and integer fields. Confirmation
+uses typed bridge breakpoint records plus exact hardware size/slot or memory
+range size. A mismatch after command admission remains an unknown mutation
+outcome; the backend does not issue a speculative cleanup command.
+
+Integration exposed two lifecycle/contract details. First, x64dbg can reset
+hardware debug registers while leaving initial `process_created` or
+`system_breakpoint` startup pauses. The backend now rejects hardware setup in
+both states and requires a later callback-confirmed pause. Second, the Rust IPC
+stable-code allowlist initially mapped the new `CONFLICT`, `ALREADY_EXISTS`, and
+`RESOURCE_EXHAUSTED` native codes to fail-closed `INTERNAL`. Those codes are now
+explicitly preserved and covered by contract tests.
+
+Rust retained 49 unit/contract tests and six supervised-shutdown tests. Both
+native architectures passed ten tests, including architecture size/alignment,
+four-slot, range-containment, and read-back policy. Fresh isolated x32 and x64
+runs rejected the startup pause and a misaligned data breakpoint; x32 also
+rejected an 8-byte hardware request. Both runs then hit an execute hardware
+breakpoint in slot 0, hit a 4-byte marker-read memory breakpoint, listed their
+typed fields, rejected mismatched removals with `CONFLICT`, replayed set/remove
+results exactly, removed all typed state, and stopped with no owned sidecar.
+Cross-region memory ranges were rejected before command submission.
+
+The installed 0.6.0 `checksum.exe` regression loaded at `0x1000000`, resolved
+`CHECKSUM.EXE+0xa78a0` to `0x10a78a0`, and retained generation 27 across its
+initial paused reads. After the prior analysis, compact-string, and reversible
+RDI checks, an execute hardware breakpoint hit the next instruction at
+`0x10a78a8`. It was exactly removed, then a six-byte execute memory breakpoint
+hit the following instruction at `0x10a78ac`. Both set and remove operations
+replayed exactly, the debuggee stopped, and the owned sidecar exited.
+
+The backend publishes 34 tools and managed skill 0.6.0. Package SHA-256 is
+`db1c20ae4d786891ea7599ffc63ea5283798694590357fdddd13942232a1d38f`.
+Deployment preserved the installed bearer token and refreshed both static Codex
+registrations.

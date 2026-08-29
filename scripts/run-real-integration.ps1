@@ -224,12 +224,20 @@ try {
     $analysisSymbol = @($symbols.items | Where-Object {
         $_.name -ieq 'mcp_fixture_analysis_target'
     })[0]
-    if (!$analysisSymbol -or !$analysisSymbol.location.rva) {
-        throw 'Fixture analysis target export was not available as a structured symbol.'
+    $markerSymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_marker'
+    })[0]
+    if (!$analysisSymbol -or !$analysisSymbol.location.rva -or
+        !$markerSymbol -or !$markerSymbol.location.rva) {
+        throw 'Fixture analysis and marker exports were not available as structured symbols.'
     }
     $analysisRef = @{
         module = $fixtureModule.name.ToUpperInvariant()
         rva = $analysisSymbol.location.rva
+    }
+    $markerRef = @{
+        module = $fixtureModule.name.ToUpperInvariant()
+        rva = $markerSymbol.location.rva
     }
     $analysisOperation = [Guid]::NewGuid().ToString()
     $analysis = Invoke-Tool 'analysis.function' @{
@@ -453,11 +461,83 @@ try {
     if (($write | ConvertTo-Json -Compress) -ne ($writeReplay | ConvertTo-Json -Compress)) {
         throw 'Mutation replay did not return the recorded memory.write result.'
     }
-    $stepOutBreakpoint = Invoke-Tool 'breakpoints.set' @{
-        operation_id = [Guid]::NewGuid().ToString(); address = $analysisRef
-    } 86
-    if (!$stepOutBreakpoint.present) {
-        throw 'Could not set the fixture function breakpoint for step-out.'
+    $earlyHardwareRejected = $null
+    if ($state.pause_reason.kind -in @('process_created', 'system_breakpoint')) {
+        $earlyHardware = Invoke-Mcp 'tools/call' @{
+            name = 'breakpoints.hardware.set'; arguments = @{
+                operation_id = [Guid]::NewGuid().ToString()
+                address = $analysisRef; access = 'execute'; size = 1
+            }
+        } 76
+        if (!$earlyHardware.isError -or
+            $earlyHardware.structuredContent.error.code -ne 'INVALID_DEBUGGER_STATE') {
+            throw 'Hardware setup did not reject a transient startup pause.'
+        }
+        $earlyHardwareRejected = $true
+    }
+    # Hardware debug registers are applied to the actionable debug thread. Move
+    # past x64dbg's startup pause before installing the slot.
+    $hardwareReadyResume = Invoke-Tool 'debugger.resume' @{
+        operation_id = [Guid]::NewGuid().ToString()
+    } 78
+    $hardwareReadyPause = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $hardwareReadyResume.state_generation; timeout_ms = 9000
+    } 79
+    if ($hardwareReadyPause.debuggee_state -ne 'paused' -or
+        $hardwareReadyPause.state_generation -le $hardwareReadyResume.state_generation) {
+        throw 'Fixture did not reach an actionable pause before hardware breakpoint setup.'
+    }
+    $analysisAddressValue = [Convert]::ToUInt64($analysis.requested_location.address.Substring(2), 16)
+    $unalignedHardware = Invoke-Mcp 'tools/call' @{
+        name = 'breakpoints.hardware.set'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString()
+            address = @{ absolute = ('0x{0:x}' -f ($analysisAddressValue + 1)) }
+            access = 'write'; size = 4
+        }
+    } 77
+    if (!$unalignedHardware.isError -or
+        $unalignedHardware.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Hardware setup did not reject a misaligned data breakpoint.'
+    }
+    if ($Backend -eq 'x32') {
+        $x86WideHardware = Invoke-Mcp 'tools/call' @{
+            name = 'breakpoints.hardware.set'; arguments = @{
+                operation_id = [Guid]::NewGuid().ToString()
+                address = $analysisRef; access = 'write'; size = 8
+            }
+        } 75
+        if (!$x86WideHardware.isError -or
+            $x86WideHardware.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+            throw 'x32 hardware setup did not reject an 8-byte debug-register request.'
+        }
+    }
+    $hardwareArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $analysisRef; access = 'execute'; size = 1
+    }
+    $hardwareSet = Invoke-Tool 'breakpoints.hardware.set' $hardwareArguments 86
+    $hardwareSetReplay = Invoke-Tool 'breakpoints.hardware.set' $hardwareArguments 87
+    $hardwareList = Invoke-Tool 'breakpoints.list' @{ limit = 256 } 88
+    $listedHardware = @($hardwareList.items | Where-Object {
+        $_.address -eq $analysis.requested_location.address -and $_.type -eq 'hardware'
+    })[0]
+    if (!$hardwareSet.present -or $hardwareSet.access -ne 'execute' -or
+        $hardwareSet.size -ne 1 -or $hardwareSet.slot -lt 0 -or $hardwareSet.slot -gt 3 -or
+        !$listedHardware -or $listedHardware.access -ne 'execute' -or
+        $listedHardware.size -ne 1 -or
+        ($hardwareSet | ConvertTo-Json -Compress -Depth 10) -ne
+        ($hardwareSetReplay | ConvertTo-Json -Compress -Depth 10)) {
+        throw 'Typed hardware breakpoint was not exactly listed or replay-safe.'
+    }
+    $hardwareMismatch = Invoke-Mcp 'tools/call' @{
+        name = 'breakpoints.hardware.remove'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString()
+            address = $analysisRef; access = 'write'; size = 1
+        }
+    } 89
+    if (!$hardwareMismatch.isError -or
+        $hardwareMismatch.structuredContent.error.code -ne 'CONFLICT') {
+        throw "Hardware removal did not reject a mismatched access shape: $($hardwareMismatch | ConvertTo-Json -Compress -Depth 10)"
     }
     $stepOutEntryPause = $null
     for ($stepOutAttempt = 0; $stepOutAttempt -lt 6; $stepOutAttempt++) {
@@ -476,12 +556,23 @@ try {
     if (!$stepOutEntryPause) {
         throw 'Fixture analysis target was not reached for step-out qualification.'
     }
-    $null = Invoke-Tool 'breakpoints.remove' @{
-        operation_id = [Guid]::NewGuid().ToString(); address = $analysisRef
-    } 100
+    if ($stepOutEntryPause.pause_reason.breakpoint_type -ne 'hardware') {
+        throw 'Fixture function entry did not report a hardware breakpoint hit.'
+    }
+    $hardwareRemoveArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $analysisRef; access = 'execute'; size = 1
+    }
+    $hardwareRemove = Invoke-Tool 'breakpoints.hardware.remove' $hardwareRemoveArguments 100
+    $hardwareRemoveReplay = Invoke-Tool 'breakpoints.hardware.remove' $hardwareRemoveArguments 101
+    if ($hardwareRemove.present -or
+        ($hardwareRemove | ConvertTo-Json -Compress -Depth 10) -ne
+        ($hardwareRemoveReplay | ConvertTo-Json -Compress -Depth 10)) {
+        throw 'Typed hardware breakpoint removal was not exactly replay-safe.'
+    }
     $stepOutDisassembly = Invoke-Tool 'disassembly.read' @{
         address = $analysisRef; count = 6
-    } 101
+    } 102
     $stepOutInterruptInstruction = @($stepOutDisassembly.items | Select-Object -Skip 1 |
         Where-Object { !$_.text.StartsWith('ret', [StringComparison]::OrdinalIgnoreCase) } |
         Select-Object -First 1)[0]
@@ -516,6 +607,81 @@ try {
         ($stepOut | ConvertTo-Json -Compress -Depth 8) -ne
         ($stepOutReplay | ConvertTo-Json -Compress -Depth 8)) {
         throw 'Step-out was not callback-confirmed at the fixture return or replay-safe.'
+    }
+
+    $markerAddressValue = [Convert]::ToUInt64($markerSymbol.location.address.Substring(2), 16)
+    $markerMap = Invoke-Tool 'memory.map' @{
+        module = $fixtureModule.name.ToUpperInvariant(); committed_only = $true
+        executable_only = $false; compact = $true; limit = 256
+    } 116
+    $markerRegion = @($markerMap.items | Where-Object {
+        $base = [Convert]::ToUInt64($_.base.Substring(2), 16)
+        $size = [Convert]::ToUInt64($_.size.Substring(2), 16)
+        $markerAddressValue -ge $base -and $markerAddressValue -lt ($base + $size)
+    })[0]
+    if (!$markerRegion) {
+        throw 'Fixture marker memory region was unavailable for range-bound testing.'
+    }
+    $markerRegionBase = [Convert]::ToUInt64($markerRegion.base.Substring(2), 16)
+    $markerRegionSize = [Convert]::ToUInt64($markerRegion.size.Substring(2), 16)
+    $crossRegionMemory = Invoke-Mcp 'tools/call' @{
+        name = 'breakpoints.memory.set'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString()
+            address = @{ absolute = ('0x{0:x}' -f ($markerRegionBase + $markerRegionSize - 1)) }
+            access = 'read'; size = 2
+        }
+    } 117
+    if (!$crossRegionMemory.isError -or
+        $crossRegionMemory.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Memory breakpoint setup did not reject a cross-region range.'
+    }
+    $memoryBreakpointArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $markerRef; access = 'read'; size = 4
+    }
+    $memoryBreakpoint = Invoke-Tool 'breakpoints.memory.set' $memoryBreakpointArguments 108
+    $memoryBreakpointReplay = Invoke-Tool 'breakpoints.memory.set' $memoryBreakpointArguments 109
+    $memoryBreakpointList = Invoke-Tool 'breakpoints.list' @{ limit = 256 } 110
+    $listedMemory = @($memoryBreakpointList.items | Where-Object {
+        $_.address -eq $markerSymbol.location.address -and $_.type -eq 'memory'
+    })[0]
+    if (!$memoryBreakpoint.present -or $memoryBreakpoint.access -ne 'read' -or
+        $memoryBreakpoint.size -ne 4 -or !$listedMemory -or
+        $listedMemory.access -ne 'read' -or $listedMemory.size -ne 4 -or
+        ($memoryBreakpoint | ConvertTo-Json -Compress -Depth 10) -ne
+        ($memoryBreakpointReplay | ConvertTo-Json -Compress -Depth 10)) {
+        throw 'Typed memory breakpoint was not exactly listed or replay-safe.'
+    }
+    $memoryMismatch = Invoke-Mcp 'tools/call' @{
+        name = 'breakpoints.memory.remove'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString()
+            address = $markerRef; access = 'write'; size = 4
+        }
+    } 111
+    if (!$memoryMismatch.isError -or
+        $memoryMismatch.structuredContent.error.code -ne 'CONFLICT') {
+        throw "Memory removal did not reject a mismatched access shape: $($memoryMismatch | ConvertTo-Json -Compress -Depth 10)"
+    }
+    $memoryResume = Invoke-Tool 'debugger.resume' @{
+        operation_id = [Guid]::NewGuid().ToString()
+    } 112
+    $memoryPause = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $memoryResume.state_generation; timeout_ms = 9000
+    } 113
+    if ($memoryPause.pause_reason.kind -ne 'breakpoint' -or
+        $memoryPause.pause_reason.breakpoint_type -ne 'memory') {
+        throw 'Fixture marker read did not report a memory breakpoint hit.'
+    }
+    $memoryRemoveArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $markerRef; access = 'read'; size = 4
+    }
+    $memoryRemove = Invoke-Tool 'breakpoints.memory.remove' $memoryRemoveArguments 114
+    $memoryRemoveReplay = Invoke-Tool 'breakpoints.memory.remove' $memoryRemoveArguments 115
+    if ($memoryRemove.present -or
+        ($memoryRemove | ConvertTo-Json -Compress -Depth 10) -ne
+        ($memoryRemoveReplay | ConvertTo-Json -Compress -Depth 10)) {
+        throw 'Typed memory breakpoint removal was not exactly replay-safe.'
     }
     $resume = $null
     $startupPause = $null
@@ -662,6 +828,19 @@ try {
         step_out_interruption_reported = $true
         step_out_instruction = $stepOut.instruction.text
         step_out_replay_equal = $true
+        hardware_breakpoint_hit = $true
+        initial_pause_reason = $state.pause_reason.kind
+        hardware_startup_pause_rejected = $earlyHardwareRejected
+        hardware_alignment_rejected = $true
+        hardware_x86_size_rejected = $Backend -eq 'x32'
+        hardware_breakpoint_slot = $hardwareSet.slot
+        hardware_breakpoint_replay_equal = $true
+        hardware_breakpoint_mismatch_rejected = $true
+        memory_breakpoint_hit = $true
+        memory_cross_region_rejected = $true
+        memory_breakpoint_size = $memoryBreakpoint.size
+        memory_breakpoint_replay_equal = $true
+        memory_breakpoint_mismatch_rejected = $true
         resume_state = $resume.debuggee_state
         resume_generation = $resume.state_generation
         startup_pause_reason = if ($startupPause) { $startupPause.pause_reason.kind } else { $null }

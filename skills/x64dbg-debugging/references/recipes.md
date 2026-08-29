@@ -21,6 +21,14 @@ After `debugger.step_out`, require `completed: true` before assuming the frame r
 When it is false, inspect `pause_reason`, CIP, and disassembly; an existing breakpoint, exception,
 or user pause interrupted the operation and replaying it cannot make further progress.
 
+Hardware breakpoints are per debug-register context. Advance past `process_created` and
+`system_breakpoint` startup pauses, then select
+`execute` with size 1 or an aligned `write`/`read_write` data size supported by the backend
+architecture. Memory breakpoints change guard-page behavior for an exact bounded range and can be
+noisy; prefer them only when a software or hardware breakpoint cannot observe the needed access.
+For either typed kind, remove with the same address, access, and size. A mismatch is a conflict to
+inspect, not permission to delete by address.
+
 If the plugin reports draining, cancelled, or unavailable, stop issuing work and let debugger
 shutdown finish.
 

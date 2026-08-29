@@ -276,6 +276,80 @@ try {
         throw 'Installed typed register write did not restore the Flare sample context.'
     }
 
+    $hardwareInstruction = @($disassemblySnapshot.items)[1]
+    $memoryInstruction = @($disassemblySnapshot.items)[2]
+    if (!$hardwareInstruction -or !$memoryInstruction -or
+        $hardwareInstruction.size -lt 1 -or $memoryInstruction.size -lt 1) {
+        throw 'Main disassembly has no deterministic instructions for typed breakpoint qualification.'
+    }
+    $hardwareArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = @{ absolute = $hardwareInstruction.address }
+        access = 'execute'; size = 1
+    }
+    $hardwareSet = Invoke-Tool 'breakpoints.hardware.set' $hardwareArguments 100
+    $hardwareSetReplay = Invoke-Tool 'breakpoints.hardware.set' $hardwareArguments 101
+    $hardwareResume = Invoke-Tool 'debugger.resume' @{
+        operation_id = [Guid]::NewGuid().ToString()
+    } 102
+    $hardwarePause = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $hardwareResume.state_generation; timeout_ms = 9000
+    } 103
+    if (!$hardwareSet.present -or
+        ($hardwareSet | ConvertTo-Json -Compress -Depth 10) -ne
+        ($hardwareSetReplay | ConvertTo-Json -Compress -Depth 10) -or
+        $hardwarePause.pause_reason.kind -ne 'breakpoint' -or
+        $hardwarePause.pause_reason.breakpoint_type -ne 'hardware' -or
+        $hardwarePause.instruction_pointer -ne $hardwareInstruction.address) {
+        throw 'Installed hardware breakpoint was not replay-safe or did not hit the next instruction.'
+    }
+    $hardwareRemoveArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = @{ absolute = $hardwareInstruction.address }
+        access = 'execute'; size = 1
+    }
+    $hardwareRemove = Invoke-Tool 'breakpoints.hardware.remove' $hardwareRemoveArguments 104
+    $hardwareRemoveReplay = Invoke-Tool 'breakpoints.hardware.remove' $hardwareRemoveArguments 105
+    if ($hardwareRemove.present -or
+        ($hardwareRemove | ConvertTo-Json -Compress -Depth 10) -ne
+        ($hardwareRemoveReplay | ConvertTo-Json -Compress -Depth 10)) {
+        throw 'Installed hardware breakpoint removal was not replay-safe.'
+    }
+
+    $memoryArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = @{ absolute = $memoryInstruction.address }
+        access = 'execute'; size = $memoryInstruction.size
+    }
+    $memorySet = Invoke-Tool 'breakpoints.memory.set' $memoryArguments 106
+    $memorySetReplay = Invoke-Tool 'breakpoints.memory.set' $memoryArguments 107
+    $memoryResume = Invoke-Tool 'debugger.resume' @{
+        operation_id = [Guid]::NewGuid().ToString()
+    } 108
+    $memoryPause = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $memoryResume.state_generation; timeout_ms = 9000
+    } 109
+    if (!$memorySet.present -or
+        ($memorySet | ConvertTo-Json -Compress -Depth 10) -ne
+        ($memorySetReplay | ConvertTo-Json -Compress -Depth 10) -or
+        $memoryPause.pause_reason.kind -ne 'breakpoint' -or
+        $memoryPause.pause_reason.breakpoint_type -ne 'memory' -or
+        $memoryPause.instruction_pointer -ne $memoryInstruction.address) {
+        throw 'Installed memory breakpoint was not replay-safe or did not hit the following instruction.'
+    }
+    $memoryRemoveArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = @{ absolute = $memoryInstruction.address }
+        access = 'execute'; size = $memoryInstruction.size
+    }
+    $memoryRemove = Invoke-Tool 'breakpoints.memory.remove' $memoryRemoveArguments 110
+    $memoryRemoveReplay = Invoke-Tool 'breakpoints.memory.remove' $memoryRemoveArguments 111
+    if ($memoryRemove.present -or
+        ($memoryRemove | ConvertTo-Json -Compress -Depth 10) -ne
+        ($memoryRemoveReplay | ConvertTo-Json -Compress -Depth 10)) {
+        throw 'Installed memory breakpoint removal was not replay-safe.'
+    }
+
     $stopSubmitted = $true
     $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 40
     [ordered]@{
@@ -318,6 +392,11 @@ try {
         register_write_value = $registerWrite.value
         register_write_replay_equal = $true
         register_restore_value = $registerAfterRestore.registers.$writableRegister
+        hardware_breakpoint_address = $hardwarePause.instruction_pointer
+        hardware_breakpoint_replay_equal = $true
+        memory_breakpoint_address = $memoryPause.instruction_pointer
+        memory_breakpoint_size = $memorySet.size
+        memory_breakpoint_replay_equal = $true
         stopped = $stop.debuggee_state -eq 'absent'
     } | ConvertTo-Json -Depth 5
 } finally {

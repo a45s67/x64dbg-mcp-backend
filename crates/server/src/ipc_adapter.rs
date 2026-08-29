@@ -208,6 +208,9 @@ fn stable_error_code(code: &str) -> &'static str {
         "INVALID_DEBUGGER_STATE" => "INVALID_DEBUGGER_STATE",
         "NO_DEBUGGEE" => "NO_DEBUGGEE",
         "NOT_FOUND" => "NOT_FOUND",
+        "ALREADY_EXISTS" => "ALREADY_EXISTS",
+        "CONFLICT" => "CONFLICT",
+        "RESOURCE_EXHAUSTED" => "RESOURCE_EXHAUSTED",
         "ACCESS_DENIED" => "ACCESS_DENIED",
         "BUSY" => "BUSY",
         "TIMEOUT" => "TIMEOUT",
@@ -304,6 +307,12 @@ mod tests {
         assert_eq!(
             stable_error_code("OUTPUT_LIMIT_EXCEEDED"),
             "OUTPUT_LIMIT_EXCEEDED"
+        );
+        assert_eq!(stable_error_code("ALREADY_EXISTS"), "ALREADY_EXISTS");
+        assert_eq!(stable_error_code("CONFLICT"), "CONFLICT");
+        assert_eq!(
+            stable_error_code("RESOURCE_EXHAUSTED"),
+            "RESOURCE_EXHAUSTED"
         );
         assert_eq!(stable_error_code("untrusted-plugin-code"), "INTERNAL");
     }

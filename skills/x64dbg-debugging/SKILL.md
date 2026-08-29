@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.5.0"
-  minimum-backend-version: "0.5.0"
+  version: "0.6.0"
+  minimum-backend-version: "0.6.0"
   mcp-protocol: "2025-06-18"
 ---
 
@@ -27,6 +27,13 @@ Use `registers.write` for one full-width core register at a time. Preserve the o
 when the workflow requires restoration, use a fresh operation ID only for that distinct restore,
 and verify the returned read-back. `debugger.step_out` stops at the current frame's return
 instruction; inspect `completed` and the returned pause reason before continuing.
+
+Use `breakpoints.hardware.set` only after transient `process_created` and `system_breakpoint`
+startup pauses. Choose one exact
+access and naturally aligned architecture-supported size; there are four logical slots. Use
+`breakpoints.memory.set` only for an intentionally bounded guard-page range. Typed removals require
+the original access and size, so inspect `breakpoints.list` rather than guessing externally changed
+state.
 
 Prefer `{ "module": "sample.exe", "rva": "0x..." }` for address-taking tools. This keeps ASLR
 translation native and atomic. Use `address.resolve` when the absolute runtime address or canonical

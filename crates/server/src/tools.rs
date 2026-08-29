@@ -207,6 +207,18 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             operation(object, &["address"])?;
             validate_address_ref(object, "address")
         }
+        "breakpoints.hardware.set" | "breakpoints.hardware.remove" => {
+            operation(object, &["address", "access", "size"])?;
+            validate_address_ref(object, "address")?;
+            one_of(object, "access", &["execute", "write", "read_write"])?;
+            one_of_integer(object, "size", &[1, 2, 4, 8])
+        }
+        "breakpoints.memory.set" | "breakpoints.memory.remove" => {
+            operation(object, &["address", "access", "size"])?;
+            validate_address_ref(object, "address")?;
+            one_of(object, "access", &["access", "read", "write", "execute"])?;
+            integer(object, "size", 1, 65_536)
+        }
         "disassembly.read" => {
             exact_keys(object, &["address"], &["count"])?;
             validate_address_ref(object, "address")?;
@@ -438,6 +450,32 @@ fn integer(
         .filter(|value| (min..=max).contains(value))
         .map(|_| ())
         .ok_or(invalid(field, "is outside its integer bounds"))
+}
+
+fn one_of(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+    accepted: &[&str],
+) -> Result<(), ValidationError> {
+    let value = string(object, field, 1, 32)?;
+    if accepted.contains(&value) {
+        Ok(())
+    } else {
+        Err(invalid(field, "is not an accepted enum value"))
+    }
+}
+
+fn one_of_integer(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+    accepted: &[u64],
+) -> Result<(), ValidationError> {
+    object
+        .get(field)
+        .and_then(Value::as_u64)
+        .filter(|value| accepted.contains(value))
+        .map(|_| ())
+        .ok_or(invalid(field, "is not an accepted integer value"))
 }
 
 fn optional_integer(
@@ -684,6 +722,64 @@ fn build_catalog() -> Vec<Value> {
             "breakpoints.remove",
             "Remove a software breakpoint at an absolute or module-relative address while paused.",
             operation_schema(vec![("address", address_ref())]),
+            true,
+        ),
+        mutation_tool(
+            "breakpoints.hardware.set",
+            "Set one typed CPU hardware breakpoint after transient process-created and system-breakpoint startup pauses. Execute requires size 1; data addresses must be naturally aligned; x32 rejects size 8; four logical slots are available. Exact native read-back is required.",
+            operation_schema(vec![
+                ("address", address_ref()),
+                (
+                    "access",
+                    json!({"type":"string","enum":["execute","write","read_write"]}),
+                ),
+                ("size", json!({"type":"integer","enum":[1,2,4,8]})),
+            ]),
+            false,
+        ),
+        mutation_tool(
+            "breakpoints.hardware.remove",
+            "Remove one hardware breakpoint only when its current access and size exactly match the request. This prevents address-only deletion of externally changed state.",
+            operation_schema(vec![
+                ("address", address_ref()),
+                (
+                    "access",
+                    json!({"type":"string","enum":["execute","write","read_write"]}),
+                ),
+                ("size", json!({"type":"integer","enum":[1,2,4,8]})),
+            ]),
+            true,
+        ),
+        mutation_tool(
+            "breakpoints.memory.set",
+            "Set one typed guard-page memory breakpoint for an exact 1-65536 byte range contained in one current memory region, then require exact native read-back.",
+            operation_schema(vec![
+                ("address", address_ref()),
+                (
+                    "access",
+                    json!({"type":"string","enum":["access","read","write","execute"]}),
+                ),
+                (
+                    "size",
+                    json!({"type":"integer","minimum":1,"maximum":65536}),
+                ),
+            ]),
+            false,
+        ),
+        mutation_tool(
+            "breakpoints.memory.remove",
+            "Remove one memory breakpoint only when its current access and exact range size match the request. No address-only or batch removal is performed.",
+            operation_schema(vec![
+                ("address", address_ref()),
+                (
+                    "access",
+                    json!({"type":"string","enum":["access","read","write","execute"]}),
+                ),
+                (
+                    "size",
+                    json!({"type":"integer","minimum":1,"maximum":65536}),
+                ),
+            ]),
             true,
         ),
         read_tool(
@@ -972,7 +1068,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 30);
+        assert_eq!(catalog().len(), 34);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -1059,6 +1155,54 @@ mod tests {
                 })
             )
             .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "breakpoints.hardware.set",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "address":{"module":"sample.exe","rva":"0x1000"},
+                    "access":"read_write",
+                    "size":8
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "breakpoints.hardware.remove",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "address":"0x1000",
+                    "access":"read",
+                    "size":3
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "breakpoints.memory.set",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "address":"0x1000",
+                    "access":"write",
+                    "size":65536
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "breakpoints.memory.remove",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "address":"0x1000",
+                    "access":"access",
+                    "size":65537
+                })
+            )
+            .is_err()
         );
         assert!(
             validate_arguments("memory.read", &json!({"address":"0X1000","length":1})).is_err()

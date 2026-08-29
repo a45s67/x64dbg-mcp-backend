@@ -65,6 +65,10 @@ whether the session was launched or attached; attached sessions must use
 One-register writes use the typed SDK plus exact read-back. `debugger.step_out`
 returns compact pause context and an explicit `completed` flag, so an intervening
 breakpoint or exception is not mistaken for reaching the return.
+Typed hardware and memory breakpoint tools validate access, size, architecture,
+alignment, slot/range ownership, and exact native read-back. Hardware setup
+rejects transient process-created and system-breakpoint startup pauses; removals require the current shape
+to match instead of deleting address-only state.
 
 Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
 It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer

@@ -27,6 +27,7 @@
 #include "_scriptapi_function.h"
 #include "_scriptapi_module.h"
 #include "_scriptapi_symbol.h"
+#include "breakpoint_policy.h"
 #include "jansson/jansson.h"
 #include "memory_filters.h"
 #include "register_policy.h"
@@ -154,6 +155,8 @@ struct Request {
     bool compact{false};
     std::string registerName;
     std::uint64_t registerWriteValue{0U};
+    std::string breakpointAccess;
+    std::size_t breakpointSize{0U};
 };
 
 bool IsMutation(const std::string_view method) {
@@ -162,6 +165,10 @@ bool IsMutation(const std::string_view method) {
            method == "debugger.step_out" || method == "registers.write" ||
            method == "debugger.stop" || method == "memory.write" ||
            method == "breakpoints.set" || method == "breakpoints.remove" ||
+           method == "breakpoints.hardware.set" ||
+           method == "breakpoints.hardware.remove" ||
+           method == "breakpoints.memory.set" ||
+           method == "breakpoints.memory.remove" ||
            method == "debuggee.launch" || method == "debuggee.attach" ||
            method == "debuggee.detach" || method == "analysis.function";
 }
@@ -436,6 +443,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     bool compact = false;
     std::string registerName;
     std::uint64_t registerWriteValue = 0U;
+    std::string breakpointAccess;
+    std::size_t breakpointSize = 0U;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
@@ -752,6 +761,22 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             !json_is_string(json_object_get(payload, "operation_id"))) {
             return std::nullopt;
         }
+    } else if (methodValue == "breakpoints.hardware.set" ||
+               methodValue == "breakpoints.hardware.remove" ||
+               methodValue == "breakpoints.memory.set" ||
+               methodValue == "breakpoints.memory.remove") {
+        json_t* access = json_object_get(payload, "access");
+        json_t* size = json_object_get(payload, "size");
+        if (json_object_size(payload) != 4U ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !ParseAddressReference(json_object_get(payload, "address"), addressValue) ||
+            !json_is_string(access) || json_string_length(access) < 4U ||
+            json_string_length(access) > 10U || !json_is_integer(size) ||
+            json_integer_value(size) < 1 || json_integer_value(size) > 65536) {
+            return std::nullopt;
+        }
+        breakpointAccess.assign(json_string_value(access), json_string_length(access));
+        breakpointSize = static_cast<std::size_t>(json_integer_value(size));
     } else if (methodValue == "breakpoints.set" || methodValue == "breakpoints.remove") {
         if (json_object_size(payload) != 2U ||
             !json_is_string(json_object_get(payload, "operation_id")) ||
@@ -797,7 +822,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(moduleFilter), std::move(query), std::move(stringEncoding),
                    minStringLength, stringContextBytes, cursorFingerprint, discoveryCursorInvalid,
                    committedOnly, executableOnly, compact, std::move(registerName),
-                   registerWriteValue};
+                   registerWriteValue, std::move(breakpointAccess), breakpointSize};
 }
 
 bool IsAcceptedHandshakeAck(const std::string_view bytes) {
@@ -1551,6 +1576,10 @@ void Runtime::Worker() noexcept {
                                            parsed->method == "memory.write" ||
                                            parsed->method == "breakpoints.set" ||
                                            parsed->method == "breakpoints.remove" ||
+                                           parsed->method == "breakpoints.hardware.set" ||
+                                           parsed->method == "breakpoints.hardware.remove" ||
+                                           parsed->method == "breakpoints.memory.set" ||
+                                           parsed->method == "breakpoints.memory.remove" ||
                                            parsed->method == "disassembly.read" ||
                                            parsed->method == "references.to";
                 std::optional<ResolvedLocation> resolvedLocation;
@@ -2023,6 +2052,234 @@ void Runtime::Worker() noexcept {
                            JsonString(HexValue(address)) + ",\"location\":" +
                            LocationJson(*resolvedLocation, resolvedGeneration) +
                            ",\"present\":" +
+                           (setting ? "true" : "false") + "}}";
+                }
+                if (parsed->method == "breakpoints.hardware.set" ||
+                    parsed->method == "breakpoints.hardware.remove") {
+                    const duint address = resolvedLocation->address;
+                    const auto access = ParseHardwareAccess(parsed->breakpointAccess);
+                    if (!access ||
+                        !HardwareRequestValid(*access, parsed->breakpointSize, address)) {
+                        return ErrorResponse(
+                            *parsed, "INVALID_ARGUMENT",
+                            "hardware breakpoint access, size, or alignment is invalid for this architecture",
+                            false, false);
+                    }
+                    {
+                        std::lock_guard lock(stateMutex_);
+                        if (generation_.load() == resolvedGeneration &&
+                            (latestPause_.kind == PauseReasonKind::processCreated ||
+                             latestPause_.kind == PauseReasonKind::systemBreakpoint)) {
+                            return ErrorResponse(
+                                *parsed, "INVALID_DEBUGGER_STATE",
+                                "hardware breakpoints require a pause after process and system-breakpoint initialization",
+                                false, false);
+                        }
+                    }
+                    const DBGFUNCTIONS* functions = DbgFunctions();
+                    if (functions == nullptr || functions->GetBridgeBp == nullptr) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "typed breakpoint read-back is unavailable", false,
+                                             false);
+                    }
+                    if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed after address resolution", true,
+                                             false);
+                    }
+                    BRIDGEBP before{};
+                    const bool beforePresent =
+                        functions->GetBridgeBp(bp_hardware, address, &before);
+                    const bool setting = parsed->method == "breakpoints.hardware.set";
+                    unsigned short confirmedSlot = before.slot;
+                    if (setting) {
+                        if (beforePresent) {
+                            return ErrorResponse(*parsed, "ALREADY_EXISTS",
+                                                 "a hardware breakpoint already exists at this address",
+                                                 false, false);
+                        }
+                        BPMAP map{};
+                        const int reported = DbgGetBpList(bp_hardware, &map);
+                        struct HardwareMapGuard {
+                            BRIDGEBP* value;
+                            ~HardwareMapGuard() {
+                                if (value != nullptr) BridgeFree(value);
+                            }
+                        } guard{map.bp};
+                        if (reported < 0 || map.count < 0 ||
+                            (map.count > 0 && map.bp == nullptr) || map.count > 65536) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "hardware breakpoint slot snapshot is invalid",
+                                                 false, false);
+                        }
+                        if (HardwareSlotsExhausted(map.bp,
+                                                   static_cast<std::size_t>(map.count))) {
+                            return ErrorResponse(*parsed, "RESOURCE_EXHAUSTED",
+                                                 "all four hardware breakpoint slots are represented",
+                                                 false, false);
+                        }
+                    } else {
+                        if (!beforePresent) {
+                            return ErrorResponse(*parsed, "NOT_FOUND",
+                                                 "no hardware breakpoint exists at this address",
+                                                 false, false);
+                        }
+                        if (!HardwareBreakpointMatches(before, *access,
+                                                       parsed->breakpointSize, false)) {
+                            return ErrorResponse(*parsed, "CONFLICT",
+                                                 "hardware breakpoint does not match access and size",
+                                                 false, false);
+                        }
+                    }
+                    std::string command;
+                    if (setting) {
+                        command = "bphws " + HexValue(address) + ", ";
+                        command.push_back(HardwareAccessCommand(*access));
+                        command += ", " + std::to_string(parsed->breakpointSize);
+                    } else {
+                        command = "bphwc " + HexValue(address);
+                    }
+                    if (!DbgCmdExec(command.c_str())) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected the operation", true,
+                                             false);
+                    }
+                    bool observed = false;
+                    while (pluginState_.load() == PluginState::ready &&
+                           std::chrono::steady_clock::now() < requestDeadline) {
+                        BRIDGEBP current{};
+                        const bool present =
+                            functions->GetBridgeBp(bp_hardware, address, &current);
+                        if (setting && present &&
+                            HardwareBreakpointMatches(current, *access,
+                                                      parsed->breakpointSize, true)) {
+                            confirmedSlot = current.slot;
+                            observed = true;
+                            break;
+                        }
+                        if (!setting && !present) {
+                            observed = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    if (!observed || !PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(
+                            *parsed, "TIMEOUT",
+                            "hardware breakpoint outcome could not be exactly confirmed", false,
+                            true);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(resolvedGeneration) +
+                           ",\"status\":\"ok\",\"result\":{\"address\":" +
+                           JsonString(HexValue(address)) + ",\"location\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"type\":\"hardware\",\"access\":" +
+                           JsonString(HardwareAccessName(*access)) + ",\"size\":" +
+                           std::to_string(parsed->breakpointSize) + ",\"slot\":" +
+                           std::to_string(confirmedSlot) + ",\"present\":" +
+                           (setting ? "true" : "false") + "}}";
+                }
+                if (parsed->method == "breakpoints.memory.set" ||
+                    parsed->method == "breakpoints.memory.remove") {
+                    const duint address = resolvedLocation->address;
+                    const auto access = ParseMemoryAccess(parsed->breakpointAccess);
+                    if (!access) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "memory breakpoint access is invalid", false, false);
+                    }
+                    const DBGFUNCTIONS* functions = DbgFunctions();
+                    if (functions == nullptr || functions->GetBridgeBp == nullptr ||
+                        functions->MemBpSize == nullptr) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "typed memory breakpoint read-back is unavailable",
+                                             false, false);
+                    }
+                    if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed after address resolution", true,
+                                             false);
+                    }
+                    const bool setting = parsed->method == "breakpoints.memory.set";
+                    if (setting) {
+                        duint regionSize = 0U;
+                        const duint regionBase = DbgMemFindBaseAddr(address, &regionSize);
+                        if (!MemoryRangeContained(address, parsed->breakpointSize, regionBase,
+                                                  regionSize)) {
+                            return ErrorResponse(
+                                *parsed, "INVALID_ARGUMENT",
+                                "memory breakpoint range must fit in one current memory region",
+                                false, false);
+                        }
+                    }
+                    BRIDGEBP before{};
+                    const bool beforePresent =
+                        functions->GetBridgeBp(bp_memory, address, &before);
+                    if (setting) {
+                        if (beforePresent) {
+                            return ErrorResponse(*parsed, "ALREADY_EXISTS",
+                                                 "a memory breakpoint already exists at this address",
+                                                 false, false);
+                        }
+                    } else {
+                        if (!beforePresent) {
+                            return ErrorResponse(*parsed, "NOT_FOUND",
+                                                 "no memory breakpoint exists at this address",
+                                                 false, false);
+                        }
+                        const duint observedSize = functions->MemBpSize(address);
+                        if (!MemoryBreakpointMatches(before, *access, parsed->breakpointSize,
+                                                     observedSize, false)) {
+                            return ErrorResponse(*parsed, "CONFLICT",
+                                                 "memory breakpoint does not match access and size",
+                                                 false, false);
+                        }
+                    }
+                    std::string command;
+                    if (setting) {
+                        command = "bpmrange " + HexValue(address) + ", " +
+                                  HexValue(static_cast<duint>(parsed->breakpointSize)) + ", ";
+                        command.push_back(MemoryAccessCommand(*access));
+                    } else {
+                        command = "bpmc " + HexValue(address);
+                    }
+                    if (!DbgCmdExec(command.c_str())) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected the operation", true,
+                                             false);
+                    }
+                    bool observed = false;
+                    while (pluginState_.load() == PluginState::ready &&
+                           std::chrono::steady_clock::now() < requestDeadline) {
+                        BRIDGEBP current{};
+                        const bool present =
+                            functions->GetBridgeBp(bp_memory, address, &current);
+                        if (setting && present &&
+                            MemoryBreakpointMatches(current, *access, parsed->breakpointSize,
+                                                    functions->MemBpSize(address), true)) {
+                            observed = true;
+                            break;
+                        }
+                        if (!setting && !present) {
+                            observed = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    if (!observed || !PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(
+                            *parsed, "TIMEOUT",
+                            "memory breakpoint outcome could not be exactly confirmed", false,
+                            true);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(resolvedGeneration) +
+                           ",\"status\":\"ok\",\"result\":{\"address\":" +
+                           JsonString(HexValue(address)) + ",\"location\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"type\":\"memory\",\"access\":" +
+                           JsonString(MemoryAccessName(*access)) + ",\"size\":" +
+                           std::to_string(parsed->breakpointSize) + ",\"present\":" +
                            (setting ? "true" : "false") + "}}";
                 }
                 if (parsed->method == "expression.evaluate") {
@@ -2995,11 +3252,35 @@ void Runtime::Worker() noexcept {
                         case bp_exception: type = "exception"; break;
                         case bp_none: break;
                         }
+                        std::string typedFields;
+                        if (breakpoint.type == bp_hardware) {
+                            const std::size_t size = HardwareSizeFromNative(breakpoint.hwSize);
+                            typedFields = ",\"access\":" +
+                                          JsonString(HardwareAccessNameFromNative(
+                                              breakpoint.typeEx)) +
+                                          ",\"size\":" +
+                                          (size == 0U ? std::string("null")
+                                                      : std::to_string(size)) +
+                                          ",\"slot\":" + std::to_string(breakpoint.slot);
+                        } else if (breakpoint.type == bp_memory) {
+                            const DBGFUNCTIONS* functions = DbgFunctions();
+                            const duint size =
+                                functions != nullptr && functions->MemBpSize != nullptr
+                                    ? functions->MemBpSize(breakpoint.addr)
+                                    : 0U;
+                            typedFields = ",\"access\":" +
+                                          JsonString(MemoryAccessNameFromNative(
+                                              breakpoint.typeEx)) +
+                                          ",\"size\":" +
+                                          (size == 0U ? std::string("null")
+                                                      : std::to_string(size));
+                        }
                         items += "{\"address\":" + JsonString(HexValue(breakpoint.addr)) +
                                  ",\"type\":" + JsonString(type) + ",\"enabled\":" +
                                  (breakpoint.enabled ? "true" : "false") + ",\"active\":" +
                                  (breakpoint.active ? "true" : "false") +
-                                 ",\"hit_count\":" + std::to_string(breakpoint.hitCount) + "}";
+                                 ",\"hit_count\":" + std::to_string(breakpoint.hitCount) +
+                                 typedFields + "}";
                     }
                     items += "]";
                     const std::string next = end < count

@@ -44,6 +44,9 @@ operations. This wire addition advances the backend package and managed skill to
 ### Hardware breakpoint contract
 
 - `access` is exactly `execute`, `write`, or `read_write`.
+- Setup at transient `process_created` or `system_breakpoint` startup pauses is
+  rejected. x64dbg can reset debug registers while leaving those pauses, so the
+  tool requires a later callback-confirmed pause whose debug thread is stable.
 - `size` is 1, 2, or 4 on x32dbg and 1, 2, 4, or 8 on x64dbg. Execute
   breakpoints require size 1. Data breakpoint addresses must be naturally
   aligned to their size.

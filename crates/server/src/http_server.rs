@@ -568,10 +568,20 @@ mod tests {
         let value =
             mcp_request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#).await;
         let tools = value["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 30);
+        assert_eq!(tools.len(), 34);
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.state"));
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.snapshot"));
         assert!(tools.iter().any(|tool| tool["name"] == "strings.search"));
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "breakpoints.hardware.set")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "breakpoints.memory.remove")
+        );
         assert!(
             tools
                 .iter()

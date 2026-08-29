@@ -180,9 +180,13 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `memory.map` | read | paused | Paginated regions, at most 256 per page; optional module/committed/executable/compact filters |
 | `modules.list` | read | paused | Paginated loaded modules, at most 256 per page |
 | `threads.list` | read | paused | Paginated threads, at most 256 per page |
-| `breakpoints.list` | read | paused/running | Paginated breakpoint snapshot |
+| `breakpoints.list` | read | paused/running | Paginated snapshot with typed hardware/memory fields |
 | `breakpoints.set` | mutate | paused | Create software breakpoint with explicit address |
-| `breakpoints.remove` | mutate | paused | Remove backend-observed breakpoint by address/type |
+| `breakpoints.remove` | mutate | paused | Remove a software breakpoint by explicit address |
+| `breakpoints.hardware.set` | mutate | actionable pause | Exact execute/write/read-write mode, architecture size/alignment, four-slot preflight, and typed read-back |
+| `breakpoints.hardware.remove` | mutate | actionable pause | Remove only an exact address/access/size match |
+| `breakpoints.memory.set` | mutate | paused | Exact 1-65536 byte single-region guard range and access mode with typed read-back |
+| `breakpoints.memory.remove` | mutate | paused | Remove only an exact address/access/size match |
 | `disassembly.read` | read | paused | At most 256 decoded instructions from an address |
 | `expression.evaluate` | read | paused | Evaluate x64dbg expression; no command execution |
 | `symbols.search` | read | paused | Search up to 65,536 retained symbols with bounded, filter-bound pagination |

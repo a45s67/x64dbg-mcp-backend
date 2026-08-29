@@ -60,7 +60,7 @@ not mutated anything.
 | `memory.map` | `DbgMemMap`, optional `Script::Module::GetList` | paused | reject native count above 65,536; max 256 filtered items; filter-bound cursor; all Bridge lists released |
 | `modules.list` | `Script::Module::GetList` | paused | validates `ListInfo`; `BridgeFree(list.data)` |
 | `threads.list` | `DbgGetThreadList` | paused | max 256 returned items; `BridgeFree(list.list)` |
-| `breakpoints.list` | `DbgGetBpList` | paused/running | max 256 returned items; `BridgeFree(map.bp)` |
+| `breakpoints.list` | `DbgGetBpList`, `MemBpSize` | paused/running | max 256 returned items; `BridgeFree(map.bp)`; typed hardware access/size/slot and memory access/size |
 | `disassembly.read` | `DbgDisasmAt` | paused | max 256 instructions; size must be 1-15 |
 | `expression.evaluate` | `DbgFunctions()->ValFromString` | paused | max 1024-byte expression; no command execution |
 | pause/resume/step-in/step-over/stop | `DbgCmdExec` | operation-specific | fixed command; callback and generation confirmation |
@@ -68,6 +68,8 @@ not mutated anything.
 | `registers.write` | `Script::Register::Set`, `DbgGetRegDumpEx` | paused | one allowlisted full-width core register; before/after snapshots, exact read-back, and generation recheck; no batch |
 | `memory.write` | `DbgMemWrite`, `DbgMemRead` | paused | max 4 KiB; read-back verification |
 | breakpoint set/remove | `DbgCmdExec`, `DbgGetBpxTypeAt` | paused | validated address only; bounded observation loop |
+| typed hardware breakpoint set/remove | fixed `bphws`/`bphwc`, `GetBridgeBp`, `DbgGetBpList` | actionable pause | enum-only command composition; x86/x64 size/alignment; four enabled slots; exact access/size/slot read-back; shape-matched remove |
+| typed memory breakpoint set/remove | fixed `bpmrange`/`bpmc`, `DbgMemFindBaseAddr`, `GetBridgeBp`, `MemBpSize` | paused | 1-65536 bytes in one region; exact access/size read-back; shape-matched remove |
 | `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; ignores transient process-created pause and confirms a later actionable callback |
 | `debuggee.attach` | `DbgCmdExec` (`attach 0x<pid>`) | absent | rejects debugger/sidecar PIDs; matching pre-attach `CB_ATTACH` PID, then a newer paused callback and current PID; no enumeration or process handle retained |
 | `debuggee.detach` | `DbgCmdExec` (`detach`) | attached and paused/running | matching `CB_DETACH`, then newer `CB_STOPDEBUG`; preserves the externally owned process; generic stop is rejected |

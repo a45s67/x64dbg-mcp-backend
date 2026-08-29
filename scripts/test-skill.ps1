@@ -50,12 +50,12 @@ $published = @(
     'breakpoints.memory.set', 'breakpoints.memory.remove',
     'assembly.preview', 'assembly.patch', 'patches.restore', 'patches.list',
     'disassembly.read', 'expression.evaluate', 'symbols.search',
-    'functions.list', 'functions.at', 'callstack.read', 'symbols.resolve',
+    'functions.list', 'functions.at', 'callstack.read', 'symbols.resolve', 'imports.list', 'exports.list',
     'strings.search', 'references.to'
 )
 $mentioned = [regex]::Matches(
     $combined,
-    '(?<![a-z_])(?:debugger|debuggee|registers|address|memory|modules|threads|callstack|breakpoints|assembly|patches|disassembly|expression|symbols|functions|strings|references|analysis)(?:\.[a-z_]+)+'
+    '(?<![a-z_])(?:debugger|debuggee|registers|address|memory|modules|threads|callstack|breakpoints|assembly|patches|disassembly|expression|symbols|functions|imports|exports|strings|references|analysis)(?:\.[a-z_]+)+'
 ) | ForEach-Object Value | Sort-Object -Unique
 foreach ($tool in $mentioned) {
     Assert-Skill ($tool -in $published) "skill references unpublished tool $tool"

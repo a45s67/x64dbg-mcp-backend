@@ -204,7 +204,8 @@ bool IsPageMethod(const std::string_view method) {
 
 bool IsDiscoveryMethod(const std::string_view method) {
     return method == "symbols.search" || method == "functions.list" ||
-           method == "strings.search" || method == "references.to";
+           method == "strings.search" || method == "references.to" ||
+           method == "imports.list" || method == "exports.list";
 }
 
 std::uint64_t DiscoveryFingerprint(const std::string_view method,
@@ -825,8 +826,10 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             moduleFilter.assign(json_string_value(module), json_string_length(module));
         }
         if (queryValue != nullptr) {
+            const std::size_t maxQueryBytes =
+                (methodValue == "imports.list" || methodValue == "exports.list") ? 128U : 256U;
             if (!json_is_string(queryValue) || json_string_length(queryValue) == 0U ||
-                json_string_length(queryValue) > 256U) return std::nullopt;
+                json_string_length(queryValue) > maxQueryBytes) return std::nullopt;
             const std::string_view text(json_string_value(queryValue),
                                         json_string_length(queryValue));
             if (std::any_of(text.begin(), text.end(), [](const char character) {
@@ -3570,7 +3573,8 @@ void Runtime::Worker() noexcept {
                            std::to_string(*snapshot) + "}}";
                 }
                 if (parsed->method == "symbols.search" ||
-                    parsed->method == "functions.list") {
+                    parsed->method == "functions.list" ||
+                    parsed->method == "imports.list" || parsed->method == "exports.list") {
                     const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
                     if (!snapshot || !DbgIsDebugging()) {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
@@ -3589,6 +3593,247 @@ void Runtime::Worker() noexcept {
                     if (!module) {
                         return ErrorResponse(*parsed, "INVALID_ARGUMENT",
                                              "module is missing or ambiguous", false, false);
+                    }
+                    if (parsed->method == "imports.list" ||
+                        parsed->method == "exports.list") {
+                        Script::Module::ModuleInfo nativeModule{};
+                        if (!Script::Module::InfoFromAddr(module->base, &nativeModule) ||
+                            nativeModule.base != module->base || nativeModule.size != module->size) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "module changed during linkage read", true,
+                                                 false);
+                        }
+                        const auto fixedString = [](const char* value,
+                                                    const std::size_t capacity)
+                            -> std::optional<std::string_view> {
+                            const std::size_t length = strnlen_s(value, capacity);
+                            if (length == capacity) return std::nullopt;
+                            const std::string_view text(value, length);
+                            return IsValidUtf8(text) ? std::optional<std::string_view>(text)
+                                                     : std::nullopt;
+                        };
+                        if (parsed->method == "imports.list") {
+                            ListInfo list{};
+                            if (!Script::Module::GetImports(&nativeModule, &list)) {
+                                return ErrorResponse(*parsed, "INTERNAL",
+                                                     "module imports are unavailable", true,
+                                                     false);
+                            }
+                            struct ImportGuard {
+                                void* p;
+                                ~ImportGuard() { if (p) BridgeFree(p); }
+                            } guard{list.data};
+                            if (list.count < 0 || list.count > 65536 ||
+                                (list.count > 0 && list.data == nullptr) ||
+                                list.size != static_cast<std::size_t>(list.count) *
+                                                 sizeof(Script::Module::ModuleImport)) {
+                                return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                                     "module import list exceeds native bounds",
+                                                     false, false);
+                            }
+                            const auto* values =
+                                static_cast<const Script::Module::ModuleImport*>(list.data);
+                            const std::size_t count = static_cast<std::size_t>(list.count);
+                            if (parsed->cursorIndex > count) {
+                                return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                                     "cursor is invalid", false, false);
+                            }
+                            std::size_t matched = 0U;
+                            for (std::size_t index = 0U; index < count; ++index) {
+                                if ((index & 0xffU) == 0U &&
+                                    std::chrono::steady_clock::now() >= requestDeadline) {
+                                    return ErrorResponse(*parsed, "TIMEOUT",
+                                                         "import filtering exceeded its deadline",
+                                                         true, false);
+                                }
+                                const auto name = fixedString(values[index].name,
+                                                              sizeof(values[index].name));
+                                const auto undecorated = fixedString(
+                                    values[index].undecoratedName,
+                                    sizeof(values[index].undecoratedName));
+                                if (!name || !undecorated) {
+                                    return ErrorResponse(*parsed, "INTERNAL",
+                                                         "module import text is invalid", false,
+                                                         false);
+                                }
+                                if (parsed->query.empty() ||
+                                    Utf8OrdinalContainsIgnoreCase(*name, parsed->query) ||
+                                    Utf8OrdinalContainsIgnoreCase(*undecorated, parsed->query)) {
+                                    ++matched;
+                                }
+                            }
+                            std::string items = "[";
+                            std::size_t index = parsed->cursorIndex;
+                            std::size_t emitted = 0U;
+                            for (; index < count && emitted < parsed->pageLimit; ++index) {
+                                const auto& import = values[index];
+                                const auto name = fixedString(import.name, sizeof(import.name));
+                                const auto undecorated = fixedString(
+                                    import.undecoratedName, sizeof(import.undecoratedName));
+                                if (!name || !undecorated || import.iatRva >= module->size ||
+                                    module->base > (std::numeric_limits<duint>::max)() -
+                                                       import.iatRva ||
+                                    import.iatVa != module->base + import.iatRva) {
+                                    return ErrorResponse(*parsed, "INTERNAL",
+                                                         "module import record is invalid", false,
+                                                         false);
+                                }
+                                if (!parsed->query.empty() &&
+                                    !Utf8OrdinalContainsIgnoreCase(*name, parsed->query) &&
+                                    !Utf8OrdinalContainsIgnoreCase(*undecorated, parsed->query)) {
+                                    continue;
+                                }
+                                duint target = 0U;
+                                const bool readable =
+                                    DbgMemRead(import.iatVa, &target, sizeof(target));
+                                const char* resolution =
+                                    !readable ? "unreadable" : target == 0U ? "unresolved"
+                                                                            : "resolved";
+                                if (emitted++ != 0U) items.push_back(',');
+                                items += "{\"name\":" +
+                                         (name->empty() ? "null" : JsonString(*name)) +
+                                         ",\"undecorated_name\":" +
+                                         (undecorated->empty() ? "null" :
+                                                                 JsonString(*undecorated)) +
+                                         ",\"ordinal\":" +
+                                         (import.ordinal == (std::numeric_limits<duint>::max)()
+                                              ? "null"
+                                              : std::to_string(import.ordinal)) +
+                                         ",\"iat\":" +
+                                         LocationJson(LocationFromModules(import.iatVa, *modules),
+                                                      *snapshot) +
+                                         ",\"resolution\":" + JsonString(resolution) +
+                                         ",\"resolved_target\":" +
+                                         (readable && target != 0U
+                                              ? LocationJson(
+                                                    LocationFromModules(target, *modules), *snapshot)
+                                              : "null") +
+                                         "}";
+                            }
+                            items += "]";
+                            const std::string next =
+                                index < count
+                                    ? JsonString(DiscoveryCursor(*parsed, *snapshot, index))
+                                    : "null";
+                            if (!PausedSnapshotCurrent(*snapshot)) {
+                                return ErrorResponse(*parsed, "BUSY",
+                                                     "debugger changed during import read", true,
+                                                     false);
+                            }
+                            return "{\"request_id\":" + JsonString(parsed->requestId) +
+                                   ",\"state_generation\":" + std::to_string(*snapshot) +
+                                   ",\"status\":\"ok\",\"result\":{\"module\":" +
+                                   JsonString(module->name) + ",\"native_count\":" +
+                                   std::to_string(count) + ",\"matched_count\":" +
+                                   std::to_string(matched) + ",\"items\":" + items +
+                                   ",\"next_cursor\":" + next +
+                                   ",\"completeness\":\"known_only\",\"state_generation\":" +
+                                   std::to_string(*snapshot) + "}}";
+                        }
+
+                        ListInfo list{};
+                        if (!Script::Module::GetExports(&nativeModule, &list)) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "module exports are unavailable", true, false);
+                        }
+                        struct ExportGuard {
+                            void* p;
+                            ~ExportGuard() { if (p) BridgeFree(p); }
+                        } guard{list.data};
+                        if (list.count < 0 || list.count > 65536 ||
+                            (list.count > 0 && list.data == nullptr) ||
+                            list.size != static_cast<std::size_t>(list.count) *
+                                             sizeof(Script::Module::ModuleExport)) {
+                            return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                                 "module export list exceeds native bounds", false,
+                                                 false);
+                        }
+                        const auto* values =
+                            static_cast<const Script::Module::ModuleExport*>(list.data);
+                        const std::size_t count = static_cast<std::size_t>(list.count);
+                        if (parsed->cursorIndex > count) {
+                            return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                                 "cursor is invalid", false, false);
+                        }
+                        std::size_t matched = 0U;
+                        for (std::size_t index = 0U; index < count; ++index) {
+                            if ((index & 0xffU) == 0U &&
+                                std::chrono::steady_clock::now() >= requestDeadline) {
+                                return ErrorResponse(*parsed, "TIMEOUT",
+                                                     "export filtering exceeded its deadline",
+                                                     true, false);
+                            }
+                            const auto name = fixedString(values[index].name,
+                                                          sizeof(values[index].name));
+                            const auto undecorated = fixedString(
+                                values[index].undecoratedName,
+                                sizeof(values[index].undecoratedName));
+                            const auto forward = fixedString(values[index].forwardName,
+                                                             sizeof(values[index].forwardName));
+                            if (!name || !undecorated || !forward) {
+                                return ErrorResponse(*parsed, "INTERNAL",
+                                                     "module export text is invalid", false,
+                                                     false);
+                            }
+                            if (parsed->query.empty() ||
+                                Utf8OrdinalContainsIgnoreCase(*name, parsed->query) ||
+                                Utf8OrdinalContainsIgnoreCase(*undecorated, parsed->query) ||
+                                Utf8OrdinalContainsIgnoreCase(*forward, parsed->query)) ++matched;
+                        }
+                        std::string items = "[";
+                        std::size_t index = parsed->cursorIndex;
+                        std::size_t emitted = 0U;
+                        for (; index < count && emitted < parsed->pageLimit; ++index) {
+                            const auto& entry = values[index];
+                            const auto name = fixedString(entry.name, sizeof(entry.name));
+                            const auto undecorated = fixedString(entry.undecoratedName,
+                                                                 sizeof(entry.undecoratedName));
+                            const auto forward = fixedString(entry.forwardName,
+                                                             sizeof(entry.forwardName));
+                            if (!name || !undecorated || !forward || entry.rva >= module->size ||
+                                module->base > (std::numeric_limits<duint>::max)() - entry.rva ||
+                                entry.va != module->base + entry.rva ||
+                                (entry.forwarded && forward->empty())) {
+                                return ErrorResponse(*parsed, "INTERNAL",
+                                                     "module export record is invalid", false,
+                                                     false);
+                            }
+                            if (!parsed->query.empty() &&
+                                !Utf8OrdinalContainsIgnoreCase(*name, parsed->query) &&
+                                !Utf8OrdinalContainsIgnoreCase(*undecorated, parsed->query) &&
+                                !Utf8OrdinalContainsIgnoreCase(*forward, parsed->query)) continue;
+                            if (emitted++ != 0U) items.push_back(',');
+                            items += "{\"name\":" +
+                                     (name->empty() ? "null" : JsonString(*name)) +
+                                     ",\"undecorated_name\":" +
+                                     (undecorated->empty() ? "null" : JsonString(*undecorated)) +
+                                     ",\"ordinal\":" + std::to_string(entry.ordinal) +
+                                     ",\"location\":" +
+                                     LocationJson(LocationFromModules(entry.va, *modules),
+                                                  *snapshot) +
+                                     ",\"forwarded\":" +
+                                     (entry.forwarded ? "true" : "false") +
+                                     ",\"forward_name\":" +
+                                     (entry.forwarded ? JsonString(*forward) : "null") + "}";
+                        }
+                        items += "]";
+                        const std::string next =
+                            index < count ? JsonString(DiscoveryCursor(*parsed, *snapshot, index))
+                                          : "null";
+                        if (!PausedSnapshotCurrent(*snapshot)) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "debugger changed during export read", true,
+                                                 false);
+                        }
+                        return "{\"request_id\":" + JsonString(parsed->requestId) +
+                               ",\"state_generation\":" + std::to_string(*snapshot) +
+                               ",\"status\":\"ok\",\"result\":{\"module\":" +
+                               JsonString(module->name) + ",\"native_count\":" +
+                               std::to_string(count) + ",\"matched_count\":" +
+                               std::to_string(matched) + ",\"items\":" + items +
+                               ",\"next_cursor\":" + next +
+                               ",\"completeness\":\"known_only\",\"state_generation\":" +
+                               std::to_string(*snapshot) + "}}";
                     }
                     if (parsed->method == "symbols.search") {
                         ListInfo list{};

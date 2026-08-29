@@ -976,3 +976,21 @@ sidecar hashes exactly match the package. The archive SHA-256 is
 `6c87bc16e352908a3d74d80fb9864cc5f8ab3963fdb024092d5003d4bc9b8d6a`.
 Codex MCP registration retains static Authorization headers and the managed
 skill now requires backend 0.10.0.
+
+## 2026-08-30 bounded import/export qualification
+
+ADR 0029 admits module-scoped `imports.list` and `exports.list` because the
+pinned SDK records add IAT locations, import ordinals, export ordinals, and
+forwarders that generic symbol search cannot provide. The tools cap native
+lists at 65,536 records, page at 256 items, bind literal filters and debugger
+generation into opaque cursors, validate fixed UTF-8 fields and VA/RVA pairs,
+and release every Bridge allocation on the serialized executor. Import provider
+DLLs are reported only from current readable IAT targets; the SDK does not expose
+the original descriptor library, so the backend does not invent it.
+
+Isolated x64 instance `e4ddbf7d-4c6e-46ec-95c7-e6552d767c49` returned 72
+fixture imports; isolated x32 instance `81a98d2e-b8e6-4f50-8214-79b944762c46`
+returned 69. Both followed a one-item filter-bound cursor, resolved the `Sleep`
+IAT record, returned four `mcp_fixture` exports, and preserved
+`AcquireSRWLockExclusive` as forwarder `NTDLL.RtlAcquireSRWLockExclusive`.
+Both completed all pre-existing lifecycle/mutation checks and clean shutdown.

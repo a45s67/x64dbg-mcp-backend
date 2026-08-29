@@ -83,6 +83,8 @@ not mutated anything.
 | `symbols.resolve` | `Script::Symbol::GetList`, `Script::Module::GetList` | paused | exact case-sensitive name or exact runtime address; max 65,536 records scanned and 32 matches returned; both lists released; missing and ambiguous are explicit success states |
 | `functions.list` | `Script::Function::GetList`, `Script::Symbol::GetList` | paused | both lists released with `BridgeFree`; each rejects count above 65,536; bounded name join and generation recheck |
 | `functions.at` | `Script::Function::GetInfo`, `Script::Module::GetList` | paused | one known-only containing marker; validates module ownership and inclusive range; module list released; never queues analysis |
+| `imports.list` | `Script::Module::GetImports`, `DbgMemRead`, `Script::Module::GetList` | paused | exact loaded module; max 65,536 owned records; max 256 architecture-width IAT reads/page; fixed UTF-8 fields and IAT VA/RVA validated; both Bridge lists released |
+| `exports.list` | `Script::Module::GetExports`, `Script::Module::GetList` | paused | exact loaded module; max 65,536 owned records; fixed UTF-8 fields and VA/RVA validated; ordinal and forwarder metadata copied; both Bridge lists released |
 | `strings.search` | `DbgMemRead`, Windows NLS literal span | paused | caller-owned 64 KiB chunks, 4 KiB fallback, at most 1 MiB/request; deadline/generation checks, cursor-bound `context_bytes`, and UTF-8-safe before/match/after |
 | `references.to` | `DbgGetXrefCountAt`, `DbgXrefGet` | paused | `BridgeFree(info.references)`; rejects count above 65,536; inbound known-only references |
 

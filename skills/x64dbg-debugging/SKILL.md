@@ -71,6 +71,11 @@ it does not analyze missing code. Use `callstack.read` for a bounded native unwi
 completeness label. Use `patches.list` before restore or execution when tracked patch state matters;
 repeat exact filters for its snapshot-bound cursor and restart after `STALE_CURSOR`.
 
+Use `imports.list` for module-scoped IAT slots and their current runtime targets; a resolved
+provider is an observation, not the original PE descriptor DLL. Use `exports.list` for ordinals
+and forwarder metadata. Both are bounded known-only views and never reconstruct imports, follow a
+forwarder, download symbols, or analyze a module.
+
 For state-specific sequences, breakpoint loops, compact inspection, and Go triage, read
 [references/recipes.md](references/recipes.md). For connection, authentication, stale cursor,
 timeout, and recovery decisions, read

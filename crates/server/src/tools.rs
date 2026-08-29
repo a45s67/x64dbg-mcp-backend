@@ -330,6 +330,12 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             optional_query(object)?;
             discovery_page(object)
         }
+        "imports.list" | "exports.list" => {
+            exact_keys(object, &["module"], &["query", "limit", "cursor"])?;
+            validate_module_name(object, "module")?;
+            optional_query_with_limit(object, 128)?;
+            discovery_page(object)
+        }
         "strings.search" => {
             exact_keys(
                 object,
@@ -505,11 +511,18 @@ fn validate_module_value(value: &Value, field: &'static str) -> Result<(), Valid
 }
 
 fn optional_query(object: &serde_json::Map<String, Value>) -> Result<(), ValidationError> {
+    optional_query_with_limit(object, 256)
+}
+
+fn optional_query_with_limit(
+    object: &serde_json::Map<String, Value>,
+    max_bytes: usize,
+) -> Result<(), ValidationError> {
     if let Some(value) = object.get("query") {
         let query = value
             .as_str()
-            .filter(|query| !query.is_empty() && query.len() <= 256)
-            .ok_or(invalid("query", "must be 1 to 256 UTF-8 bytes"))?;
+            .filter(|query| !query.is_empty() && query.len() <= max_bytes)
+            .ok_or(invalid("query", "must be a bounded UTF-8 string"))?;
         if query.chars().any(char::is_control) {
             return Err(invalid("query", "must not contain control characters"));
         }
@@ -1114,6 +1127,16 @@ fn build_catalog() -> Vec<Value> {
             object(vec![("address", address_ref())], vec!["address"]),
         ),
         read_tool(
+            "imports.list",
+            "List one loaded module's bounded import records and current IAT targets without reconstructing imports or evaluating names.",
+            linkage_schema(),
+        ),
+        read_tool(
+            "exports.list",
+            "List one loaded module's bounded exports, ordinals, and forwarder metadata without triggering symbol work.",
+            linkage_schema(),
+        ),
+        read_tool(
             "strings.search",
             "Incrementally scan at most 1 MiB of one loaded module for bounded string candidates. Queried results default to compact UTF-8-safe match context. Results are known-only and do not trigger analysis.",
             object(
@@ -1179,6 +1202,27 @@ fn discovery_schema() -> Value {
             (
                 "query",
                 json!({"type":"string","minLength":1,"maxLength":256}),
+            ),
+            (
+                "limit",
+                json!({"type":"integer","minimum":1,"maximum":256,"default":100}),
+            ),
+            (
+                "cursor",
+                json!({"type":"string","minLength":1,"maxLength":512}),
+            ),
+        ],
+        vec!["module"],
+    )
+}
+
+fn linkage_schema() -> Value {
+    object(
+        vec![
+            ("module", module_name_schema()),
+            (
+                "query",
+                json!({"type":"string","minLength":1,"maxLength":128}),
             ),
             (
                 "limit",
@@ -1397,7 +1441,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 41);
+        assert_eq!(catalog().len(), 43);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -1671,6 +1715,20 @@ mod tests {
                     "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
                     "process_id":4_294_967_296_u64
                 })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "imports.list",
+                &json!({"module":"fixture.exe","query":"CreateFile","limit":1})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "exports.list",
+                &json!({"module":"fixture.exe","query":"x".repeat(129)})
             )
             .is_err()
         );

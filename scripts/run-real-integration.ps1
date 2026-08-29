@@ -263,6 +263,61 @@ try {
         $actualModuleNames = @($modules.items | ForEach-Object { $_.name }) -join ', '
         throw "The launched fixture '$fixtureName' was not present in modules.list; actual: $actualModuleNames"
     }
+    $importPageOne = Invoke-Tool 'imports.list' @{
+        module = $fixtureModule.name; limit = 1
+    } 206
+    if ($importPageOne.native_count -lt 1 -or $importPageOne.matched_count -lt 1 -or
+        @($importPageOne.items).Count -ne 1 -or !$importPageOne.next_cursor -or
+        $importPageOne.state_generation -ne $state.state_generation) {
+        throw 'Bounded import pagination did not return one generation-consistent item.'
+    }
+    $importPageTwo = Invoke-Tool 'imports.list' @{
+        module = $fixtureModule.name; limit = 1; cursor = $importPageOne.next_cursor
+    } 207
+    if (@($importPageTwo.items).Count -gt 1 -or
+        $importPageTwo.native_count -ne $importPageOne.native_count) {
+        throw 'Import cursor did not preserve its native snapshot shape.'
+    }
+    $importCursorMismatch = Invoke-Mcp 'tools/call' @{
+        name = 'imports.list'; arguments = @{
+            module = $fixtureModule.name; query = 'Sleep'; limit = 1
+            cursor = $importPageOne.next_cursor
+        }
+    } 208
+    if (!$importCursorMismatch.isError -or
+        $importCursorMismatch.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Import cursor was not bound to its literal filter.'
+    }
+    $sleepImports = Invoke-Tool 'imports.list' @{
+        module = $fixtureModule.name; query = 'Sleep'; limit = 16
+    } 209
+    $sleepImport = @($sleepImports.items | Where-Object {
+        $_.name -and $_.name.IndexOf('Sleep', [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })[0]
+    if (!$sleepImport -or !$sleepImport.iat.address -or
+        $sleepImport.resolution -notin @('resolved', 'unresolved', 'unreadable')) {
+        throw 'Module import metadata did not expose the fixture Sleep IAT record.'
+    }
+    $fixtureExports = Invoke-Tool 'exports.list' @{
+        module = $fixtureModule.name; query = 'mcp_fixture'; limit = 16
+    } 210
+    if ($fixtureExports.matched_count -lt 3 -or @($fixtureExports.items).Count -lt 3 -or
+        @($fixtureExports.items | Where-Object { !$_.location.address }).Count -ne 0) {
+        throw 'Module export metadata did not expose the fixture exports.'
+    }
+    $kernelModule = @($modules.items | Where-Object { $_.name -ieq 'kernel32.dll' })[0]
+    if (!$kernelModule) {
+        throw 'The loaded kernel32 module was unavailable for forwarder qualification.'
+    }
+    $forwardedExports = Invoke-Tool 'exports.list' @{
+        module = $kernelModule.name; query = 'AcquireSRWLockExclusive'; limit = 16
+    } 211
+    $forwardedExport = @($forwardedExports.items | Where-Object {
+        $_.forwarded -and $_.forward_name
+    })[0]
+    if (!$forwardedExport) {
+        throw 'Forwarded export metadata was not preserved by exports.list.'
+    }
     $moduleBase = [Convert]::ToUInt64($fixtureModule.base.Substring(2), 16)
     $moduleEntry = [Convert]::ToUInt64($fixtureModule.entry.Substring(2), 16)
     $entryRva = '0x{0:x}' -f ($moduleEntry - $moduleBase)
@@ -1061,6 +1116,12 @@ try {
         memory_bytes = $memory.bytes_read
         instructions = $disassembly.items.Count
         modules = $modules.items.Count
+        imports = $importPageOne.native_count
+        import_pagination_verified = $true
+        import_cursor_filter_bound = $true
+        sleep_import_resolution = $sleepImport.resolution
+        fixture_exports = $fixtureExports.matched_count
+        forwarded_export = $forwardedExport.forward_name
         threads = $threads.items.Count
         memory_regions = $memoryMap.items.Count
         compact_snapshot_instructions = @($compactSnapshot.disassembly).Count

@@ -1037,3 +1037,17 @@ one-item cursor, rejected reuse with a changed `.text` filter, preserved the
 paused generation, and proved that the relocated fixture entry and exported
 analysis target were inside the SDK-reported `.text` span. Both then completed
 the complete existing event/analysis/mutation workflow and clean shutdown.
+
+The 0.11.0 package gate then passed installer, managed-skill, static-header Codex
+registration, Rust, Clippy, seven supervised-shutdown, and both 12-test native
+matrices. The offline verifier accepted 53 manifest files. Installed dp32, dp64,
+and sidecar hashes exactly match the package, and both Codex entries retain their
+config-file token as a static Authorization header. Installed Flare-On instance
+`f141eb23-7ea1-4300-8870-461c1d4542ba` resolved
+`CHECKSUM.EXE+0xa78a0` to `0x9b78a0` from relocated base `0x910000`, retained
+generation 27, returned three native frames, verified the known function through
+`0x9b806b`, restored its four-byte patch and register, exercised typed hardware
+and memory breakpoints, stopped the sample, and closed the debugger-owned
+sidecar. The backend now publishes 45 tools and the managed skill requires
+0.11.0. The archive SHA-256 is
+`0f27c54fe50e6a994040745d83dad367139be5ce3b46e8f2151c7724b7d82fb0`.

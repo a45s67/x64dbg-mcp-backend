@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.10.0"
-  minimum-backend-version: "0.10.0"
+  version: "0.11.0"
+  minimum-backend-version: "0.11.0"
   mcp-protocol: "2025-06-18"
 ---
 

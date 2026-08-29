@@ -51,6 +51,11 @@ Use module-scoped literal filters and modest page limits:
   the exact same context setting when necessary;
 - `references.to` for inbound references already in the analysis database.
 
+If a known concrete address is missing from function discovery and analysis is explicitly
+authorized, call `analysis.function` once with module/RVA and a fresh operation UUID. Then query
+`functions.list` again. Do not treat empty discovery as permission to analyze, do not request
+GUI-selection-based whole-module analysis, and preserve the operation ID after an ambiguous result.
+
 Cursors bind the method, exact filters, module spelling, and debugger generation. Reuse the exact
 arguments on the next page. Restart discovery after `STALE_CURSOR`; do not merge pages from
 different generations.

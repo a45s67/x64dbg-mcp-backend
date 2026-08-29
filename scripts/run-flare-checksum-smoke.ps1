@@ -187,6 +187,37 @@ try {
     $mainFunctions = Invoke-Tool 'functions.list' @{
         module = $moduleName; query = 'main.main'; limit = 32
     } 51
+    $analysisOperation = [Guid]::NewGuid().ToString()
+    $mainAnalysis = Invoke-Tool 'analysis.function' @{
+        operation_id = $analysisOperation; address = $moduleRef
+    } 53
+    $mainAnalysisReplay = Invoke-Tool 'analysis.function' @{
+        operation_id = $analysisOperation; address = $moduleRef
+    } 54
+    if (($mainAnalysisReplay | ConvertTo-Json -Compress -Depth 12) -ne
+        ($mainAnalysis | ConvertTo-Json -Compress -Depth 12) -or
+        $mainAnalysis.state_generation -ne $mainPause.state_generation -or
+        $mainAnalysis.requested_location.address -ne $resolved.address) {
+        throw 'Installed explicit analysis was not generation-consistent or replay-safe.'
+    }
+    $mainAnalysisFound = $false
+    $analysisCursor = $null
+    for ($analysisPage = 0; $analysisPage -lt 8; $analysisPage++) {
+        $analysisArguments = @{ module = $moduleName; limit = 256 }
+        if ($analysisCursor) { $analysisArguments.cursor = $analysisCursor }
+        $analysisFunctions = Invoke-Tool 'functions.list' $analysisArguments (80 + $analysisPage)
+        if (@($analysisFunctions.items | Where-Object {
+            $_.start.address -eq $mainAnalysis.function.start.address
+        }).Count -ne 0) {
+            $mainAnalysisFound = $true
+            break
+        }
+        $analysisCursor = $analysisFunctions.next_cursor
+        if (!$analysisCursor) { break }
+    }
+    if (!$mainAnalysisFound) {
+        throw 'Installed explicit analysis marker was not visible through functions.list.'
+    }
     $mainReferences = Invoke-Tool 'references.to' @{ address = $moduleRef; limit = 32 } 52
     $keyString = Find-InstalledString $moduleName 'FlareOn2024' 60
     $promptString = Find-InstalledString $moduleName 'Check sum: %d + %d = ' 70
@@ -228,6 +259,12 @@ try {
         filtered_executable_regions = @($filteredMap.items).Count
         main_symbols = @($mainSymbols.items).Count
         main_functions = @($mainFunctions.items).Count
+        analysis_function_start = $mainAnalysis.function.start.address
+        analysis_function_end = $mainAnalysis.function.end.address
+        analysis_already_known = $mainAnalysis.already_known
+        analysis_generation_unchanged = $true
+        analysis_replay_equal = $true
+        analysis_visible_in_discovery = $mainAnalysisFound
         inbound_main_references = @($mainReferences.items).Count
         key_string = $keyString.Item.text
         key_string_match = $keyString.Item.match

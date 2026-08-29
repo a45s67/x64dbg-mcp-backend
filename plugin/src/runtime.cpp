@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -33,6 +34,7 @@ namespace mcp {
 namespace {
 constexpr DWORD kMaxFrameBytes = 1024U * 1024U;
 constexpr DWORD kShutdownMs = 5000U;
+constexpr duint kMaxAnalysisModuleBytes = 128U * 1024U * 1024U;
 #ifdef _WIN64
 constexpr wchar_t kBackend[] = L"x64dbg";
 constexpr char kBackendUtf8[] = "x64dbg";
@@ -155,7 +157,7 @@ bool IsMutation(const std::string_view method) {
            method == "debugger.step_into" || method == "debugger.step_over" ||
            method == "debugger.stop" || method == "memory.write" ||
            method == "breakpoints.set" || method == "breakpoints.remove" ||
-           method == "debuggee.launch";
+           method == "debuggee.launch" || method == "analysis.function";
 }
 
 bool IsPageMethod(const std::string_view method) {
@@ -494,6 +496,12 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         expression.assign(expressionValue);
     } else if (methodValue == "address.resolve") {
         if (json_object_size(payload) != 1U ||
+            !ParseAddressReference(json_object_get(payload, "address"), addressValue)) {
+            return std::nullopt;
+        }
+    } else if (methodValue == "analysis.function") {
+        if (json_object_size(payload) != 2U ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
             !ParseAddressReference(json_object_get(payload, "address"), addressValue)) {
             return std::nullopt;
         }
@@ -1142,7 +1150,7 @@ bool Runtime::Start() {
 #endif
     instanceMutex_ = CreateMutexW(nullptr, FALSE, mutexName.c_str());
     if (instanceMutex_ == nullptr || GetLastError() == ERROR_ALREADY_EXISTS || !executor_.Start() ||
-        !CreateEndpoint() || !LaunchSidecar()) {
+        !commandFence_.Start() || !CreateEndpoint() || !LaunchSidecar()) {
         Stop();
         return false;
     }
@@ -1492,6 +1500,7 @@ void Runtime::Worker() noexcept {
                            ",\"disassembly\":" + disassembly + "}}";
                 }
                 const bool addressMethod = parsed->method == "address.resolve" ||
+                                           parsed->method == "analysis.function" ||
                                            parsed->method == "memory.read" ||
                                            parsed->method == "memory.write" ||
                                            parsed->method == "breakpoints.set" ||
@@ -1529,6 +1538,116 @@ void Runtime::Worker() noexcept {
                            ",\"state_generation\":" + std::to_string(resolvedGeneration) +
                            ",\"status\":\"ok\",\"result\":" +
                            LocationJson(*resolvedLocation, resolvedGeneration) + "}";
+                }
+                if (parsed->method == "analysis.function") {
+                    if (!resolvedLocation->module || !resolvedLocation->moduleBase ||
+                        !resolvedLocation->rva) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "analysis address must resolve inside one loaded module",
+                                             false, false);
+                    }
+                    const auto modules = CaptureModuleRecords();
+                    const auto module = modules ? UniqueModule(*modules, *resolvedLocation->module)
+                                                : std::optional<ModuleRecord>{};
+                    if (!module) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "loaded module changed during analysis validation",
+                                             true, false);
+                    }
+                    if (module->size == 0U || module->size > kMaxAnalysisModuleBytes) {
+                        return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                             "analysis module exceeds the 128 MiB bound", false,
+                                             false);
+                    }
+                    if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed before analysis submission", true,
+                                             false);
+                    }
+
+                    Script::Function::FunctionInfo beforeInfo{};
+                    const bool alreadyKnown =
+                        Script::Function::GetInfo(resolvedLocation->address, &beforeInfo);
+                    std::uint64_t fenceToken = 0U;
+                    for (int attempt = 0; attempt < 4 && fenceToken == 0U; ++attempt) {
+                        if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&fenceToken),
+                                            static_cast<ULONG>(sizeof(fenceToken)),
+                                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+                            fenceToken = 0U;
+                        }
+                    }
+                    if (fenceToken == 0U || !commandFence_.Arm(fenceToken)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "analysis command fence is unavailable", true, false);
+                    }
+                    const std::string analysisCommand =
+                        "analr " + HexValue(resolvedLocation->address);
+                    if (!DbgCmdExec(analysisCommand.c_str())) {
+                        commandFence_.Cancel(fenceToken);
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected analysis", true,
+                                             false);
+                    }
+                    std::ostringstream fenceText;
+                    fenceText << "x64dbg_mcp_fence_internal " << std::hex
+                              << std::nouppercase << std::setw(16) << std::setfill('0')
+                              << fenceToken;
+                    if (!DbgCmdExec(fenceText.str().c_str())) {
+                        commandFence_.Cancel(fenceToken);
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "analysis was queued but its completion fence was rejected",
+                                             false, true);
+                    }
+                    if (commandFence_.Wait(fenceToken, requestDeadline) !=
+                        CommandFenceWait::completed) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "analysis completion was not command-queue confirmed",
+                                             false, true);
+                    }
+                    if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed while analysis was running", false,
+                                             true);
+                    }
+                    Script::Function::FunctionInfo function{};
+                    if (!Script::Function::GetInfo(resolvedLocation->address, &function)) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "analysis did not produce a function marker", false,
+                                             false);
+                    }
+                    const std::string functionModule(
+                        function.mod, strnlen_s(function.mod, sizeof(function.mod)));
+                    const auto functionOwner = UniqueModule(*modules, functionModule);
+                    if (!functionOwner ||
+                        !Utf8OrdinalEqualsIgnoreCase(functionOwner->name,
+                                                     *resolvedLocation->module) ||
+                        function.rvaStart > function.rvaEnd ||
+                        function.rvaEnd >= functionOwner->size ||
+                        *resolvedLocation->rva < function.rvaStart ||
+                        *resolvedLocation->rva > function.rvaEnd) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "analysis returned an invalid function marker", false,
+                                             false);
+                    }
+                    const auto start = LocationFromModules(
+                        functionOwner->base + function.rvaStart, *modules);
+                    const auto end = LocationFromModules(
+                        functionOwner->base + function.rvaEnd, *modules);
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" +
+                           std::to_string(resolvedGeneration) +
+                           ",\"status\":\"ok\",\"result\":{\"requested_location\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"function\":{\"start\":" +
+                           LocationJson(start, resolvedGeneration) + ",\"end\":" +
+                           LocationJson(end, resolvedGeneration) +
+                           ",\"instruction_count\":" +
+                           std::to_string(function.instructioncount) +
+                           ",\"manual\":" + (function.manual ? "true" : "false") +
+                           "},\"already_known\":" +
+                           (alreadyKnown ? "true" : "false") +
+                           ",\"state_generation\":" +
+                           std::to_string(resolvedGeneration) + "}}";
                 }
                 if (parsed->method == "debuggee.launch") {
                     if (debuggeeState_.load() != DebuggeeState::absent || DbgIsDebugging()) {
@@ -3067,12 +3186,17 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     stateChanged_.notify_all();
 }
 
+bool Runtime::OnCommandFence(const std::uint64_t token) noexcept {
+    return commandFence_.Signal(token);
+}
+
 void Runtime::Stop() noexcept {
     const PluginState previous = pluginState_.exchange(PluginState::draining);
     if (previous == PluginState::stopped) {
         pluginState_.store(PluginState::stopped);
         return;
     }
+    commandFence_.Stop();
     stateChanged_.notify_all();
     CloseHandleValue(nonceWriter_); // stdin EOF asks the child to shut down gracefully.
     if (worker_.joinable()) {

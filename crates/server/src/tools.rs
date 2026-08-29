@@ -154,7 +154,7 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             discovery_page(object)
         }
         "modules.list" | "threads.list" | "breakpoints.list" => page(object),
-        "breakpoints.set" | "breakpoints.remove" => {
+        "analysis.function" | "breakpoints.set" | "breakpoints.remove" => {
             operation(object, &["address"])?;
             validate_address_ref(object, "address")
         }
@@ -512,6 +512,12 @@ fn build_catalog() -> Vec<Value> {
             "address.resolve",
             "Resolve an absolute or module-relative address inside the current paused debugger generation. Returns the canonical runtime address and module/RVA metadata.",
             object(vec![("address", address_ref())], vec!["address"]),
+        ),
+        mutation_tool(
+            "analysis.function",
+            "Explicitly run bounded recursive analysis for one function in a loaded module and wait for command-queue and function-marker confirmation. This never performs GUI-selection-based whole-module analysis.",
+            operation_schema(vec![("address", address_ref())]),
+            false,
         ),
         read_tool(
             "memory.read",
@@ -873,7 +879,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 25);
+        assert_eq!(catalog().len(), 26);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -926,6 +932,16 @@ mod tests {
             validate_arguments(
                 "address.resolve",
                 &json!({"address":{"absolute":"0x140001000"}})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "analysis.function",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "address":{"module":"sample.exe","rva":"0x1000"}
+                })
             )
             .is_ok()
         );

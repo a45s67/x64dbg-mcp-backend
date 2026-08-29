@@ -12,6 +12,7 @@
 #include <optional>
 #include <vector>
 
+#include "command_fence.h"
 #include "debugger_executor.h"
 
 namespace mcp {
@@ -50,6 +51,7 @@ public:
     bool Start();
     void Stop() noexcept;
     void OnDebuggerEvent(int callbackType, void* callbackInfo) noexcept;
+    bool OnCommandFence(std::uint64_t token) noexcept;
     [[nodiscard]] bool IsReady() const noexcept;
 #ifdef MCP_LIFECYCLE_HARNESS
     [[nodiscard]] DWORD SidecarProcessIdForTesting() const noexcept;
@@ -93,6 +95,7 @@ private:
     HANDLE sidecarJob_{nullptr};
     std::thread worker_;
     DebuggerExecutor executor_;
+    CommandFence commandFence_;
     std::mutex stateMutex_;
     std::condition_variable stateChanged_;
     PauseObservation latestPause_;

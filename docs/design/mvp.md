@@ -170,6 +170,7 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `debuggee.launch` | destructive mutation | absent | Canonicalize and load an existing executable, then wait past process creation for an actionable callback pause |
 | `registers.read` | read | paused | Selected registers or bounded complete register set |
 | `address.resolve` | read | paused | Resolve absolute or module/RVA input and return canonical location metadata |
+| `analysis.function` | mutate | paused | Explicitly analyze one addressed function in a module up to 128 MiB; private queue-fence and marker confirmation |
 | `memory.read` | read | paused | Read at most 64 KiB per call; report partial/unreadable ranges |
 | `memory.write` | mutate | paused | Write at most 4 KiB; explicit hex bytes and operation ID |
 | `memory.map` | read | paused | Paginated regions, at most 256 per page; optional module/committed/executable/compact filters |
@@ -186,7 +187,7 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `references.to` | read | paused | Paginate up to 65,536 retained inbound xrefs for an address |
 
 Every mutating tool requires `operation_id` as a canonical lowercase UUID. Arbitrary debugger
-command execution, process launch/attach, file upload/download, scripting, shell
+command execution, arbitrary process attach, file upload/download, scripting, shell
 execution, and unbounded search are intentionally excluded from the MVP. They need
 separate threat-model ADRs.
 

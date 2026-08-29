@@ -667,3 +667,29 @@ all paused reads. With 32 bytes requested on each side, the former long Go strin
 pool previews shrank to 75 bytes for `FlareOn2024` and 85 bytes for
 `Check sum: %d + %d = `; both exact match fields remained visible on page one.
 The debuggee stopped and its owned sidecar exited.
+
+## 2026-08-29 explicit function-analysis follow-up
+
+ADR 0016 rejects x64dbg's GUI-selection-dependent whole-module analysis commands
+as an unstable MCP contract. `analysis.function` instead accepts one structured
+address and operation ID, submits only `analr <validated-address>`, and waits for
+an internally correlated private command fence before checking the resulting
+function marker. The target module is capped at 128 MiB, analysis remains a
+visible mutation, and timeout or fence rejection is never blindly retried.
+
+The new single-slot `CommandFence` owns no thread and its native tests cover
+correlation mismatch, completion, timeout, cancellation, stop wakeup, and restart.
+Rust retained 49 unit/contract tests plus six shutdown tests. Both x32 and x64
+native suites passed eight tests. Fresh isolated debugger trees then analyzed an
+exported fixture target by module/RVA, replayed the same operation ID without a
+second mutation, observed the resulting marker through bounded `functions.list`
+pagination, stopped both sidecars, and left both loopback ports closed.
+
+The final backend and managed skill advance to 0.3.0. After deployment with the
+existing token preserved, `checksum.exe` initially returned no named main
+function. Explicit analysis at `CHECKSUM.EXE+0xa78a0` resolved to `0x4278a0`,
+reported `already_known: false`, installed the inclusive marker
+`0x4278a0..0x42806b`, and made it visible through known-only discovery. The
+analysis left generation 27 unchanged, replayed byte-for-byte under the same
+operation ID, exposed one inbound main reference, and ended with the debuggee
+stopped and no owned sidecar.

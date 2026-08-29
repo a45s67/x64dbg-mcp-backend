@@ -219,6 +219,55 @@ try {
     $functions = Invoke-Tool 'functions.list' @{
         module = $fixtureModule.name.ToUpperInvariant(); limit = 32
     } 61
+    $analysisSymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_analysis_target'
+    })[0]
+    if (!$analysisSymbol -or !$analysisSymbol.location.rva) {
+        throw 'Fixture analysis target export was not available as a structured symbol.'
+    }
+    $analysisRef = @{
+        module = $fixtureModule.name.ToUpperInvariant()
+        rva = $analysisSymbol.location.rva
+    }
+    $analysisOperation = [Guid]::NewGuid().ToString()
+    $analysis = Invoke-Tool 'analysis.function' @{
+        operation_id = $analysisOperation; address = $analysisRef
+    } 72
+    if ($analysis.state_generation -ne $state.state_generation -or
+        $analysis.requested_location.address -ne $analysisSymbol.location.address -or
+        !$analysis.function.start.module -or !$analysis.function.end.module) {
+        throw 'Explicit function analysis omitted generation-consistent structured results.'
+    }
+    $analysisReplay = Invoke-Tool 'analysis.function' @{
+        operation_id = $analysisOperation; address = $analysisRef
+    } 73
+    if (($analysisReplay | ConvertTo-Json -Compress -Depth 12) -ne
+        ($analysis | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Explicit function analysis did not replay its recorded operation result.'
+    }
+    $analysisFunctionFound = $false
+    $analysisCursor = $null
+    for ($analysisPage = 0; $analysisPage -lt 8; $analysisPage++) {
+        $analysisListArguments = @{
+            module = $fixtureModule.name.ToUpperInvariant(); limit = 256
+        }
+        if ($analysisCursor) { $analysisListArguments.cursor = $analysisCursor }
+        $analyzedFunctions = Invoke-Tool 'functions.list' $analysisListArguments (74 + $analysisPage)
+        if ($analyzedFunctions.state_generation -ne $state.state_generation) {
+            throw 'Function discovery changed generation after explicit analysis.'
+        }
+        if (@($analyzedFunctions.items | Where-Object {
+            $_.start.address -eq $analysis.function.start.address
+        }).Count -ne 0) {
+            $analysisFunctionFound = $true
+            break
+        }
+        $analysisCursor = $analyzedFunctions.next_cursor
+        if (!$analysisCursor) { break }
+    }
+    if (!$analysisFunctionFound) {
+        throw 'Explicit analysis was not visible through known-only function discovery.'
+    }
     $asciiStrings = Invoke-Tool 'strings.search' @{
         module = $fixtureModule.name.ToUpperInvariant(); query = 'MCP_DISCOVERY_ASCII_SENTINEL'
         encoding = 'ascii_utf8'; context_bytes = 0; min_length = 4; limit = 8
@@ -482,6 +531,12 @@ try {
         module_instructions = $moduleDisassembly.items.Count
         symbols = $symbols.items.Count
         functions = $functions.items.Count
+        analysis_function_start = $analysis.function.start.address
+        analysis_function_end = $analysis.function.end.address
+        analysis_already_known = $analysis.already_known
+        analysis_generation_unchanged = $true
+        analysis_replay_equal = $true
+        analysis_visible_in_discovery = $analysisFunctionFound
         ascii_strings = $asciiStrings.items.Count
         utf16_strings = $wideStrings.items.Count
         inbound_references = $references.items.Count

@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.2.0"
-  minimum-backend-version: "0.2.0"
+  version: "0.3.0"
+  minimum-backend-version: "0.3.0"
   mcp-protocol: "2025-06-18"
 ---
 
@@ -31,7 +31,9 @@ After `debugger.resume`, pass its confirmed `state_generation` to
 `debugger.wait_for_pause(after_generation=...)`. Validate the returned pause reason, instruction
 pointer, and generation before reading related state. Treat `symbols.search`, `functions.list`,
 `strings.search`, and `references.to` as bounded `known_only` views; an empty result is not proof
-of absence and does not justify hidden analysis mutations.
+of absence. When the user explicitly authorizes analysis at a concrete address, use the separate
+`analysis.function` mutation with module/RVA and a fresh operation ID; it analyzes one function,
+not a whole module, and an ambiguous result must not be blindly retried.
 
 For state-specific sequences, breakpoint loops, compact inspection, and Go triage, read
 [references/recipes.md](references/recipes.md). For connection, authentication, stale cursor,

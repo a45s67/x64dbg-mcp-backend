@@ -22,6 +22,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0013-idempotent-install-and-package-verification.md`](docs/adr/0013-idempotent-install-and-package-verification.md)
 - [`docs/adr/0014-release-acceptance-gates.md`](docs/adr/0014-release-acceptance-gates.md)
 - [`docs/adr/0015-token-efficient-string-context.md`](docs/adr/0015-token-efficient-string-context.md)
+- [`docs/adr/0016-explicit-function-analysis.md`](docs/adr/0016-explicit-function-analysis.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
 - [`docs/install.md`](docs/install.md)
@@ -52,6 +53,8 @@ the read tools never silently trigger debugger analysis.
 Queried `strings.search` results default to compact UTF-8-safe context and expose
 reconstructable `before`, `match`, and `after` fields; use `context_bytes` to tune
 each side without returning an entire compiler/runtime string pool.
+`analysis.function` is a separate, explicit mutation for one concrete address;
+it uses a private command-queue fence and never depends on the user's GUI selection.
 
 Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
 It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer

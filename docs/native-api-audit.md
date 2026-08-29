@@ -19,8 +19,9 @@ bounds are checked before dereference or iteration.
 
 Mutating debugger commands are never executed with `DbgCmdExecDirect`. The
 executor submits an allowlisted command through `DbgCmdExec`, x64dbg's documented
-asynchronous command queue, then waits for a later registered debugger callback
-and a greater `state_generation`. Breakpoint commands contain only a validated,
+asynchronous command queue, then waits for either a registered debugger callback,
+a directly observable bounded postcondition, or the private command-queue fence
+defined by ADR 0016. Breakpoint commands contain only a validated,
 re-formatted numeric address. `debuggee.launch` contains only canonical existing
 paths in fixed quoted `InitDebug` positions; Windows-forbidden quotes and control
 characters cannot enter the command and raw command-line arguments are not
@@ -60,6 +61,7 @@ not mutated anything.
 | `memory.write` | `DbgMemWrite`, `DbgMemRead` | paused | max 4 KiB; read-back verification |
 | breakpoint set/remove | `DbgCmdExec`, `DbgGetBpxTypeAt` | paused | validated address only; bounded observation loop |
 | `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; ignores transient process-created pause and confirms a later actionable callback |
+| `analysis.function` | `DbgCmdExec` (`analr`), private command fence, `Script::Function::GetInfo` | paused | one resolved function in a module no larger than 128 MiB; queue-fence plus marker and generation confirmation; no GUI selection |
 | `symbols.search` | `Script::Symbol::GetList` | paused | `BridgeFree(list.data)`; rejects count above 65,536; bounded literal filtering and generation recheck |
 | `functions.list` | `Script::Function::GetList`, `Script::Symbol::GetList` | paused | both lists released with `BridgeFree`; each rejects count above 65,536; bounded name join and generation recheck |
 | `strings.search` | `DbgMemRead`, Windows NLS literal span | paused | caller-owned 64 KiB chunks, 4 KiB fallback, at most 1 MiB/request; deadline/generation checks, cursor-bound `context_bytes`, and UTF-8-safe before/match/after |
@@ -69,7 +71,8 @@ Pause metadata is copied synchronously from `CB_SYSTEMBREAKPOINT`,
 `CB_BREAKPOINT`, `CB_EXCEPTION`, and `CB_STEPPED`. The plugin retains no callback
 pointer. A following generic `CB_PAUSEDEBUG` cannot overwrite a specific reason
 for the same stop. Stop, disconnect, and unload notify the same condition
-variable used by active observation requests.
+variable used by active observation requests and stop the single-slot command
+fence before joining the executor.
 
 ## Unload invariant
 
@@ -87,5 +90,6 @@ Any new native API requires updating this table and adding state, bound,
 allocation, timeout, and unload tests.
 
 ADR 0007 discovery is enabled after schema, generation/deadline, filter-bound cursor, Unicode,
-ownership, and isolated dual-architecture gates passed. No GUI reference API or
-analysis-triggering command is permitted.
+ownership, and isolated dual-architecture gates passed. It never triggers
+analysis. ADR 0016 separately permits only address-taking `analr` with an
+internal queue fence; GUI-selection-based analysis remains forbidden.

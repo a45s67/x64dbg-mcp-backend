@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(x64dbg_mcp_backend VERSION 0.2.0 LANGUAGES CXX)
+project(x64dbg_mcp_backend VERSION 0.3.0 LANGUAGES CXX)
 include(CTest)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -15,6 +15,7 @@ endif()
 if(BUILD_TESTING)
   add_executable(x64dbg_mcp_lifecycle_test
     plugin/tests/lifecycle_harness.cpp
+    plugin/src/command_fence.cpp
     plugin/src/debugger_executor.cpp
     plugin/src/memory_filters.cpp
     plugin/src/runtime.cpp
@@ -37,6 +38,17 @@ if(BUILD_TESTING)
   target_compile_definitions(x64dbg_mcp_executor_test PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(x64dbg_mcp_executor_test PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
+
+  add_executable(x64dbg_mcp_command_fence_test
+    plugin/tests/command_fence_test.cpp
+    plugin/src/command_fence.cpp
+  )
+  target_compile_features(x64dbg_mcp_command_fence_test PRIVATE cxx_std_20)
+  target_include_directories(x64dbg_mcp_command_fence_test PRIVATE plugin/src)
+  target_compile_definitions(x64dbg_mcp_command_fence_test PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(x64dbg_mcp_command_fence_test PRIVATE
+    /W4 /WX /permissive- /EHsc /utf-8)
 
   add_executable(x64dbg_mcp_debuggee_fixture WIN32
     plugin/tests/debuggee_fixture.cpp
@@ -68,6 +80,7 @@ if(BUILD_TESTING)
 endif()
 
 add_library(x64dbg_mcp_plugin SHARED
+  plugin/src/command_fence.cpp
   plugin/src/debugger_executor.cpp
   plugin/src/memory_filters.cpp
   plugin/src/plugin.cpp
@@ -119,6 +132,7 @@ if(BUILD_TESTING)
     set(MCP_TEST_PORT 43832)
   endif()
   add_test(NAME executor-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_executor_test)
+  add_test(NAME command-fence-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_command_fence_test)
   add_test(NAME utf8-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_utf8_test)
   add_test(NAME memory-filters-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_memory_filters_test)
   add_test(NAME lifecycle-${MCP_TEST_ARCH}
@@ -139,7 +153,8 @@ if(BUILD_TESTING)
     COMMAND x64dbg_mcp_lifecycle_test
       "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe"
       "${MCP_ACTIVE_WAIT_TEST_PORT}" active-wait-shutdown)
-  set_tests_properties(executor-${MCP_TEST_ARCH} utf8-${MCP_TEST_ARCH}
+  set_tests_properties(executor-${MCP_TEST_ARCH} command-fence-${MCP_TEST_ARCH}
+    utf8-${MCP_TEST_ARCH}
     memory-filters-${MCP_TEST_ARCH} lifecycle-${MCP_TEST_ARCH}
     sidecar-crash-${MCP_TEST_ARCH} installed-config-${MCP_TEST_ARCH}
     active-wait-shutdown-${MCP_TEST_ARCH}

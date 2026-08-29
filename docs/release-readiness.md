@@ -1,7 +1,7 @@
 # Release readiness
 
-The MVP implementation meets the repository-controlled requirements. The
-canonical local acceptance command is:
+The MVP implementation meets the repository-controlled requirements. From the
+repository source tree, the canonical local acceptance command is:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
@@ -46,9 +46,6 @@ evidence, not a substitute for the release gate.
 | No blind mutation retry | instance-bound mutation schemas, replacement-sidecar no-dispatch test, operation-ledger tests, shutdown mutation cases, and workflow skill contracts |
 | Automated unit, contract, integration, and shutdown tests | package gate plus `scripts/run-integration-soak.ps1` |
 | Installable x32/x64 package | idempotent installer tests, SBOM/checksums, PE architecture validation, and offline verifier |
-
-Recent additional real-sample observations are recorded in
-[`field-notes-flare-samples.md`](field-notes-flare-samples.md).
 
 ## Publisher gates
 

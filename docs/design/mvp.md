@@ -182,7 +182,7 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `expression.evaluate` | read | paused | Evaluate x64dbg expression; no command execution |
 | `symbols.search` | read | paused | Search up to 65,536 retained symbols with bounded, filter-bound pagination |
 | `functions.list` | read | paused | List retained analyzed functions and exact-start symbol names; known-only |
-| `strings.search` | read | paused | Scan at most 1 MiB per request for bounded ASCII/UTF-8 or UTF-16LE strings |
+| `strings.search` | read | paused | Scan at most 1 MiB per request for bounded ASCII/UTF-8 or UTF-16LE strings with configurable match context |
 | `references.to` | read | paused | Paginate up to 65,536 retained inbound xrefs for an address |
 
 Every mutating tool requires `operation_id` as a canonical lowercase UUID. Arbitrary debugger

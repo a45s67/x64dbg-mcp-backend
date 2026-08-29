@@ -17,8 +17,8 @@ $frontmatter = [regex]::Match($skill, '(?s)^---\n(.*?)\n---\n')
 Assert-Skill $frontmatter.Success 'SKILL.md frontmatter is malformed'
 Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^name: x64dbg-debugging$') 'skill name is missing or invalid'
 Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^description: .{20,1024}$') 'skill description is missing or unbounded'
-Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  version: "0\.1\.0"$') 'independent skill version is missing'
-Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  minimum-backend-version: "0\.1\.0"$') 'minimum backend version is missing'
+Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  version: "0\.2\.0"$') 'independent skill version is missing'
+Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  minimum-backend-version: "0\.2\.0"$') 'minimum backend version is missing'
 Assert-Skill (Test-Path -LiteralPath $markerPath -PathType Leaf) 'managed ownership marker is missing'
 
 $allText = Get-ChildItem -LiteralPath $skillRoot -Recurse -File | ForEach-Object {

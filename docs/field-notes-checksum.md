@@ -642,3 +642,28 @@ The full localized MSVC build also exposed excessive raw `/showIncludes` output.
 The native build wrapper now selects the UTF-8 console code page before CMake's
 localized prefix probe so CMake/Ninja can recognize and suppress the compiler's
 dependency lines consistently.
+
+## 2026-08-29 token-efficient string-context follow-up
+
+ADR 0015 adds `context_bytes` (0 through 128, default 64 with a query) and
+reconstructable `before`, `match`, and `after` fields to `strings.search` while
+preserving candidate address, byte length, `text`, and offset metadata. The exact
+Windows NLS match span is retained instead of assuming case-equivalent UTF-8 has
+the same byte length. Context is part of the opaque cursor fingerprint and is
+rejected without a query.
+
+The wire-contract addition advances the backend package and managed skill to
+0.2.0. Rust retained 49 unit/contract tests plus six supervised shutdown cases,
+and both native architectures passed all seven tests. Fresh isolated x32dbg and x64dbg
+trees verified zero-context ASCII/UTF-16LE matches, exact text reconstruction,
+context-bound cursor rejection, connection survival, and complete sidecar/port
+shutdown. The package, installer, verifier, and managed skill 0.2.0 gates passed.
+
+After deploying the final 0.2.0 package for both plugin architectures, preserving
+the installed token, and refreshing the Codex registrations, the `checksum.exe`
+run loaded at base `0x380000`, resolved RVA `0xa78a0` to `0x4278a0`, hit the
+software breakpoint once, and retained generation 27 across
+all paused reads. With 32 bytes requested on each side, the former long Go string
+pool previews shrank to 75 bytes for `FlareOn2024` and 85 bytes for
+`Check sum: %d + %d = `; both exact match fields remained visible on page one.
+The debuggee stopped and its owned sidecar exited.

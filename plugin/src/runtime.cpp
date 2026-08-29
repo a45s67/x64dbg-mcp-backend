@@ -142,6 +142,7 @@ struct Request {
     std::string query;
     std::string stringEncoding{"both"};
     std::size_t minStringLength{4U};
+    std::size_t stringContextBytes{64U};
     std::optional<std::uint64_t> cursorFingerprint;
     bool discoveryCursorInvalid{false};
     bool committedOnly{false};
@@ -171,7 +172,8 @@ std::uint64_t DiscoveryFingerprint(const std::string_view method,
                                    const std::string_view module,
                                    const std::string_view query,
                                    const std::string_view encoding,
-                                   const std::size_t minLength) {
+                                   const std::size_t minLength,
+                                   const std::size_t contextBytes = 0U) {
     std::uint64_t hash = 14695981039346656037ULL;
     const auto add = [&hash](const std::string_view part) {
         for (const unsigned char byte : part) {
@@ -186,6 +188,7 @@ std::uint64_t DiscoveryFingerprint(const std::string_view method,
     add(query);
     add(encoding);
     add(std::to_string(minLength));
+    add(std::to_string(contextBytes));
     return hash;
 }
 
@@ -408,6 +411,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::string query;
     std::string stringEncoding = "both";
     std::size_t minStringLength = 4U;
+    std::size_t stringContextBytes = 64U;
     std::optional<std::uint64_t> cursorFingerprint;
     bool discoveryCursorInvalid = false;
     bool committedOnly = false;
@@ -575,19 +579,23 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         json_t* queryValue = json_object_get(payload, "query");
         json_t* encoding = json_object_get(payload, "encoding");
         json_t* minimum = json_object_get(payload, "min_length");
+        json_t* context = json_object_get(payload, "context_bytes");
         json_t* limit = json_object_get(payload, "limit");
         json_t* cursor = json_object_get(payload, "cursor");
         json_t* address = json_object_get(payload, "address");
         const bool references = methodValue == "references.to";
         const std::size_t expectedFields = 1U + (queryValue ? 1U : 0U) +
                                            (encoding ? 1U : 0U) + (minimum ? 1U : 0U) +
+                                           (context ? 1U : 0U) +
                                            (limit ? 1U : 0U) + (cursor ? 1U : 0U);
         if (json_object_size(payload) != expectedFields ||
             (references ? !ParseAddressReference(address, addressValue)
                         : !IsBoundedModuleName(module)) ||
             (references && module != nullptr) || (!references && address != nullptr) ||
             (references && queryValue != nullptr) ||
-            (methodValue != "strings.search" && (encoding != nullptr || minimum != nullptr))) {
+            (methodValue != "strings.search" &&
+             (encoding != nullptr || minimum != nullptr || context != nullptr)) ||
+            (context != nullptr && queryValue == nullptr)) {
             return std::nullopt;
         }
         if (!references) {
@@ -617,13 +625,19 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                 json_integer_value(minimum) > 256) return std::nullopt;
             minStringLength = static_cast<std::size_t>(json_integer_value(minimum));
         }
+        if (context != nullptr) {
+            if (!json_is_integer(context) || json_integer_value(context) < 0 ||
+                json_integer_value(context) > 128) return std::nullopt;
+            stringContextBytes = static_cast<std::size_t>(json_integer_value(context));
+        }
         if (limit != nullptr) {
             if (!json_is_integer(limit) || json_integer_value(limit) < 1 ||
                 json_integer_value(limit) > 256) return std::nullopt;
             pageLimit = static_cast<std::size_t>(json_integer_value(limit));
         }
         const std::uint64_t expectedFingerprint = DiscoveryFingerprint(
-            methodValue, moduleFilter, query, stringEncoding, minStringLength);
+            methodValue, moduleFilter, query, stringEncoding, minStringLength,
+            query.empty() ? 0U : stringContextBytes);
         if (cursor != nullptr) {
             if (!json_is_string(cursor)) return std::nullopt;
             std::uint64_t cursorGenerationValue = 0;
@@ -732,7 +746,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    cursorGeneration, cursorIndex, instructionCount,
                    std::move(writeBytes), afterGeneration, waitTimeoutMs,
                    std::move(moduleFilter), std::move(query), std::move(stringEncoding),
-                   minStringLength, cursorFingerprint, discoveryCursorInvalid,
+                   minStringLength, stringContextBytes, cursorFingerprint, discoveryCursorInvalid,
                    committedOnly, executableOnly, compact};
 }
 
@@ -972,6 +986,10 @@ struct StringCandidate {
     std::size_t key{0};
     std::size_t matchOffset{0};
     std::size_t textOffset{0};
+    std::string before;
+    std::string match;
+    std::string after;
+    bool hasMatch{false};
 };
 
 struct StringContext {
@@ -1852,9 +1870,11 @@ void Runtime::Worker() noexcept {
                                                  false);
                         }
                     }
-                    const auto matchOffset = [parsed](const std::string_view text) {
-                        if (!IsValidUtf8(text)) return std::optional<std::size_t>{};
-                        return Utf8OrdinalFindIgnoreCase(text, parsed->query);
+                    const auto literalMatch = [parsed](const std::string_view text) {
+                        if (!IsValidUtf8(text)) return std::optional<Utf8LiteralMatch>{};
+                        if (parsed->query.empty()) return std::optional<Utf8LiteralMatch>(
+                            Utf8LiteralMatch{});
+                        return Utf8OrdinalMatchIgnoreCase(text, parsed->query);
                     };
                     std::vector<StringCandidate> ascii;
                     std::vector<StringCandidate> wide;
@@ -1921,13 +1941,33 @@ void Runtime::Worker() noexcept {
                             const std::size_t key = absoluteOffset * 2U;
                             const std::string_view text(
                                 reinterpret_cast<const char*>(bytes.data() + begin), length);
-                            const auto match = matchOffset(text);
+                            const auto match = literalMatch(text);
                             if (characterCount >= parsed->minStringLength && key >= cursorKey &&
                                 match && ascii.size() < retain) {
-                                const auto context = ContextAroundUtf8Match(text, *match);
-                                ascii.push_back(StringCandidate{
-                                    absoluteOffset, length, context.text, "ascii_utf8",
-                                    context.truncated, key, *match, context.offset});
+                                StringCandidate candidate;
+                                candidate.offset = absoluteOffset;
+                                candidate.byteLength = length;
+                                candidate.encoding = "ascii_utf8";
+                                candidate.key = key;
+                                candidate.matchOffset = match->offset;
+                                if (parsed->query.empty()) {
+                                    const auto context = ContextAroundUtf8Match(text, 0U);
+                                    candidate.text = context.text;
+                                    candidate.textOffset = context.offset;
+                                    candidate.truncated = context.truncated;
+                                } else {
+                                    const auto context = Utf8ContextAroundMatch(
+                                        text, *match, parsed->stringContextBytes);
+                                    if (!context) continue;
+                                    candidate.text = context->text;
+                                    candidate.textOffset = context->textOffset;
+                                    candidate.truncated = context->truncated;
+                                    candidate.before = context->before;
+                                    candidate.match = context->match;
+                                    candidate.after = context->after;
+                                    candidate.hasMatch = true;
+                                }
+                                ascii.push_back(std::move(candidate));
                             }
                         }
                     }
@@ -1999,14 +2039,34 @@ void Runtime::Worker() noexcept {
                             }
                             const auto text = Utf16ToUtf8(units);
                             const std::size_t key = (scanStart + begin) * 2U + 1U;
-                            const auto match = text ? matchOffset(*text)
-                                                    : std::optional<std::size_t>{};
+                            const auto match = text ? literalMatch(*text)
+                                                    : std::optional<Utf8LiteralMatch>{};
                             if (units.size() >= parsed->minStringLength && key >= cursorKey && text &&
                                 match && wide.size() < retain) {
-                                const auto context = ContextAroundUtf8Match(*text, *match);
-                                wide.push_back(StringCandidate{
-                                    scanStart + begin, units.size() * 2U, context.text, "utf16le",
-                                    context.truncated, key, *match, context.offset});
+                                StringCandidate candidate;
+                                candidate.offset = scanStart + begin;
+                                candidate.byteLength = units.size() * 2U;
+                                candidate.encoding = "utf16le";
+                                candidate.key = key;
+                                candidate.matchOffset = match->offset;
+                                if (parsed->query.empty()) {
+                                    const auto context = ContextAroundUtf8Match(*text, 0U);
+                                    candidate.text = context.text;
+                                    candidate.textOffset = context.offset;
+                                    candidate.truncated = context.truncated;
+                                } else {
+                                    const auto context = Utf8ContextAroundMatch(
+                                        *text, *match, parsed->stringContextBytes);
+                                    if (!context) continue;
+                                    candidate.text = context->text;
+                                    candidate.textOffset = context->textOffset;
+                                    candidate.truncated = context->truncated;
+                                    candidate.before = context->before;
+                                    candidate.match = context->match;
+                                    candidate.after = context->after;
+                                    candidate.hasMatch = true;
+                                }
+                                wide.push_back(std::move(candidate));
                             }
                             if (offset == begin) offset += 2U;
                         }
@@ -2031,8 +2091,13 @@ void Runtime::Worker() noexcept {
                                  ",\"text_offset\":" + std::to_string(candidate.textOffset) +
                                  ",\"truncated\":" + (candidate.truncated ? "true" : "false") +
                                  ",\"location\":" +
-                                 LocationJson(LocationFromModules(address, *modules), *snapshot) +
-                                 "}";
+                                 LocationJson(LocationFromModules(address, *modules), *snapshot);
+                        if (candidate.hasMatch) {
+                            items += ",\"before\":" + JsonString(candidate.before) +
+                                     ",\"match\":" + JsonString(candidate.match) +
+                                     ",\"after\":" + JsonString(candidate.after);
+                        }
+                        items += "}";
                     }
                     items += "]";
                     const std::size_t scanEnd = scanStart + scanLength;

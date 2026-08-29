@@ -221,11 +221,11 @@ try {
     } 61
     $asciiStrings = Invoke-Tool 'strings.search' @{
         module = $fixtureModule.name.ToUpperInvariant(); query = 'MCP_DISCOVERY_ASCII_SENTINEL'
-        encoding = 'ascii_utf8'; min_length = 4; limit = 8
+        encoding = 'ascii_utf8'; context_bytes = 0; min_length = 4; limit = 8
     } 62
     $wideStrings = Invoke-Tool 'strings.search' @{
         module = $fixtureModule.name.ToUpperInvariant(); query = 'MCP_DISCOVERY_UTF16_SENTINEL'
-        encoding = 'utf16le'; min_length = 4; limit = 8
+        encoding = 'utf16le'; context_bytes = 0; min_length = 4; limit = 8
     } 63
     $references = Invoke-Tool 'references.to' @{ address = $moduleEntryRef; limit = 32 } 64
     if (@($asciiStrings.items | Where-Object { $_.text -eq 'MCP_DISCOVERY_ASCII_SENTINEL' }).Count -eq 0 -or
@@ -234,8 +234,10 @@ try {
     }
     foreach ($item in @($asciiStrings.items) + @($wideStrings.items)) {
         if ($null -eq $item.match_offset -or $null -eq $item.text_offset -or
-            $item.match_offset -lt $item.text_offset) {
-            throw 'A string result omitted valid match-context offsets.'
+            $item.match_offset -lt $item.text_offset -or $item.before -ne '' -or
+            $item.after -ne '' -or $item.text -ne $item.match -or
+            $item.text -ne ($item.before + $item.match + $item.after)) {
+            throw 'A compact string result omitted its exact reconstructable match context.'
         }
     }
     foreach ($discovery in @($symbols, $functions, $asciiStrings, $wideStrings, $references)) {
@@ -260,6 +262,24 @@ try {
     if (!$mismatchedDiscoveryCursor.isError -or
         $mismatchedDiscoveryCursor.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
         throw 'Discovery cursor was not bound to its exact filters.'
+    }
+    $contextCursorProbe = Invoke-Tool 'strings.search' @{
+        module = $fixtureModule.name; query = 'MCP'; context_bytes = 0
+        min_length = 4; encoding = 'both'; limit = 1
+    } 70
+    if (!$contextCursorProbe.next_cursor) {
+        throw 'String discovery did not return a cursor for context binding.'
+    }
+    $mismatchedContextCursor = Invoke-Mcp 'tools/call' @{
+        name = 'strings.search'; arguments = @{
+            module = $fixtureModule.name; query = 'MCP'; context_bytes = 1
+            min_length = 4; encoding = 'both'; limit = 1
+            cursor = $contextCursorProbe.next_cursor
+        }
+    } 71
+    if (!$mismatchedContextCursor.isError -or
+        $mismatchedContextCursor.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Discovery cursor was not bound to context_bytes.'
     }
     $afterDiscoveryCursorError = Invoke-Tool 'debugger.state' @{} 67
     if ($afterDiscoveryCursorError.plugin_state -ne 'ready') {

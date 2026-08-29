@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <limits>
 #include <optional>
 #include <string>
@@ -145,26 +146,73 @@ bool Utf8OrdinalEqualsIgnoreCase(const std::string_view left,
 
 bool Utf8OrdinalContainsIgnoreCase(const std::string_view haystack,
                                    const std::string_view needle) noexcept {
-    return Utf8OrdinalFindIgnoreCase(haystack, needle).has_value();
+    return Utf8OrdinalMatchIgnoreCase(haystack, needle).has_value();
 }
 
 std::optional<std::size_t> Utf8OrdinalFindIgnoreCase(const std::string_view haystack,
                                                      const std::string_view needle) noexcept {
-    if (needle.empty()) return 0U;
+    const auto match = Utf8OrdinalMatchIgnoreCase(haystack, needle);
+    return match ? std::optional<std::size_t>(match->offset) : std::nullopt;
+}
+
+std::optional<Utf8LiteralMatch> Utf8OrdinalMatchIgnoreCase(
+    const std::string_view haystack, const std::string_view needle) noexcept {
+    if (needle.empty()) return Utf8LiteralMatch{};
     try {
         const auto wideHaystack = ToWide(haystack);
         const auto wideNeedle = ToWide(needle);
         if (!wideHaystack || !wideNeedle) return std::nullopt;
+        int foundLength = 0;
         const int found = FindNLSStringEx(
             LOCALE_NAME_INVARIANT, FIND_FROMSTART | NORM_IGNORECASE, wideHaystack->data(),
             static_cast<int>(wideHaystack->size()), wideNeedle->data(),
-            static_cast<int>(wideNeedle->size()), nullptr, nullptr, nullptr, 0);
-        if (found < 0) return std::nullopt;
-        if (found == 0) return 0U;
-        const int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wideHaystack->data(),
-                                               found, nullptr, 0, nullptr, nullptr);
-        return bytes <= 0 ? std::nullopt
-                          : std::optional<std::size_t>(static_cast<std::size_t>(bytes));
+            static_cast<int>(wideNeedle->size()), &foundLength, nullptr, nullptr, 0);
+        if (found < 0 || foundLength <= 0) return std::nullopt;
+        const int prefixBytes = found == 0
+                                    ? 0
+                                    : WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                                          wideHaystack->data(), found, nullptr, 0,
+                                                          nullptr, nullptr);
+        const int matchBytes = WideCharToMultiByte(
+            CP_UTF8, WC_ERR_INVALID_CHARS, wideHaystack->data() + found, foundLength, nullptr, 0,
+            nullptr, nullptr);
+        if (prefixBytes < 0 || matchBytes <= 0) return std::nullopt;
+        return Utf8LiteralMatch{static_cast<std::size_t>(prefixBytes),
+                                static_cast<std::size_t>(matchBytes)};
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<Utf8MatchContext> Utf8ContextAroundMatch(
+    const std::string_view value, const Utf8LiteralMatch match,
+    const std::size_t contextBytes) noexcept {
+    constexpr std::size_t kMaxContextBytes = 128U;
+    constexpr std::size_t kMaxMatchBytes = 1024U;
+    if (contextBytes > kMaxContextBytes || match.length > kMaxMatchBytes ||
+        match.offset > value.size() || match.length > value.size() - match.offset ||
+        !IsValidUtf8(value) || !IsValidUtf8(value.substr(match.offset, match.length))) {
+        return std::nullopt;
+    }
+    try {
+        std::size_t start = match.offset > contextBytes ? match.offset - contextBytes : 0U;
+        while (start < match.offset &&
+               (static_cast<unsigned char>(value[start]) & 0xc0U) == 0x80U) {
+            ++start;
+        }
+        const std::size_t matchEnd = match.offset + match.length;
+        std::size_t end = (std::min)(value.size(), matchEnd + contextBytes);
+        while (end > matchEnd && !IsValidUtf8(value.substr(matchEnd, end - matchEnd))) --end;
+
+        Utf8MatchContext result;
+        result.before.assign(value.substr(start, match.offset - start));
+        result.match.assign(value.substr(match.offset, match.length));
+        result.after.assign(value.substr(matchEnd, end - matchEnd));
+        result.text.reserve(result.before.size() + result.match.size() + result.after.size());
+        result.text.append(result.before).append(result.match).append(result.after);
+        result.textOffset = start;
+        result.truncated = start != 0U || end != value.size();
+        return result;
     } catch (...) {
         return std::nullopt;
     }

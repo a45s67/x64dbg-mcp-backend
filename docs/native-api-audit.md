@@ -62,7 +62,7 @@ not mutated anything.
 | `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; ignores transient process-created pause and confirms a later actionable callback |
 | `symbols.search` | `Script::Symbol::GetList` | paused | `BridgeFree(list.data)`; rejects count above 65,536; bounded literal filtering and generation recheck |
 | `functions.list` | `Script::Function::GetList`, `Script::Symbol::GetList` | paused | both lists released with `BridgeFree`; each rejects count above 65,536; bounded name join and generation recheck |
-| `strings.search` | `DbgMemRead` | paused | caller-owned 64 KiB chunks, 4 KiB fallback, at most 1 MiB/request; deadline/generation checks and UTF-8-safe match context |
+| `strings.search` | `DbgMemRead`, Windows NLS literal span | paused | caller-owned 64 KiB chunks, 4 KiB fallback, at most 1 MiB/request; deadline/generation checks, cursor-bound `context_bytes`, and UTF-8-safe before/match/after |
 | `references.to` | `DbgGetXrefCountAt`, `DbgXrefGet` | paused | `BridgeFree(info.references)`; rejects count above 65,536; inbound known-only references |
 
 Pause metadata is copied synchronously from `CB_SYSTEMBREAKPOINT`,

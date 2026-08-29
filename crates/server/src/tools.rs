@@ -173,11 +173,22 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             exact_keys(
                 object,
                 &["module"],
-                &["query", "min_length", "encoding", "limit", "cursor"],
+                &[
+                    "query",
+                    "min_length",
+                    "encoding",
+                    "context_bytes",
+                    "limit",
+                    "cursor",
+                ],
             )?;
             validate_module_name(object, "module")?;
             optional_query(object)?;
             optional_integer(object, "min_length", 4, 256)?;
+            optional_integer(object, "context_bytes", 0, 128)?;
+            if object.contains_key("context_bytes") && !object.contains_key("query") {
+                return Err(invalid("context_bytes", "requires query"));
+            }
             if let Some(encoding) = object.get("encoding")
                 && !matches!(encoding.as_str(), Some("ascii_utf8" | "utf16le" | "both"))
             {
@@ -613,7 +624,7 @@ fn build_catalog() -> Vec<Value> {
         ),
         read_tool(
             "strings.search",
-            "Incrementally scan at most 1 MiB of one loaded module for bounded string candidates. Results are known-only and do not trigger analysis.",
+            "Incrementally scan at most 1 MiB of one loaded module for bounded string candidates. Queried results default to compact UTF-8-safe match context. Results are known-only and do not trigger analysis.",
             object(
                 vec![
                     ("module", module_name_schema()),
@@ -628,6 +639,10 @@ fn build_catalog() -> Vec<Value> {
                     (
                         "encoding",
                         json!({"type":"string","enum":["ascii_utf8","utf16le","both"],"default":"both"}),
+                    ),
+                    (
+                        "context_bytes",
+                        json!({"type":"integer","minimum":0,"maximum":128,"default":64,"description":"Maximum UTF-8 bytes returned on each side of a supplied query match."}),
                     ),
                     (
                         "limit",
@@ -992,9 +1007,30 @@ mod tests {
         assert!(
             validate_arguments(
                 "strings.search",
-                &json!({"module":"sample.exe","min_length":4,"encoding":"both"})
+                &json!({"module":"sample.exe","query":"FlareOn2024","context_bytes":64,"min_length":4,"encoding":"both"})
             )
             .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "strings.search",
+                &json!({"module":"sample.exe","query":"x","context_bytes":0})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "strings.search",
+                &json!({"module":"sample.exe","context_bytes":64})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "strings.search",
+                &json!({"module":"sample.exe","query":"x","context_bytes":129})
+            )
+            .is_err()
         );
         assert!(
             validate_arguments(

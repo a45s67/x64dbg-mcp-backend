@@ -46,8 +46,9 @@ Use module-scoped literal filters and modest page limits:
 
 - `symbols.search` for retained exports, imports, labels, and symbols;
 - `functions.list` for functions already analyzed by x64dbg;
-- `strings.search` for bounded ASCII/UTF-8 or UTF-16LE candidates, following `next_cursor` across
-  the module when necessary;
+- `strings.search` for bounded ASCII/UTF-8 or UTF-16LE candidates. Supply a literal `query` and
+  usually `context_bytes=32` to keep `before`/`match`/`after` compact; follow `next_cursor` with
+  the exact same context setting when necessary;
 - `references.to` for inbound references already in the analysis database.
 
 Cursors bind the method, exact filters, module spelling, and debugger generation. Reuse the exact

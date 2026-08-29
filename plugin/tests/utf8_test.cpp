@@ -15,6 +15,11 @@ bool Expect(const std::string_view name, const std::string& actual,
     return false;
 }
 
+bool Check(const std::string_view name, const bool condition) {
+    if (!condition) std::cerr << name << " failed\n";
+    return condition;
+}
+
 std::uint64_t Next(std::uint64_t& state) {
     state = state * 6364136223846793005ULL + 1442695040888963407ULL;
     return state;
@@ -69,6 +74,71 @@ int main() {
     ok &= mcp::Utf8OrdinalFindIgnoreCase("前綴-München-分析", "MÜNCHEN").value_or(0U) == 7U;
     ok &= !mcp::Utf8OrdinalContainsIgnoreCase("München", "分析");
     ok &= !mcp::Utf8OrdinalEqualsIgnoreCase(std::string("bad\xff", 4), "BAD");
+
+    const auto literal =
+        mcp::Utf8OrdinalMatchIgnoreCase("prefix-Checksum.exe-suffix", "CHECKSUM.EXE");
+    ok &= Check("literal span", literal.has_value());
+    if (literal) {
+        const auto zero = mcp::Utf8ContextAroundMatch(
+            "prefix-Checksum.exe-suffix", *literal, 0U);
+        ok &= Check("zero context", zero.has_value() && zero->before.empty() &&
+                                             zero->after.empty() &&
+                                             zero->match == "Checksum.exe" &&
+                                             zero->text == zero->match &&
+                                             zero->textOffset == literal->offset &&
+                                             zero->truncated);
+
+        const auto context = mcp::Utf8ContextAroundMatch(
+            "prefix-Checksum.exe-suffix", *literal, 8U);
+        ok &= Check("full context", context.has_value() && context->before == "prefix-" &&
+                                        context->match == "Checksum.exe" &&
+                                        context->after == "-suffix" &&
+                                        context->text == "prefix-Checksum.exe-suffix" &&
+                                        !context->truncated);
+    }
+
+    const std::string bounded = std::string(200U, 'a') + std::string(256U, 'q') +
+                                std::string(200U, 'z');
+    const auto boundedMatch = mcp::Utf8OrdinalMatchIgnoreCase(bounded, std::string(256U, 'Q'));
+    const auto boundedContext = boundedMatch
+                                    ? mcp::Utf8ContextAroundMatch(bounded, *boundedMatch, 128U)
+                                    : std::nullopt;
+    ok &= Check("bounded context", boundedContext.has_value() &&
+                                       boundedContext->before.size() == 128U &&
+                                       boundedContext->match.size() == 256U &&
+                                       boundedContext->after.size() == 128U &&
+                                       boundedContext->text.size() == 512U &&
+                                       boundedContext->text == boundedContext->before +
+                                                                           boundedContext->match +
+                                                                          boundedContext->after);
+
+    const std::string foldedCandidate("x\xc3\x9c" "y", 4U);
+    const std::string foldedNeedle("\xc3\xbc", 2U);
+    const auto foldedMatch =
+        mcp::Utf8OrdinalMatchIgnoreCase(foldedCandidate, foldedNeedle);
+    const auto foldedContext = foldedMatch
+                                   ? mcp::Utf8ContextAroundMatch(foldedCandidate, *foldedMatch, 0U)
+                                   : std::nullopt;
+    ok &= Check("unicode folded span", foldedMatch.has_value() && foldedMatch->offset == 1U &&
+                                            foldedMatch->length == 2U &&
+                                            foldedContext.has_value() &&
+                                            foldedContext->match == std::string("\xc3\x9c", 2U));
+
+    const std::string unicodeContext =
+        "\xce\xb1\xce\xb2-prefix-Checksum.exe-suffix-\xce\xb3\xce\xb4";
+    const auto unicodeMatch =
+        mcp::Utf8OrdinalMatchIgnoreCase(unicodeContext, "CHECKSUM.EXE");
+    const auto compact = unicodeMatch
+                             ? mcp::Utf8ContextAroundMatch(unicodeContext, *unicodeMatch, 7U)
+                             : std::nullopt;
+    ok &= Check("unicode compact context", compact.has_value() &&
+                                               mcp::IsValidUtf8(compact->before) &&
+                                               mcp::IsValidUtf8(compact->match) &&
+                                               mcp::IsValidUtf8(compact->after) &&
+                                               compact->before.size() <= 7U &&
+                                               compact->after.size() <= 7U &&
+                                               compact->text == compact->before + compact->match +
+                                                                    compact->after);
     ok &= ExerciseDeterministicCorpus();
     if (!ok) {
         std::cerr << "UTF-8 boundary tests failed\n";

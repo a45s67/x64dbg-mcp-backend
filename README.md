@@ -21,6 +21,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0012-deterministic-robustness-corpus.md`](docs/adr/0012-deterministic-robustness-corpus.md)
 - [`docs/adr/0013-idempotent-install-and-package-verification.md`](docs/adr/0013-idempotent-install-and-package-verification.md)
 - [`docs/adr/0014-release-acceptance-gates.md`](docs/adr/0014-release-acceptance-gates.md)
+- [`docs/adr/0015-token-efficient-string-context.md`](docs/adr/0015-token-efficient-string-context.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
 - [`docs/install.md`](docs/install.md)
@@ -48,6 +49,9 @@ Bounded discovery is available through `symbols.search`, `functions.list`,
 `strings.search`, and `references.to`. Results are generation-consistent,
 paginated, module/RVA aware, and explicitly report `completeness: "known_only"`;
 the read tools never silently trigger debugger analysis.
+Queried `strings.search` results default to compact UTF-8-safe context and expose
+reconstructable `before`, `match`, and `after` fields; use `context_bytes` to tune
+each side without returning an entire compiler/runtime string pool.
 
 Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
 It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer

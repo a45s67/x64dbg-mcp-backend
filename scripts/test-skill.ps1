@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 $skillRoot = Join-Path $PSScriptRoot '..\skills\x64dbg-debugging'
 $skillPath = Join-Path $skillRoot 'SKILL.md'
 $markerPath = Join-Path $skillRoot '.managed-by-x64dbg-mcp-backend'
+$workspaceManifest = Join-Path $PSScriptRoot '..\Cargo.toml'
 
 function Assert-Skill([bool]$Condition, [string]$Message) {
     if (!$Condition) { throw "x64dbg skill contract failed: $Message" }
@@ -15,10 +16,14 @@ $skill = $strictUtf8.GetString([IO.File]::ReadAllBytes($skillPath))
 Assert-Skill $skill.StartsWith("---`n") 'SKILL.md has no YAML frontmatter'
 $frontmatter = [regex]::Match($skill, '(?s)^---\n(.*?)\n---\n')
 Assert-Skill $frontmatter.Success 'SKILL.md frontmatter is malformed'
+$manifest = $strictUtf8.GetString([IO.File]::ReadAllBytes($workspaceManifest))
+$versionMatch = [regex]::Match($manifest, '(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"$')
+Assert-Skill $versionMatch.Success 'workspace version is missing or invalid'
+$backendVersion = [regex]::Escape($versionMatch.Groups[1].Value)
 Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^name: x64dbg-debugging$') 'skill name is missing or invalid'
 Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^description: .{20,1024}$') 'skill description is missing or unbounded'
-Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  version: "0\.9\.0"$') 'independent skill version is missing'
-Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  minimum-backend-version: "0\.9\.0"$') 'minimum backend version is missing'
+Assert-Skill ($frontmatter.Groups[1].Value -match "(?m)^  version: `"$backendVersion`"$") 'independent skill version is missing'
+Assert-Skill ($frontmatter.Groups[1].Value -match "(?m)^  minimum-backend-version: `"$backendVersion`"$") 'minimum backend version is missing'
 Assert-Skill (Test-Path -LiteralPath $markerPath -PathType Leaf) 'managed ownership marker is missing'
 
 $allText = Get-ChildItem -LiteralPath $skillRoot -Recurse -File | ForEach-Object {

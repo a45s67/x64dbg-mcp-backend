@@ -79,13 +79,35 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             exact_keys(
                 object,
                 &["operation_id", "instance_id", "path"],
-                &["working_directory"],
+                &["working_directory", "arguments"],
             )?;
             validate_operation_id(object)?;
             validate_instance_id(object)?;
             validate_path(object, "path")?;
             if object.contains_key("working_directory") {
                 validate_path(object, "working_directory")?;
+            }
+            if let Some(arguments) = object.get("arguments") {
+                let arguments = arguments
+                    .as_array()
+                    .filter(|values| values.len() <= 32)
+                    .ok_or(invalid("arguments", "must contain at most 32 strings"))?;
+                let mut total = 0usize;
+                for argument in arguments {
+                    let value = argument
+                        .as_str()
+                        .ok_or(invalid("arguments", "must contain only strings"))?;
+                    if value.len() > 256 || value.chars().any(char::is_control) {
+                        return Err(invalid(
+                            "arguments",
+                            "contains an oversized or control-character value",
+                        ));
+                    }
+                    total = total.saturating_add(value.len());
+                }
+                if total > 512 {
+                    return Err(invalid("arguments", "exceeds the 512-byte aggregate bound"));
+                }
             }
             Ok(())
         }
@@ -746,10 +768,20 @@ fn build_catalog() -> Vec<Value> {
                     "path",
                     json!({"type":"string","minLength":3,"maxLength":32767}),
                 )],
-                vec![(
-                    "working_directory",
-                    json!({"type":"string","minLength":3,"maxLength":32767}),
-                )],
+                vec![
+                    (
+                        "working_directory",
+                        json!({"type":"string","minLength":3,"maxLength":32767}),
+                    ),
+                    (
+                        "arguments",
+                        json!({
+                            "type":"array","maxItems":32,
+                            "items":{"type":"string","maxLength":256},
+                            "description":"Structured argv values; aggregate UTF-8 text is limited to 512 bytes."
+                        }),
+                    ),
+                ],
             ),
             true,
         ),
@@ -1596,6 +1628,28 @@ mod tests {
                     "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
                     "path":"C:\\samples\\fixture.exe",
                     "arguments":"unbounded raw command line"
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "debuggee.launch",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "path":"C:\\samples\\fixture.exe",
+                    "arguments":["","with space","quote\"inside","trail\\","兩個字"]
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "debuggee.launch",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "path":"C:\\samples\\fixture.exe",
+                    "arguments":["line\nbreak"]
                 })
             )
             .is_err()

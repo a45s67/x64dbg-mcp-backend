@@ -263,7 +263,7 @@ missing symbols, and known function containment. All four operations execute
 on the existing serialized debugger executor and add no connection thread or
 mutation path.
 
-### Stage 3: structured debuggee launch arguments
+### Stage 3: structured debuggee launch arguments (completed in 0.10.0)
 
 Extend `debuggee.launch` with a bounded `arguments` array rather than an opaque
 command-line string.
@@ -282,6 +282,15 @@ Deliverables:
 
 Exit: fixture debuggees observe the exact intended `argv` on both architectures,
 and a lost response never causes a second process launch.
+
+Completed on 2026-08-30 under ADR 0028. The backend accepts only a bounded
+string array, performs the Windows quoting itself, launches to the initial
+actionable pause, and commits the complete command line through the typed SDK
+`SetCmdline` function before any resume. Isolated x64 and x32 fixtures observed
+empty, space-containing, quoted, trailing-backslash, comma, and Unicode values
+exactly. Replay returned the original result and a changed array under the same
+operation ID was rejected before native dispatch. Entry-break selection remains
+unadmitted because the current callbacks do not prove a portable closed enum.
 
 ### Stage 4: additional read-only candidates
 

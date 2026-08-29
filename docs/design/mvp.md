@@ -105,7 +105,7 @@ Otherwise HTTP 503. Response is bounded and contains no target path or token:
   "diagnostic_code":null,
   "next_actions":[],
   "protocol_version":"2025-06-18",
-  "version":"0.9.0"
+  "version":"0.10.0"
 }
 ```
 
@@ -170,7 +170,7 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `debugger.step_over` | mutate | paused | One instruction, then bounded wait for pause |
 | `debugger.step_out` | mutate | paused | Fixed `rtr`; newer pause plus return/CSP confirmation; interruptions return `completed: false` |
 | `debugger.stop` | mutate | starting/running/paused | Stop current debug session |
-| `debuggee.launch` | destructive mutation | absent | Canonicalize and load an existing executable, then wait past process creation for an actionable callback pause |
+| `debuggee.launch` | destructive mutation | absent | Canonicalize and load an existing executable, accept only bounded structured arguments, then commit the quoted command line at an actionable initial pause |
 | `debuggee.attach` | destructive mutation | absent | Attach to one explicit PID; no enumeration; PID plus paused-callback confirmation |
 | `debuggee.detach` | mutate | attached paused/running | Detach without terminating the pre-existing process; callback-confirmed absent state |
 | `registers.read` | read | paused | Selected registers or bounded complete register set |

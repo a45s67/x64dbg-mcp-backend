@@ -938,3 +938,41 @@ The backend now publishes 41 tools and the backend/managed skill advance to
 binaries match their source hashes, and Codex registration was refreshed with
 static Authorization headers. The offline-verified 49-file package SHA-256 is
 `418a53bf79039ad11dd04cef9a9a981f9f32dbe2ce3635c4889377a393fca218`.
+
+## 2026-08-30 structured launch-argument qualification
+
+ADR 0028 admits a bounded `arguments` array on `debuggee.launch`: at most 32
+strings, 256 UTF-8 bytes each, and 512 input bytes in aggregate. A pure native
+policy suite covers Windows quoting and command bounds. During real x64
+qualification, nesting the quoted Windows command line inside x64dbg's `init`
+command reproduced x64dbg's own embedded-quote collapse. The final design
+therefore sends a path-only fixed `scriptcmd init`, waits for the actionable
+initial pause, and uses `DBGFUNCTIONS::SetCmdline` to commit the complete quoted
+command line before any backend-issued resume. A post-launch commit failure is
+outcome-unknown and cannot be blindly resubmitted.
+
+Fresh isolated x64 instance `2c4d45d1-895e-4fa3-bc89-49450c272ac1` and x32
+instance `91165b48-dd99-4509-9777-405e4e9d88d7` both observed the exact seven
+requested values: empty, plain, space-containing, embedded-quote,
+trailing-backslash, comma, and non-ASCII arguments. Both replayed the original
+launch result without a second process, rejected a changed array under the same
+operation ID with `OPERATION_ID_CONFLICT`, completed the existing analysis and
+mutation suite, stopped the fixture, and closed the debugger-owned sidecar.
+
+This stage also corrected `scripts/build-plugin.cmd`: the parenthesized batch
+block had expanded `%errorlevel%` before CTest ran, so a failing native test
+could return exit code zero. It now tests CTest's exit status after execution.
+
+The packaged and installed 0.10.0 Flare-On qualification used instance
+`aec9bf00-8cd8-4943-bfad-a8c69c6bfebd`. It again resolved
+`CHECKSUM.EXE+0xa78a0` to `0x4478a0` from relocated base `0x3a0000`, retained
+generation 27 across state reads, returned three native stack frames, found the
+known function through `0x44806b`, verified the reversible four-byte patch, and
+completed register, hardware/memory breakpoint, discovery, stop, and clean
+sidecar-shutdown checks.
+
+The offline verifier accepted 50 packaged files. Installed dp32, dp64, and
+sidecar hashes exactly match the package. The archive SHA-256 is
+`6c87bc16e352908a3d74d80fb9864cc5f8ab3963fdb024092d5003d4bc9b8d6a`.
+Codex MCP registration retains static Authorization headers and the managed
+skill now requires backend 0.10.0.

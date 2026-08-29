@@ -29,6 +29,7 @@
 #include "_scriptapi_symbol.h"
 #include "breakpoint_policy.h"
 #include "jansson/jansson.h"
+#include "launch_arguments.h"
 #include "memory_filters.h"
 #include "patch_policy.h"
 #include "register_policy.h"
@@ -145,6 +146,7 @@ struct Request {
     std::string expression;
     std::string path;
     std::string workingDirectory;
+    std::vector<std::string> launchArguments;
     std::uint32_t targetProcessId{0U};
     AddressReference address;
     std::size_t length{0};
@@ -472,6 +474,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::string expression;
     std::string path;
     std::string workingDirectory;
+    std::vector<std::string> launchArguments;
     std::uint32_t targetProcessId = 0U;
     AddressReference addressValue;
     std::size_t lengthValue = 0;
@@ -553,7 +556,9 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     } else if (methodValue == "debuggee.launch") {
         json_t* pathValue = json_object_get(payload, "path");
         json_t* directoryValue = json_object_get(payload, "working_directory");
-        const std::size_t expectedFields = directoryValue == nullptr ? 2U : 3U;
+        json_t* argumentsValue = json_object_get(payload, "arguments");
+        const std::size_t expectedFields = 2U + (directoryValue ? 1U : 0U) +
+                                           (argumentsValue ? 1U : 0U);
         if (json_object_size(payload) != expectedFields ||
             !json_is_string(json_object_get(payload, "operation_id")) ||
             !IsBoundedPathString(pathValue) ||
@@ -564,6 +569,25 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         if (directoryValue != nullptr) {
             workingDirectory.assign(json_string_value(directoryValue),
                                     json_string_length(directoryValue));
+        }
+        if (argumentsValue != nullptr) {
+            if (!json_is_array(argumentsValue) ||
+                json_array_size(argumentsValue) > kMaxLaunchArguments) {
+                return std::nullopt;
+            }
+            std::size_t totalBytes = 0U;
+            for (std::size_t index = 0U; index < json_array_size(argumentsValue); ++index) {
+                json_t* argument = json_array_get(argumentsValue, index);
+                if (!json_is_string(argument)) return std::nullopt;
+                const std::string_view value(json_string_value(argument),
+                                             json_string_length(argument));
+                if (!ValidLaunchArgument(value) ||
+                    value.size() > kMaxLaunchArgumentTotalBytes - totalBytes) {
+                    return std::nullopt;
+                }
+                totalBytes += value.size();
+                launchArguments.emplace_back(value);
+            }
         }
     } else if (methodValue == "debuggee.attach") {
         json_t* process = json_object_get(payload, "process_id");
@@ -993,7 +1017,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     return Request{std::string(requestIdValue), std::string(methodValue),
                    static_cast<std::uint64_t>(json_integer_value(deadline)), mutation,
                    std::move(expression), std::move(path), std::move(workingDirectory),
-                   targetProcessId, addressValue, lengthValue, std::move(registerNames), pageLimit,
+                   std::move(launchArguments), targetProcessId, addressValue, lengthValue,
+                   std::move(registerNames), pageLimit,
                    cursorGeneration, cursorIndex, instructionCount,
                    std::move(writeBytes), afterGeneration, waitTimeoutMs,
                    std::move(moduleFilter), std::move(query), std::move(stringEncoding),
@@ -2282,10 +2307,40 @@ void Runtime::Worker() noexcept {
                             "working_directory must name an existing absolute directory", false,
                             false);
                     }
+                    const std::optional<std::string> renderedArguments =
+                        RenderWindowsArguments(parsed->launchArguments);
+                    if (!renderedArguments) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "arguments exceed native quoting bounds", false,
+                                             false);
+                    }
+                    std::string processCommandLine = QuoteWindowsArgument(*executable);
+                    if (!renderedArguments->empty()) {
+                        processCommandLine.push_back(' ');
+                        processCommandLine += *renderedArguments;
+                    }
+                    const int wideLength = processCommandLine.empty()
+                                               ? 0
+                                               : MultiByteToWideChar(
+                                                     CP_UTF8, MB_ERR_INVALID_CHARS,
+                                                     processCommandLine.data(),
+                                                     static_cast<int>(processCommandLine.size()),
+                                                     nullptr, 0);
+                    if ((!processCommandLine.empty() && wideLength <= 0) ||
+                        wideLength > 32766) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "rendered Windows command line is invalid or too long",
+                                             false, false);
+                    }
+                    const std::optional<std::string> command =
+                        BuildInitCommand(*executable, "", *workingDirectory);
+                    if (!command) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "launch does not fit the x64dbg command buffer", false,
+                                             false);
+                    }
                     const std::uint64_t before = generation_.load();
-                    const std::string command = "init \"" + *executable + "\", \"\", \"" +
-                                                *workingDirectory + "\"";
-                    if (!DbgCmdExec(command.c_str())) {
+                    if (!DbgCmdExec(command->c_str())) {
                         return ErrorResponse(*parsed, "BUSY",
                                              "debugger command queue rejected the launch", true,
                                              false);
@@ -2295,12 +2350,27 @@ void Runtime::Worker() noexcept {
                                              "launch did not reach an actionable debugger pause",
                                              false, true);
                     }
+                    const DBGFUNCTIONS* functions = DbgFunctions();
+                    if (functions == nullptr || functions->SetCmdline == nullptr ||
+                        !functions->SetCmdline(processCommandLine.c_str())) {
+                        return ErrorResponse(
+                            *parsed, "OUTCOME_UNKNOWN",
+                            "debuggee launched but its command line could not be committed",
+                            false, true);
+                    }
                     const std::uint64_t confirmed = ObservedGeneration(DebuggeeState::paused);
+                    std::string argumentsJson = "[";
+                    for (std::size_t index = 0U; index < parsed->launchArguments.size(); ++index) {
+                        if (index != 0U) argumentsJson.push_back(',');
+                        argumentsJson += JsonString(parsed->launchArguments[index]);
+                    }
+                    argumentsJson += "]";
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
                            ",\"state_generation\":" + std::to_string(confirmed) +
                            ",\"status\":\"ok\",\"result\":{\"debuggee_state\":\"paused\",\"path\":" +
                            JsonString(*executable) + ",\"working_directory\":" +
-                           JsonString(*workingDirectory) + ",\"state_generation\":" +
+                           JsonString(*workingDirectory) + ",\"arguments\":" +
+                           argumentsJson + ",\"state_generation\":" +
                            std::to_string(confirmed) + "}}";
                 }
                 if (parsed->method == "debuggee.detach") {

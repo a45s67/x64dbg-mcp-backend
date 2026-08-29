@@ -24,6 +24,7 @@ $server = (Resolve-Path -LiteralPath $ServerPath).Path
 $debuggerName = if ($Backend -eq 'x32') { 'x32dbg-unsigned.exe' } else { 'x64dbg.exe' }
 $debugger = Join-Path $backendRoot $debuggerName
 $fixture = Join-Path $backendRoot $FixtureName
+$argumentObservation = Join-Path $backendRoot 'mcp-argv-observed.bin'
 if (!(Test-Path -LiteralPath $debugger) -or !(Test-Path -LiteralPath $fixture)) {
     throw 'The isolated debugger tree or fixture is missing. Run prepare-integration.ps1 first.'
 }
@@ -71,6 +72,57 @@ function Invoke-Tool([string]$Name, $Arguments, [int]$Id) {
     return $result.structuredContent
 }
 
+function Assert-ExactStringSequence($Actual, [string[]]$Expected, [string]$Context) {
+    $actualItems = @($Actual)
+    if ($actualItems.Count -ne $Expected.Count) {
+        $actualJson = $actualItems | ConvertTo-Json -Compress
+        throw "$Context count mismatch: expected=$($Expected.Count), actual=$($actualItems.Count), values=$actualJson"
+    }
+    for ($index = 0; $index -lt $Expected.Count; $index++) {
+        if (![string]::Equals([string]$actualItems[$index], $Expected[$index],
+                [StringComparison]::Ordinal)) {
+            throw "$Context mismatch at index $index."
+        }
+    }
+}
+
+function Read-ObservedArguments([string]$Path) {
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    try {
+        $reader = [System.IO.BinaryReader]::new($stream)
+        $expectedMagic = [System.Text.Encoding]::ASCII.GetBytes("MARGV1`r`n")
+        $magic = $reader.ReadBytes($expectedMagic.Length)
+        if ($magic.Length -ne $expectedMagic.Length -or
+            [BitConverter]::ToString($magic) -ne [BitConverter]::ToString($expectedMagic)) {
+            throw 'Fixture argument observation has an invalid format marker.'
+        }
+        $count = $reader.ReadUInt32()
+        if ($count -lt 1 -or $count -gt 64) {
+            throw "Fixture argument observation count is invalid: $count"
+        }
+        $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+        $items = [System.Collections.Generic.List[string]]::new()
+        for ($index = 0; $index -lt $count; $index++) {
+            $length = $reader.ReadUInt32()
+            if ($length -gt 32768) {
+                throw "Fixture argument observation item is too large: $length"
+            }
+            $bytes = $reader.ReadBytes([int]$length)
+            if ($bytes.Length -ne $length) {
+                throw 'Fixture argument observation was truncated.'
+            }
+            $items.Add($strictUtf8.GetString($bytes))
+        }
+        if ($stream.Position -ne $stream.Length) {
+            throw 'Fixture argument observation contains trailing data.'
+        }
+        return $items.ToArray()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 $previous = @{
     Port = $env:X64DBG_MCP_PORT
     Token = $env:X64DBG_MCP_TOKEN
@@ -80,6 +132,7 @@ $previous = @{
 $debuggerProcess = $null
 try {
     Write-Verbose "Launching isolated debugger: $debugger"
+    Remove-Item -LiteralPath $argumentObservation -Force -ErrorAction SilentlyContinue
     $env:X64DBG_MCP_PORT = [string]$port
     $env:X64DBG_MCP_TOKEN = $token
     $env:X64DBG_MCP_SERVER_PATH = $server
@@ -145,11 +198,37 @@ try {
         $invalidLaunch.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
         throw 'debuggee.launch did not reject a relative path before queuing InitDebug.'
     }
-    $launch = Invoke-Tool 'debuggee.launch' @{
+    # Keep this Windows PowerShell 5.1 script ASCII-only: UTF-8 without a BOM is
+    # otherwise decoded through the active ANSI code page before JSON encoding.
+    $unicodeArgument = -join @([char]0x5169, [char]0x500b, [char]0x5b57)
+    [string[]]$launchArgumentValues = @(
+        '', 'plain', 'with space', 'quote"inside', 'trail\', 'comma,value', $unicodeArgument
+    )
+    $launchArguments = @{
         operation_id = [Guid]::NewGuid().ToString()
         path = $fixture
         working_directory = $backendRoot
-    } 4
+        arguments = $launchArgumentValues
+    }
+    $launch = Invoke-Tool 'debuggee.launch' $launchArguments 4
+    $launchReplay = Invoke-Tool 'debuggee.launch' $launchArguments 204
+    Assert-ExactStringSequence $launch.arguments $launchArgumentValues 'Launch result arguments'
+    if (($launch | ConvertTo-Json -Compress -Depth 10) -ne
+        ($launchReplay | ConvertTo-Json -Compress -Depth 10)) {
+        throw 'debuggee.launch did not replay the admitted operation exactly.'
+    }
+    $launchConflict = Invoke-Mcp 'tools/call' @{
+        name = 'debuggee.launch'; arguments = @{
+            operation_id = $launchArguments.operation_id
+            path = $fixture
+            working_directory = $backendRoot
+            arguments = @('different')
+        }
+    } 205
+    if (!$launchConflict.isError -or
+        $launchConflict.structuredContent.error.code -ne 'OPERATION_ID_CONFLICT') {
+        throw 'debuggee.launch did not reject changed arguments under a reused operation_id.'
+    }
     $state = Invoke-Tool 'debugger.state' @{} 5
     if ($state.debuggee_state -ne 'paused') {
         throw "Fixture did not reach paused state; actual=$($state.debuggee_state)"
@@ -788,6 +867,22 @@ try {
         throw 'Step-out was not callback-confirmed at the fixture return or replay-safe.'
     }
 
+    $argumentDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (!(Test-Path -LiteralPath $argumentObservation) -and
+           [DateTime]::UtcNow -lt $argumentDeadline) {
+        Start-Sleep -Milliseconds 50
+    }
+    if (!(Test-Path -LiteralPath $argumentObservation)) {
+        throw 'Fixture did not record its received launch arguments.'
+    }
+    $observedArguments = Read-ObservedArguments $argumentObservation
+    if (![string]::Equals([System.IO.Path]::GetFullPath($observedArguments[0]),
+            [System.IO.Path]::GetFullPath($fixture), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Fixture observed an unexpected argv[0] executable path.'
+    }
+    Assert-ExactStringSequence @($observedArguments | Select-Object -Skip 1) `
+        $launchArgumentValues 'Fixture-observed launch arguments'
+
     $markerAddressValue = [Convert]::ToUInt64($markerSymbol.location.address.Substring(2), 16)
     $markerMap = Invoke-Tool 'memory.map' @{
         module = $fixtureModule.name.ToUpperInvariant(); committed_only = $true
@@ -958,6 +1053,9 @@ try {
         sidecar_port = $port
         architecture = $state.architecture
         launched_path = $launch.path
+        launch_arguments_exact = $true
+        launch_replay_equal = $true
+        launch_conflict_rejected = $true
         process_id = $state.process_id
         registers = @($registers.registers.PSObject.Properties).Count
         memory_bytes = $memory.bytes_read
@@ -1055,5 +1153,6 @@ try {
     $env:X64DBG_MCP_TOKEN = $previous.Token
     $env:X64DBG_MCP_SERVER_PATH = $previous.Server
     $env:X64DBG_MCP_MAX_REQUESTS_PER_SECOND = $previous.Rate
+    Remove-Item -LiteralPath $argumentObservation -Force -ErrorAction SilentlyContinue
     Write-Verbose 'Integration cleanup finished'
 }

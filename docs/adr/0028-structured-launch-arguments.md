@@ -10,11 +10,12 @@ opaque string would mix caller intent, Windows `argv` serialization, and x64dbg
 command syntax. It would also make operation replay identity ambiguous and could
 turn quoting mistakes into additional debugger commands.
 
-The pinned x64dbg command buffer is `deflen` (1,024 bytes). Its own startup path
-escapes backslashes and quotes before placing a command line inside the quoted
-second argument of `init`. The debuggee command line itself must independently
-obey the Windows `CommandLineToArgvW` inverse rules, especially for embedded
-quotes and trailing backslashes.
+The pinned x64dbg command buffer is `deflen` (1,024 bytes). x64dbg's nested
+`init` command-string escaping does not preserve every already-quoted Windows
+argument: real integration showed an embedded quote collapsing that and later
+arguments into one `argv` entry. The SDK's `SetCmdline` function can instead
+commit a complete command line while the newly created process is still at its
+initial actionable pause.
 
 ## Decision
 
@@ -31,21 +32,22 @@ strings, whitespace, commas, quotes, backslashes, and non-ASCII text are valid.
 The field is optional for compatibility and omission is identical to an empty
 array.
 
-The native adapter performs two separate transformations:
+The native adapter performs two separate steps:
 
 1. `QuoteWindowsArgument` serializes every array element as one always-quoted
    Windows argument. Runs of backslashes before a quote are doubled plus one;
    terminal backslashes are doubled before the closing quote. Arguments are
    joined by one ASCII space.
-2. `EscapeX64dbgCommandArgument` escapes every backslash and quote in that
-   rendered command line before inserting it into the fixed
-   `init "path", "command line", "working directory"` template.
+2. It launches the executable with an empty argument field through the fixed
+   `scriptcmd init` template, waits for an actionable initial pause, and calls
+   `DbgFunctions()->SetCmdline` with the quoted executable plus rendered array.
+   This occurs before any backend-issued resume and therefore before user code.
 
-The implementation converts the rendered command line to UTF-16 and rejects a
+The implementation converts the complete process command line to UTF-16 and rejects a
 Windows command line above 32,766 code units. It separately rejects a rendered
-UTF-8 argument string above 768 bytes or any final x64dbg command that would not
-fit, including its terminator, in `deflen`. Paths retain ADR 0002 canonicalization
-and are escaped through the same x64dbg command-argument function. No shell,
+UTF-8 argument string above 768 bytes or the fixed path-only launch command if it
+would not fit, including its terminator, in `deflen`. Paths retain ADR 0002
+canonicalization and x64dbg command escaping. No shell,
 environment expansion, response file, script, or arbitrary debugger command is
 invoked.
 
@@ -76,8 +78,8 @@ launch tests remain required.
 
 ## Consequences
 
-Launch arguments become convenient without exposing raw command syntax. The
-practical command size is lower than Windows' theoretical maximum because the
-pinned debugger command transport is itself bounded; rejection is explicit and
-occurs before `DbgCmdExec`. Longer command lines require a future typed native
-launch API rather than silent truncation.
+Launch arguments become convenient without exposing raw command syntax. A
+failure after process creation but before `SetCmdline` confirmation is reported
+as outcome-unknown and the operation ledger forbids automatic resubmission.
+The debugger's 1,024-byte command limit applies only to canonical paths; the
+separately bounded argument array is not nested in that command string.

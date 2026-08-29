@@ -23,10 +23,10 @@ asynchronous command queue, then waits for either a registered debugger callback
 a directly observable bounded postcondition, or the private command-queue fence
 defined by ADR 0016. Breakpoint commands contain only a validated,
 re-formatted numeric address. `debuggee.launch` contains only canonical existing
-paths in fixed quoted `InitDebug` positions; Windows-forbidden quotes and control
-characters cannot enter the command and raw command-line arguments are not
-accepted. Timeout after submission is reported as unknown and is never retried
-automatically.
+paths in fixed quoted `scriptcmd init` positions. Structured arguments are
+Windows-quoted by the plugin and committed at the initial actionable pause with
+`DBGFUNCTIONS::SetCmdline`, never inserted as caller command syntax. A failure
+after launch submission is outcome-unknown and is never retried automatically.
 
 `debuggee.attach` accepts only a validated numeric PID, rejects the debugger
 host and owned sidecar PIDs, and renders the fixed command as hexadecimal. It
@@ -75,7 +75,7 @@ not mutated anything.
 | `assembly.patch` | `Assemble`, `PatchInRange`, `DbgMemRead`, `MemPatch`, `PatchGetEx` | paused | exact 1-16 byte compare-before-write; no overlapping tracked patch; one mutation call; exact memory and per-byte patch-record verification |
 | `patches.restore` | `DbgMemRead`, `PatchGetEx`, `PatchRestoreRange`, `PatchInRange` | paused | exact patched/original preconditions; one inclusive range restore; exact read-back and empty patch-range confirmation |
 | `patches.list` | `PatchEnum`, `DbgMemRead`, `Script::Module::GetList` | paused | same-executor-thread byte-size probe/enumeration/reprobe; max 65,536 zero-initialized records and current bytes; sorted adjacent ranges; content-fingerprint cursor; all Bridge lists released |
-| `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; ignores transient process-created pause and confirms a later actionable callback |
+| `debuggee.launch` | `DbgCmdExec` (`scriptcmd init`), `DBGFUNCTIONS::SetCmdline` | absent | canonical existing executable/directory; path-only fixed command; confirms an actionable initial pause, then commits an independently Windows-quoted command line before resume; post-submit failure is outcome-unknown |
 | `debuggee.attach` | `DbgCmdExec` (`attach 0x<pid>`) | absent | rejects debugger/sidecar PIDs; matching pre-attach `CB_ATTACH` PID, then a newer paused callback and current PID; no enumeration or process handle retained |
 | `debuggee.detach` | `DbgCmdExec` (`detach`) | attached and paused/running | matching `CB_DETACH`, then newer `CB_STOPDEBUG`; preserves the externally owned process; generic stop is rejected |
 | `analysis.function` | `DbgCmdExec` (`analr`), private command fence, `Script::Function::GetInfo` | paused | one resolved function in a module no larger than 128 MiB; queue-fence plus marker and generation confirmation; no GUI selection |

@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.9.0"
-  minimum-backend-version: "0.9.0"
+  version: "0.10.0"
+  minimum-backend-version: "0.10.0"
   mcp-protocol: "2025-06-18"
 ---
 
@@ -22,6 +22,11 @@ session cleanup.
 Begin with `debugger.state` and retain its `instance_id`. Respect the reported state and each tool
 schema; most inspection requires `paused`. Tool names below are backend-local. A Gateway may prepend a namespace, so
 select the connected backend whose published tool name ends with the documented local name.
+
+Use `debuggee.launch` only for an authorized absolute executable path. Supply arguments as the
+structured `arguments` string array; never pre-quote them or combine them into a raw command line.
+The backend preserves empty strings, spaces, quotes, backslashes, commas, and Unicode and returns
+only after committing the command line at the initial actionable pause.
 
 Use `registers.write` for one full-width core register at a time. Preserve the original value
 when the workflow requires restoration, use a fresh operation ID only for that distinct restore,

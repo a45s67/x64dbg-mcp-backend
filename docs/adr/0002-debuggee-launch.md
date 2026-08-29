@@ -45,12 +45,11 @@ debuggee.launch(path, working_directory?, operation_id)
   executable-entry breakpoints. A configurable `break_on_entry` flag is not
   exposed until x64dbg provides a contract the backend can enforce precisely.
 
-## Deferred command-line arguments
+## Command-line arguments (resolved by ADR 0028)
 
-Debuggee arguments will use a structured string array, never one raw command
-string. They are deferred until Windows argv quoting and the second x64dbg
-command-parser escaping layer have round-trip tests for quotes, trailing
-backslashes, Unicode, empty arguments, commas, and whitespace.
+ADR 0028 adds the planned structured string array, never one raw command string.
+Its x32/x64 round-trip fixtures cover quotes, trailing backslashes, Unicode,
+empty arguments, commas, and whitespace.
 
 ## Security and lifecycle consequences
 

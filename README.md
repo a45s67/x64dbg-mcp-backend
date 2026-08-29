@@ -28,6 +28,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0019-typed-hardware-and-memory-breakpoints.md`](docs/adr/0019-typed-hardware-and-memory-breakpoints.md)
 - [`docs/adr/0020-bounded-assembly-and-verified-patches.md`](docs/adr/0020-bounded-assembly-and-verified-patches.md)
 - [`docs/adr/0021-native-mutation-fuzzing-and-asan.md`](docs/adr/0021-native-mutation-fuzzing-and-asan.md)
+- [`docs/adr/0022-defer-fuzzing-pending-toolchain-survey.md`](docs/adr/0022-defer-fuzzing-pending-toolchain-survey.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
 - [`docs/reference-implementation-review.md`](docs/reference-implementation-review.md)

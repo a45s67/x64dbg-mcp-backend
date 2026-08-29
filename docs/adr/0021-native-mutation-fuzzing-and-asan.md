@@ -1,6 +1,9 @@
 # ADR 0021: Bounded native mutation fuzzing and AddressSanitizer gate
 
-Status: Accepted before implementation on 2026-08-29.
+Status: Superseded before merge by ADR 0022 on 2026-08-29.
+
+The implementation described below was prototyped locally but deliberately not
+retained. ADR 0022 records why a toolchain survey must precede any replacement.
 
 ## Context
 

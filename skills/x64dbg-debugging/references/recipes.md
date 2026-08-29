@@ -32,6 +32,21 @@ inspect, not permission to delete by address.
 If the plugin reports draining, cancelled, or unavailable, stop issuing work and let debugger
 shutdown finish.
 
+## Assembly and reversible patches
+
+1. Resolve a module/RVA and read the entire instruction to be replaced.
+2. Call `assembly.preview` at that same structured address. Preview is read-only.
+3. After explicit mutation authorization, call `assembly.patch` with the exact original bytes,
+   one instruction, `fill_nop`, and a fresh operation UUID.
+4. Preserve the returned `patched_bytes_hex` and `original_bytes_hex`. Do not layer another patch
+   over that range.
+5. To undo it, call `patches.restore` with those exact strings and a different operation UUID.
+6. Re-read memory before executing restored code. Treat any conflict or unknown outcome as a state
+   to inspect, never as permission for a second write.
+
+Both mutation tools are limited to 16 bytes. They reject stale memory, hidden patch records,
+no-op patches, multi-command text, and unsafe address-only restore.
+
 ## Breakpoint and pause loop
 
 1. Identify the loaded module with `modules.list`. Prefer a stable module/RVA reference.

@@ -30,6 +30,7 @@
 #include "breakpoint_policy.h"
 #include "jansson/jansson.h"
 #include "memory_filters.h"
+#include "patch_policy.h"
 #include "register_policy.h"
 
 namespace mcp {
@@ -61,6 +62,18 @@ std::string Hex(const std::span<const unsigned char> bytes) {
     for (std::size_t index = 0; index < bytes.size(); ++index) {
         result[index * 2U] = digits[bytes[index] >> 4U];
         result[index * 2U + 1U] = digits[bytes[index] & 0x0fU];
+    }
+    return result;
+}
+
+std::string BoundedNativeError(const std::span<const char> bytes) {
+    const std::size_t length =
+        (std::min)(strnlen_s(bytes.data(), bytes.size()), std::size_t{256U});
+    std::string result;
+    result.reserve(length);
+    for (std::size_t index = 0; index < length; ++index) {
+        const unsigned char byte = static_cast<unsigned char>(bytes[index]);
+        result.push_back(byte >= 0x20U && byte <= 0x7eU ? static_cast<char>(byte) : '?');
     }
     return result;
 }
@@ -157,6 +170,10 @@ struct Request {
     std::uint64_t registerWriteValue{0U};
     std::string breakpointAccess;
     std::size_t breakpointSize{0U};
+    std::string instruction;
+    std::vector<unsigned char> expectedBytes;
+    std::vector<unsigned char> expectedOriginalBytes;
+    bool fillNop{false};
 };
 
 bool IsMutation(const std::string_view method) {
@@ -169,6 +186,7 @@ bool IsMutation(const std::string_view method) {
            method == "breakpoints.hardware.remove" ||
            method == "breakpoints.memory.set" ||
            method == "breakpoints.memory.remove" ||
+           method == "assembly.patch" || method == "patches.restore" ||
            method == "debuggee.launch" || method == "debuggee.attach" ||
            method == "debuggee.detach" || method == "analysis.function";
 }
@@ -445,6 +463,10 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::uint64_t registerWriteValue = 0U;
     std::string breakpointAccess;
     std::size_t breakpointSize = 0U;
+    std::string instruction;
+    std::vector<unsigned char> expectedBytes;
+    std::vector<unsigned char> expectedOriginalBytes;
+    bool fillNop = false;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
@@ -754,6 +776,42 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             }
             instructionCount = static_cast<std::size_t>(json_integer_value(count));
         }
+    } else if (methodValue == "assembly.preview" || methodValue == "assembly.patch") {
+        json_t* instructionValue = json_object_get(payload, "instruction");
+        const bool patch = methodValue == "assembly.patch";
+        const std::size_t expectedFields = patch ? 5U : 2U;
+        if (json_object_size(payload) != expectedFields ||
+            !ParseAddressReference(json_object_get(payload, "address"), addressValue) ||
+            !json_is_string(instructionValue)) return std::nullopt;
+        instruction.assign(json_string_value(instructionValue),
+                           json_string_length(instructionValue));
+        if (!SafeInstruction(instruction)) return std::nullopt;
+        if (patch) {
+            json_t* expected = json_object_get(payload, "expected_bytes_hex");
+            json_t* fill = json_object_get(payload, "fill_nop");
+            if (!json_is_string(json_object_get(payload, "operation_id")) ||
+                !json_is_string(expected) || !json_is_boolean(fill)) return std::nullopt;
+            const auto parsedBytes = ParsePatchBytes(std::string_view(
+                json_string_value(expected), json_string_length(expected)));
+            if (!parsedBytes) return std::nullopt;
+            expectedBytes = *parsedBytes;
+            fillNop = json_is_true(fill);
+        }
+    } else if (methodValue == "patches.restore") {
+        json_t* patched = json_object_get(payload, "expected_patched_bytes_hex");
+        json_t* original = json_object_get(payload, "expected_original_bytes_hex");
+        if (json_object_size(payload) != 4U ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !ParseAddressReference(json_object_get(payload, "address"), addressValue) ||
+            !json_is_string(patched) || !json_is_string(original)) return std::nullopt;
+        const auto parsedPatched = ParsePatchBytes(std::string_view(
+            json_string_value(patched), json_string_length(patched)));
+        const auto parsedOriginal = ParsePatchBytes(std::string_view(
+            json_string_value(original), json_string_length(original)));
+        if (!parsedPatched || !parsedOriginal || parsedPatched->size() != parsedOriginal->size() ||
+            *parsedPatched == *parsedOriginal) return std::nullopt;
+        expectedBytes = *parsedPatched;
+        expectedOriginalBytes = *parsedOriginal;
     } else if (methodValue == "debugger.pause" || methodValue == "debugger.resume" ||
                methodValue == "debugger.step_into" || methodValue == "debugger.step_over" ||
                methodValue == "debugger.step_out" || methodValue == "debugger.stop") {
@@ -822,7 +880,9 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(moduleFilter), std::move(query), std::move(stringEncoding),
                    minStringLength, stringContextBytes, cursorFingerprint, discoveryCursorInvalid,
                    committedOnly, executableOnly, compact, std::move(registerName),
-                   registerWriteValue, std::move(breakpointAccess), breakpointSize};
+                   registerWriteValue, std::move(breakpointAccess), breakpointSize,
+                   std::move(instruction), std::move(expectedBytes),
+                   std::move(expectedOriginalBytes), fillNop};
 }
 
 bool IsAcceptedHandshakeAck(const std::string_view bytes) {
@@ -1580,6 +1640,9 @@ void Runtime::Worker() noexcept {
                                            parsed->method == "breakpoints.hardware.remove" ||
                                            parsed->method == "breakpoints.memory.set" ||
                                            parsed->method == "breakpoints.memory.remove" ||
+                                           parsed->method == "assembly.preview" ||
+                                           parsed->method == "assembly.patch" ||
+                                           parsed->method == "patches.restore" ||
                                            parsed->method == "disassembly.read" ||
                                            parsed->method == "references.to";
                 std::optional<ResolvedLocation> resolvedLocation;
@@ -1613,6 +1676,211 @@ void Runtime::Worker() noexcept {
                            ",\"state_generation\":" + std::to_string(resolvedGeneration) +
                            ",\"status\":\"ok\",\"result\":" +
                            LocationJson(*resolvedLocation, resolvedGeneration) + "}";
+                }
+                if (parsed->method == "assembly.preview" ||
+                    parsed->method == "assembly.patch" ||
+                    parsed->method == "patches.restore") {
+                    const duint address = resolvedLocation->address;
+                    const DBGFUNCTIONS* functions = DbgFunctions();
+                    const bool preview = parsed->method == "assembly.preview";
+                    const bool patch = parsed->method == "assembly.patch";
+                    if (functions == nullptr ||
+                        (preview && functions->Assemble == nullptr) ||
+                        (patch &&
+                         (functions->Assemble == nullptr || functions->PatchInRange == nullptr ||
+                          functions->PatchGetEx == nullptr || functions->MemPatch == nullptr)) ||
+                        (!preview && !patch &&
+                         (functions->PatchInRange == nullptr ||
+                          functions->PatchGetEx == nullptr ||
+                          functions->PatchRestoreRange == nullptr))) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "assembler or patch APIs are unavailable", false,
+                                             false);
+                    }
+                    std::array<unsigned char, 16> assembled{};
+                    int assembledSize = 0;
+                    if (parsed->method != "patches.restore") {
+                        std::array<char, MAX_ERROR_SIZE> nativeError{};
+                        if (!functions->Assemble(address, assembled.data(), &assembledSize,
+                                                 parsed->instruction.c_str(),
+                                                 nativeError.data()) ||
+                            assembledSize < 1 || assembledSize > 16) {
+                            const std::string boundedError = BoundedNativeError(nativeError);
+                            const std::string message = boundedError.empty()
+                                ? "instruction could not be assembled"
+                                : "instruction could not be assembled: " + boundedError;
+                            return ErrorResponse(*parsed, "INVALID_ARGUMENT", message, false,
+                                                 false);
+                        }
+                    }
+                    if (parsed->method == "assembly.preview") {
+                        if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "debugger changed during assembly preview", true,
+                                                 false);
+                        }
+                        const std::span<const unsigned char> bytes(
+                            assembled.data(), static_cast<std::size_t>(assembledSize));
+                        return "{\"request_id\":" + JsonString(parsed->requestId) +
+                               ",\"state_generation\":" +
+                               std::to_string(resolvedGeneration) +
+                               ",\"status\":\"ok\",\"result\":{\"address\":" +
+                               JsonString(HexValue(address)) + ",\"location\":" +
+                               LocationJson(*resolvedLocation, resolvedGeneration) +
+                               ",\"instruction\":" + JsonString(parsed->instruction) +
+                               ",\"bytes_hex\":" + JsonString(Hex(bytes)) +
+                               ",\"byte_count\":" + std::to_string(bytes.size()) +
+                               ",\"state_generation\":" +
+                               std::to_string(resolvedGeneration) + "}}";
+                    }
+                    const std::size_t spanSize = parsed->expectedBytes.size();
+                    if (!PatchRangeValid(address, spanSize)) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "patch span is invalid for this architecture", false,
+                                             false);
+                    }
+                    if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed after patch address resolution",
+                                             true, false);
+                    }
+                    const duint end = address + static_cast<duint>(spanSize - 1U);
+                    std::vector<unsigned char> current(spanSize);
+                    if (!DbgMemRead(address, current.data(), static_cast<duint>(spanSize))) {
+                        return ErrorResponse(*parsed, "ACCESS_DENIED",
+                                             "patch span is not fully readable", false, false);
+                    }
+                    if (parsed->method == "assembly.patch") {
+                        if (functions->PatchInRange(address, end)) {
+                            return ErrorResponse(*parsed, "CONFLICT",
+                                                 "patch span already contains tracked patches",
+                                                 false, false);
+                        }
+                        if (current != parsed->expectedBytes) {
+                            return ErrorResponse(*parsed, "CONFLICT",
+                                                 "current memory does not match expected bytes",
+                                                 false, false);
+                        }
+                        const std::span<const unsigned char> instructionBytes(
+                            assembled.data(), static_cast<std::size_t>(assembledSize));
+                        const auto finalBytes = PreparePatchBytes(
+                            instructionBytes, parsed->expectedBytes, parsed->fillNop);
+                        if (!finalBytes) {
+                            return ErrorResponse(
+                                *parsed, "INVALID_ARGUMENT",
+                                "assembled instruction does not fit the expected span or requires fill_nop",
+                                false, false);
+                        }
+                        if (*finalBytes == parsed->expectedBytes) {
+                            return ErrorResponse(*parsed, "CONFLICT",
+                                                 "assembled patch would not change memory", false,
+                                                 false);
+                        }
+                        if (!functions->MemPatch(address, finalBytes->data(),
+                                                 static_cast<duint>(finalBytes->size()))) {
+                            return ErrorResponse(*parsed, "ACCESS_DENIED",
+                                                 "x64dbg rejected the tracked patch", false,
+                                                 false);
+                        }
+                        std::vector<unsigned char> verified(spanSize);
+                        if (!DbgMemRead(address, verified.data(), static_cast<duint>(spanSize)) ||
+                            verified != *finalBytes) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "tracked patch read-back did not match", false,
+                                                 true);
+                        }
+                        std::size_t changed = 0U;
+                        for (std::size_t index = 0; index < spanSize; ++index) {
+                            DBGPATCHINFO record{};
+                            const bool present = functions->PatchGetEx(
+                                address + static_cast<duint>(index), &record);
+                            if ((*finalBytes)[index] != parsed->expectedBytes[index]) {
+                                ++changed;
+                                if (!present || !PatchRecordMatches(
+                                                    record, address + static_cast<duint>(index),
+                                                    parsed->expectedBytes[index],
+                                                    (*finalBytes)[index])) {
+                                    return ErrorResponse(*parsed, "INTERNAL",
+                                                         "tracked patch metadata did not match",
+                                                         false, true);
+                                }
+                            } else if (present) {
+                                return ErrorResponse(*parsed, "INTERNAL",
+                                                     "unexpected patch metadata appeared", false,
+                                                     true);
+                            }
+                        }
+                        if (!functions->PatchInRange(address, end) ||
+                            !PausedSnapshotCurrent(resolvedGeneration)) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "tracked patch postcondition was not stable",
+                                                 false, true);
+                        }
+                        return "{\"request_id\":" + JsonString(parsed->requestId) +
+                               ",\"state_generation\":" +
+                               std::to_string(resolvedGeneration) +
+                               ",\"status\":\"ok\",\"result\":{\"address\":" +
+                               JsonString(HexValue(address)) + ",\"location\":" +
+                               LocationJson(*resolvedLocation, resolvedGeneration) +
+                               ",\"instruction\":" + JsonString(parsed->instruction) +
+                               ",\"original_bytes_hex\":" +
+                               JsonString(Hex(parsed->expectedBytes)) +
+                               ",\"assembled_bytes_hex\":" + JsonString(Hex(instructionBytes)) +
+                               ",\"patched_bytes_hex\":" + JsonString(Hex(*finalBytes)) +
+                               ",\"assembled_length\":" +
+                               std::to_string(instructionBytes.size()) +
+                               ",\"span_length\":" + std::to_string(spanSize) +
+                               ",\"nop_padding\":" +
+                               std::to_string(spanSize - instructionBytes.size()) +
+                               ",\"changed_bytes\":" + std::to_string(changed) +
+                               ",\"patch_tracked\":true,\"state_generation\":" +
+                               std::to_string(resolvedGeneration) + "}}";
+                    }
+                    if (current != parsed->expectedBytes) {
+                        return ErrorResponse(*parsed, "CONFLICT",
+                                             "current memory does not match expected patched bytes",
+                                             false, false);
+                    }
+                    for (std::size_t index = 0; index < spanSize; ++index) {
+                        DBGPATCHINFO record{};
+                        const bool present = functions->PatchGetEx(
+                            address + static_cast<duint>(index), &record);
+                        if (parsed->expectedBytes[index] !=
+                            parsed->expectedOriginalBytes[index]) {
+                            if (!present || !PatchRecordMatches(
+                                                record, address + static_cast<duint>(index),
+                                                parsed->expectedOriginalBytes[index],
+                                                parsed->expectedBytes[index])) {
+                                return ErrorResponse(*parsed, "CONFLICT",
+                                                     "patch metadata does not match expected bytes",
+                                                     false, false);
+                            }
+                        } else if (present) {
+                            return ErrorResponse(*parsed, "CONFLICT",
+                                                 "patch span contains unexpected metadata", false,
+                                                 false);
+                        }
+                    }
+                    functions->PatchRestoreRange(address, end);
+                    std::vector<unsigned char> restored(spanSize);
+                    if (!DbgMemRead(address, restored.data(), static_cast<duint>(spanSize)) ||
+                        restored != parsed->expectedOriginalBytes ||
+                        functions->PatchInRange(address, end) ||
+                        !PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "patch restore postcondition did not match", false,
+                                             true);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(resolvedGeneration) +
+                           ",\"status\":\"ok\",\"result\":{\"address\":" +
+                           JsonString(HexValue(address)) + ",\"location\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"restored_bytes_hex\":" +
+                           JsonString(Hex(parsed->expectedOriginalBytes)) +
+                           ",\"bytes_restored\":" + std::to_string(spanSize) +
+                           ",\"patch_tracked\":false,\"state_generation\":" +
+                           std::to_string(resolvedGeneration) + "}}";
                 }
                 if (parsed->method == "analysis.function") {
                     if (!resolvedLocation->module || !resolvedLocation->moduleBase ||

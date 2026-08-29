@@ -182,6 +182,50 @@ try {
         throw 'Installed read tools did not preserve the stable main-pause generation.'
     }
 
+    # Patch the next instruction, verify x64dbg tracking, and restore it before execution.
+    $patchInstructionTarget = @($disassemblySnapshot.items)[1]
+    if (!$patchInstructionTarget -or $patchInstructionTarget.size -lt 1 -or
+        $patchInstructionTarget.size -gt 16) {
+        throw 'Main disassembly has no bounded non-current instruction for patch qualification.'
+    }
+    $patchAddress = @{ absolute = $patchInstructionTarget.address }
+    $patchMemory = Invoke-Tool 'memory.read' @{
+        address = $patchAddress; length = $patchInstructionTarget.size
+    } 120
+    $int3Padded = 'cc' + ('90' * ($patchInstructionTarget.size - 1))
+    $patchMnemonic = if ($patchMemory.data_hex -eq $int3Padded) { 'nop' } else { 'int3' }
+    $patchPreview = Invoke-Tool 'assembly.preview' @{
+        address = $patchAddress; instruction = $patchMnemonic
+    } 121
+    $patchArguments = @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $patchAddress
+        instruction = $patchMnemonic; expected_bytes_hex = $patchMemory.data_hex
+        fill_nop = $true
+    }
+    $trackedPatch = Invoke-Tool 'assembly.patch' $patchArguments 122
+    $trackedPatchReplay = Invoke-Tool 'assembly.patch' $patchArguments 123
+    if (!$trackedPatch.patch_tracked -or $patchPreview.byte_count -ne 1 -or
+        ($trackedPatch | ConvertTo-Json -Compress -Depth 12) -ne
+        ($trackedPatchReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Installed tracked patch was not previewed, verified, or replay-safe.'
+    }
+    $restoreArguments = @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $patchAddress
+        expected_patched_bytes_hex = $trackedPatch.patched_bytes_hex
+        expected_original_bytes_hex = $patchMemory.data_hex
+    }
+    $patchRestore = Invoke-Tool 'patches.restore' $restoreArguments 124
+    $patchRestoreReplay = Invoke-Tool 'patches.restore' $restoreArguments 125
+    $patchMemoryAfterRestore = Invoke-Tool 'memory.read' @{
+        address = $patchAddress; length = $patchInstructionTarget.size
+    } 126
+    if ($patchRestore.patch_tracked -or
+        $patchMemoryAfterRestore.data_hex -ne $patchMemory.data_hex -or
+        ($patchRestore | ConvertTo-Json -Compress -Depth 12) -ne
+        ($patchRestoreReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Installed patch restore did not exactly recover checksum.exe bytes.'
+    }
+
     $moduleName = [System.IO.Path]::GetFileName($sample).ToUpperInvariant()
     $mainSymbols = Invoke-Tool 'symbols.search' @{
         module = $moduleName; query = 'main.main'; limit = 32
@@ -392,6 +436,12 @@ try {
         register_write_value = $registerWrite.value
         register_write_replay_equal = $true
         register_restore_value = $registerAfterRestore.registers.$writableRegister
+        patch_address = $patchInstructionTarget.address
+        patch_instruction = $patchMnemonic
+        patch_span_length = $trackedPatch.span_length
+        patch_replay_equal = $true
+        patch_restore_replay_equal = $true
+        patch_restored_bytes_equal = $true
         hardware_breakpoint_address = $hardwarePause.instruction_pointer
         hardware_breakpoint_replay_equal = $true
         memory_breakpoint_address = $memoryPause.instruction_pointer

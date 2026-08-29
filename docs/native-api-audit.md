@@ -70,6 +70,9 @@ not mutated anything.
 | breakpoint set/remove | `DbgCmdExec`, `DbgGetBpxTypeAt` | paused | validated address only; bounded observation loop |
 | typed hardware breakpoint set/remove | fixed `bphws`/`bphwc`, `GetBridgeBp`, `DbgGetBpList` | actionable pause | enum-only command composition; x86/x64 size/alignment; four enabled slots; exact access/size/slot read-back; shape-matched remove |
 | typed memory breakpoint set/remove | fixed `bpmrange`/`bpmc`, `DbgMemFindBaseAddr`, `GetBridgeBp`, `MemBpSize` | paused | 1-65536 bytes in one region; exact access/size read-back; shape-matched remove |
+| `assembly.preview` | `DBGFUNCTIONS::Assemble` | paused | one printable ASCII instruction; fixed 16-byte output and 256-byte printable error bound; no memory or patch call |
+| `assembly.patch` | `Assemble`, `PatchInRange`, `DbgMemRead`, `MemPatch`, `PatchGetEx` | paused | exact 1-16 byte compare-before-write; no overlapping tracked patch; one mutation call; exact memory and per-byte patch-record verification |
+| `patches.restore` | `DbgMemRead`, `PatchGetEx`, `PatchRestoreRange`, `PatchInRange` | paused | exact patched/original preconditions; one inclusive range restore; exact read-back and empty patch-range confirmation |
 | `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; ignores transient process-created pause and confirms a later actionable callback |
 | `debuggee.attach` | `DbgCmdExec` (`attach 0x<pid>`) | absent | rejects debugger/sidecar PIDs; matching pre-attach `CB_ATTACH` PID, then a newer paused callback and current PID; no enumeration or process handle retained |
 | `debuggee.detach` | `DbgCmdExec` (`detach`) | attached and paused/running | matching `CB_DETACH`, then newer `CB_STOPDEBUG`; preserves the externally owned process; generic stop is rejected |

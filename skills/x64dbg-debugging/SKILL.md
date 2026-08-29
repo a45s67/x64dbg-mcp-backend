@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.6.0"
-  minimum-backend-version: "0.6.0"
+  version: "0.7.0"
+  minimum-backend-version: "0.7.0"
   mcp-protocol: "2025-06-18"
 ---
 
@@ -16,7 +16,7 @@ detached server process when the endpoint is offline.
 
 For an explicitly authorized existing process, use `debuggee.attach(process_id, operation_id)`;
 the backend never enumerates processes. Attached sessions report `session_origin: "attached"`.
-Use `debuggee.detach` to preserve that pre-existing process—never use `debugger.stop` as attached
+Use `debuggee.detach` to preserve that pre-existing process. Never use `debugger.stop` as attached
 session cleanup.
 
 Begin with `debugger.state`. Respect the reported state and each tool schema; most inspection
@@ -29,11 +29,17 @@ and verify the returned read-back. `debugger.step_out` stops at the current fram
 instruction; inspect `completed` and the returned pause reason before continuing.
 
 Use `breakpoints.hardware.set` only after transient `process_created` and `system_breakpoint`
-startup pauses. Choose one exact
-access and naturally aligned architecture-supported size; there are four logical slots. Use
-`breakpoints.memory.set` only for an intentionally bounded guard-page range. Typed removals require
-the original access and size, so inspect `breakpoints.list` rather than guessing externally changed
-state.
+startup pauses. Choose one exact access and naturally aligned architecture-supported size; there
+are four logical slots. Use `breakpoints.memory.set` only for an intentionally bounded guard-page
+range. Typed removals require the original access and size, so inspect `breakpoints.list` rather
+than guessing externally changed state.
+
+Use `assembly.preview` to obtain debugger-architecture bytes without changing memory. For an
+authorized code change, read the complete original instruction span, then call `assembly.patch`
+with those exact lowercase bytes and a fresh operation ID. Use `fill_nop: true` only when the
+assembled instruction is shorter than that span. Restore only with `patches.restore`, supplying
+both the exact patched and original bytes returned by the patch workflow. A conflict means memory
+or x64dbg patch metadata changed; re-inspect it instead of forcing a write or address-only restore.
 
 Prefer `{ "module": "sample.exe", "rva": "0x..." }` for address-taking tools. This keeps ASLR
 translation native and atomic. Use `address.resolve` when the absolute runtime address or canonical

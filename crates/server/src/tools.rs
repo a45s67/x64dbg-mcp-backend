@@ -219,6 +219,58 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             one_of(object, "access", &["access", "read", "write", "execute"])?;
             integer(object, "size", 1, 65_536)
         }
+        "assembly.preview" => {
+            exact_keys(object, &["address", "instruction"], &[])?;
+            validate_address_ref(object, "address")?;
+            validate_instruction(object)
+        }
+        "assembly.patch" => {
+            operation(
+                object,
+                &["address", "instruction", "expected_bytes_hex", "fill_nop"],
+            )?;
+            validate_address_ref(object, "address")?;
+            validate_instruction(object)?;
+            validate_byte_hex(object, "expected_bytes_hex")?;
+            if !object.get("fill_nop").is_some_and(Value::is_boolean) {
+                return Err(invalid("fill_nop", "must be a boolean"));
+            }
+            Ok(())
+        }
+        "patches.restore" => {
+            operation(
+                object,
+                &[
+                    "address",
+                    "expected_patched_bytes_hex",
+                    "expected_original_bytes_hex",
+                ],
+            )?;
+            validate_address_ref(object, "address")?;
+            validate_byte_hex(object, "expected_patched_bytes_hex")?;
+            validate_byte_hex(object, "expected_original_bytes_hex")?;
+            let patched = object
+                .get("expected_patched_bytes_hex")
+                .and_then(Value::as_str)
+                .ok_or(invalid(
+                    "expected_patched_bytes_hex",
+                    "has an invalid string value",
+                ))?;
+            let original = object
+                .get("expected_original_bytes_hex")
+                .and_then(Value::as_str)
+                .ok_or(invalid(
+                    "expected_original_bytes_hex",
+                    "has an invalid string value",
+                ))?;
+            if patched.len() != original.len() || patched == original {
+                return Err(invalid(
+                    "expected_original_bytes_hex",
+                    "must have equal length and differ from patched bytes",
+                ));
+            }
+            Ok(())
+        }
         "disassembly.read" => {
             exact_keys(object, &["address"], &["count"])?;
             validate_address_ref(object, "address")?;
@@ -421,6 +473,38 @@ fn validate_hex(value: &str, field: &'static str) -> Result<(), ValidationError>
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err(invalid(field, "must be canonical lowercase hexadecimal"));
+    }
+    Ok(())
+}
+
+fn validate_instruction(object: &serde_json::Map<String, Value>) -> Result<(), ValidationError> {
+    let value = string(object, "instruction", 1, 128)?;
+    if value
+        .bytes()
+        .any(|byte| !(0x20..=0x7e).contains(&byte) || byte == b';')
+    {
+        return Err(invalid(
+            "instruction",
+            "must be one printable ASCII instruction without semicolons",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_byte_hex(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+) -> Result<(), ValidationError> {
+    let value = string(object, field, 2, 32)?;
+    if value.len() % 2 != 0
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid(
+            field,
+            "must contain 1 to 16 lowercase hexadecimal bytes",
+        ));
     }
     Ok(())
 }
@@ -783,6 +867,44 @@ fn build_catalog() -> Vec<Value> {
             true,
         ),
         read_tool(
+            "assembly.preview",
+            "Assemble exactly one printable ASCII instruction at a paused runtime address and return at most 16 bytes without changing memory.",
+            object(
+                vec![
+                    ("address", address_ref()),
+                    (
+                        "instruction",
+                        json!({"type":"string","minLength":1,"maxLength":128,"pattern":"^[ -:<>-~]+$"}),
+                    ),
+                ],
+                vec!["address", "instruction"],
+            ),
+        ),
+        mutation_tool(
+            "assembly.patch",
+            "Assemble one instruction and patch an exact 1-16 byte span only when current memory equals expected_bytes_hex and no tracked patch exists. Short instructions require fill_nop=true.",
+            operation_schema(vec![
+                ("address", address_ref()),
+                (
+                    "instruction",
+                    json!({"type":"string","minLength":1,"maxLength":128,"pattern":"^[ -:<>-~]+$"}),
+                ),
+                ("expected_bytes_hex", byte_hex_schema()),
+                ("fill_nop", json!({"type":"boolean"})),
+            ]),
+            true,
+        ),
+        mutation_tool(
+            "patches.restore",
+            "Restore one exact 1-16 byte tracked patch only when memory and every x64dbg patch record match both supplied byte strings.",
+            operation_schema(vec![
+                ("address", address_ref()),
+                ("expected_patched_bytes_hex", byte_hex_schema()),
+                ("expected_original_bytes_hex", byte_hex_schema()),
+            ]),
+            true,
+        ),
+        read_tool(
             "disassembly.read",
             "Decode at most 256 instructions from an absolute or module-relative address while paused.",
             object(
@@ -929,6 +1051,10 @@ fn canonical_hex() -> Value {
     json!({ "type": "string", "pattern": "^0x[0-9a-f]+$", "minLength": 3, "maxLength": 34 })
 }
 
+fn byte_hex_schema() -> Value {
+    json!({"type":"string","pattern":"^(?:[0-9a-f]{2}){1,16}$","minLength":2,"maxLength":32})
+}
+
 fn address_ref() -> Value {
     json!({
         "oneOf": [
@@ -1068,7 +1194,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 34);
+        assert_eq!(catalog().len(), 37);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -1155,6 +1281,57 @@ mod tests {
                 })
             )
             .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "assembly.preview",
+                &json!({"address":"0x1000","instruction":"xor eax, eax"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "assembly.patch",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "address":{"module":"sample.exe","rva":"0x1000"},
+                    "instruction":"int3",
+                    "expected_bytes_hex":"4889c8",
+                    "fill_nop":true
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "patches.restore",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "address":"0x1000",
+                    "expected_patched_bytes_hex":"cc9090",
+                    "expected_original_bytes_hex":"4889c8"
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "assembly.preview",
+                &json!({"address":"0x1000","instruction":"nop; run"})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "patches.restore",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "address":"0x1000",
+                    "expected_patched_bytes_hex":"cc",
+                    "expected_original_bytes_hex":"cc"
+                })
+            )
+            .is_err()
         );
         assert!(
             validate_arguments(

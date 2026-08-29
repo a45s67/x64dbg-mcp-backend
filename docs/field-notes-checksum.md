@@ -829,3 +829,35 @@ The backend publishes 34 tools and managed skill 0.6.0. Package SHA-256 is
 `db1c20ae4d786891ea7599ffc63ea5283798694590357fdddd13942232a1d38f`.
 Deployment preserved the installed bearer token and refreshed both static Codex
 registrations.
+
+## 2026-08-29 bounded assembly and verified patch follow-up
+
+ADR 0020 separates read-only `assembly.preview` from destructive
+`assembly.patch` and `patches.restore`. All three accept structured addresses and
+one instruction span of at most 16 bytes. Patch requires exact current bytes and
+an empty x64dbg patch range before its single `MemPatch` call; restore requires
+both expected patched bytes and the original bytes recorded per changed byte.
+Unknown postconditions are reported without automatic rollback or a second
+mutation.
+
+Rust retained 49 unit/contract tests and six supervised-shutdown tests. Both
+native architectures now pass eleven tests, including the new patch policy
+suite. Fresh isolated x32 and x64 runs previewed `int3`, rejected stale expected
+bytes and an overlapping tracked range, patched and NOP-padded one fixture
+instruction, replayed both mutations byte-identically, restored the exact
+original bytes, and exited with both loopback ports closed.
+
+The installed `checksum.exe` qualification resolved `CHECKSUM.EXE+0xa78a0` to
+`0x10a78a0` at generation 27. Before execution it patched the following
+four-byte instruction at `0x10a78a8` to `int3` plus NOP padding, confirmed exact
+operation replay and x64dbg patch tracking, then restored and re-read the
+original bytes. The restored instruction subsequently executed and hit the
+existing hardware-breakpoint qualification at the same address; a six-byte
+memory breakpoint then hit at `0x10a78ac`. The debuggee stopped, the owned
+sidecar exited, and no listener remained.
+
+The backend publishes 37 tools and the backend/managed skill advance to 0.7.0.
+Deployment preserves both config-file bearer tokens and refreshes the two Codex
+entries with static Authorization headers. The final offline-verified package
+SHA-256 is
+`1173aa212815c6dc3f39c1516e96daa8772781fc272cceef11a8d941912720c3`.

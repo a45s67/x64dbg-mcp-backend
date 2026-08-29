@@ -207,6 +207,66 @@ try {
     }
     $moduleMemory = Invoke-Tool 'memory.read' @{ address = $moduleEntryRef; length = 16 } 42
     $moduleDisassembly = Invoke-Tool 'disassembly.read' @{ address = $moduleEntryRef; count = 4 } 43
+    $patchInstructionSize = [int]$moduleDisassembly.items[0].size
+    if ($patchInstructionSize -lt 1 -or $patchInstructionSize -gt 16) {
+        throw 'Fixture entry did not begin with a bounded patchable instruction.'
+    }
+    $patchOriginalHex = $moduleMemory.data_hex.Substring(0, $patchInstructionSize * 2)
+    $patchPreview = Invoke-Tool 'assembly.preview' @{
+        address = $moduleEntryRef; instruction = 'int3'
+    } 120
+    if ($patchPreview.bytes_hex -ne 'cc' -or $patchPreview.byte_count -ne 1 -or
+        $patchPreview.state_generation -ne $state.state_generation) {
+        throw 'Assembly preview was not exact and generation-consistent.'
+    }
+    $stalePatch = Invoke-Mcp 'tools/call' @{
+        name = 'assembly.patch'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString(); address = $moduleEntryRef
+            instruction = 'int3'; expected_bytes_hex = ('00' * $patchInstructionSize)
+            fill_nop = $true
+        }
+    } 121
+    if (!$stalePatch.isError -or $stalePatch.structuredContent.error.code -ne 'CONFLICT') {
+        throw 'Assembly patch did not reject stale expected bytes.'
+    }
+    $patchArguments = @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $moduleEntryRef
+        instruction = 'int3'; expected_bytes_hex = $patchOriginalHex; fill_nop = $true
+    }
+    $trackedPatch = Invoke-Tool 'assembly.patch' $patchArguments 122
+    $trackedPatchReplay = Invoke-Tool 'assembly.patch' $patchArguments 123
+    if (!$trackedPatch.patch_tracked -or $trackedPatch.patched_bytes_hex.Length -ne
+        $patchOriginalHex.Length -or $trackedPatch.nop_padding -ne ($patchInstructionSize - 1) -or
+        ($trackedPatch | ConvertTo-Json -Compress -Depth 12) -ne
+        ($trackedPatchReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Tracked assembly patch was not bounded, padded, or replay-safe.'
+    }
+    $overlappingPatch = Invoke-Mcp 'tools/call' @{
+        name = 'assembly.patch'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString(); address = $moduleEntryRef
+            instruction = 'int3'; expected_bytes_hex = $trackedPatch.patched_bytes_hex
+            fill_nop = $true
+        }
+    } 124
+    if (!$overlappingPatch.isError -or
+        $overlappingPatch.structuredContent.error.code -ne 'CONFLICT') {
+        throw 'Assembly patch did not reject an already tracked span.'
+    }
+    $restoreArguments = @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $moduleEntryRef
+        expected_patched_bytes_hex = $trackedPatch.patched_bytes_hex
+        expected_original_bytes_hex = $patchOriginalHex
+    }
+    $restoredPatch = Invoke-Tool 'patches.restore' $restoreArguments 125
+    $restoredPatchReplay = Invoke-Tool 'patches.restore' $restoreArguments 126
+    $memoryAfterRestore = Invoke-Tool 'memory.read' @{
+        address = $moduleEntryRef; length = $patchInstructionSize
+    } 127
+    if ($restoredPatch.patch_tracked -or $memoryAfterRestore.data_hex -ne $patchOriginalHex -or
+        ($restoredPatch | ConvertTo-Json -Compress -Depth 12) -ne
+        ($restoredPatchReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Tracked patch restore did not exactly recover the fixture bytes.'
+    }
     $compactSnapshot = Invoke-Tool 'debugger.snapshot' @{} 54
     if ($compactSnapshot.state_generation -ne $state.state_generation -or
         $compactSnapshot.instruction_pointer.address -ne $expression.value -or

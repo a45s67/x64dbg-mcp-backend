@@ -187,6 +187,9 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `breakpoints.hardware.remove` | mutate | actionable pause | Remove only an exact address/access/size match |
 | `breakpoints.memory.set` | mutate | paused | Exact 1-65536 byte single-region guard range and access mode with typed read-back |
 | `breakpoints.memory.remove` | mutate | paused | Remove only an exact address/access/size match |
+| `assembly.preview` | read | paused | Assemble one instruction at its runtime address without changing memory |
+| `assembly.patch` | destructive mutate | paused | Compare-before-write one 1-16 byte instruction span and verify patch metadata |
+| `patches.restore` | destructive mutate | paused | Restore an exact tracked span only when memory and patch metadata match |
 | `disassembly.read` | read | paused | At most 256 decoded instructions from an address |
 | `expression.evaluate` | read | paused | Evaluate x64dbg expression; no command execution |
 | `symbols.search` | read | paused | Search up to 65,536 retained symbols with bounded, filter-bound pagination |

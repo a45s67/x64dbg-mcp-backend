@@ -39,7 +39,7 @@ extern "C" __declspec(dllexport) bool pluginit(PLUG_INITSTRUCT* initStruct) {
     g_pluginHandle = initStruct->pluginHandle;
     constexpr CBTYPE callbacks[] = {CB_INITDEBUG, CB_STOPDEBUG, CB_CREATEPROCESS,
                                     CB_EXITPROCESS, CB_PAUSEDEBUG, CB_RESUMEDEBUG,
-                                    CB_STEPPED, CB_STOPPINGDEBUG, CB_DEBUGEVENT,
+                                    CB_STEPPED, CB_ATTACH, CB_DETACH, CB_STOPPINGDEBUG, CB_DEBUGEVENT,
                                     CB_SYSTEMBREAKPOINT, CB_BREAKPOINT, CB_EXCEPTION};
     for (const CBTYPE callback : callbacks) {
         _plugin_registercallback(g_pluginHandle, callback, DebuggerCallback);
@@ -71,7 +71,7 @@ extern "C" __declspec(dllexport) bool plugstop() {
     _plugin_unregistercommand(g_pluginHandle, kFenceCommand);
     constexpr CBTYPE callbacks[] = {CB_INITDEBUG, CB_STOPDEBUG, CB_CREATEPROCESS,
                                     CB_EXITPROCESS, CB_PAUSEDEBUG, CB_RESUMEDEBUG,
-                                    CB_STEPPED, CB_STOPPINGDEBUG, CB_DEBUGEVENT,
+                                    CB_STEPPED, CB_ATTACH, CB_DETACH, CB_STOPPINGDEBUG, CB_DEBUGEVENT,
                                     CB_SYSTEMBREAKPOINT, CB_BREAKPOINT, CB_EXCEPTION};
     for (const CBTYPE callback : callbacks) {
         _plugin_unregistercallback(g_pluginHandle, callback);

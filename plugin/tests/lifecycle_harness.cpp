@@ -141,6 +141,22 @@ bool ExercisePauseCallbacks(mcp::Runtime& runtime) {
            capturedException.hasAddress && capturedException.address == 0x402000U &&
            capturedException.firstChance && capturedException.generation > specific.generation;
 }
+
+bool ExerciseSessionOriginCallbacks(mcp::Runtime& runtime) {
+    runtime.OnDebuggerEvent(CB_STOPDEBUG, nullptr);
+    runtime.OnDebuggerEvent(CB_INITDEBUG, nullptr);
+    if (runtime.SessionOriginForTesting() != mcp::SessionOrigin::none) return false;
+    PLUG_CB_ATTACH attach{0x1234U};
+    runtime.OnDebuggerEvent(CB_ATTACH, &attach);
+    if (runtime.SessionOriginForTesting() != mcp::SessionOrigin::attached) return false;
+    PROCESS_INFORMATION process{};
+    process.dwProcessId = attach.dwProcessId;
+    PLUG_CB_DETACH detach{&process};
+    runtime.OnDebuggerEvent(CB_DETACH, &detach);
+    if (runtime.SessionOriginForTesting() != mcp::SessionOrigin::attached) return false;
+    runtime.OnDebuggerEvent(CB_STOPDEBUG, nullptr);
+    return runtime.SessionOriginForTesting() == mcp::SessionOrigin::none;
+}
 } // namespace
 
 int wmain(const int argc, wchar_t** argv) {
@@ -219,6 +235,11 @@ int wmain(const int argc, wchar_t** argv) {
         runtime.Stop();
         std::cerr << "callback pause observation contract failed\n";
         return 9;
+    }
+    if (!ExerciseSessionOriginCallbacks(runtime)) {
+        runtime.Stop();
+        std::cerr << "attach/detach session-origin callback contract failed\n";
+        return 11;
     }
     if (argc == 4 && std::wstring_view(argv[3]) == L"active-wait-shutdown") {
         if (!ExerciseActiveWaitShutdown(runtime, static_cast<unsigned short>(parsedPort))) {

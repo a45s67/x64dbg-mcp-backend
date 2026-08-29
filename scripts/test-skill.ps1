@@ -17,8 +17,8 @@ $frontmatter = [regex]::Match($skill, '(?s)^---\n(.*?)\n---\n')
 Assert-Skill $frontmatter.Success 'SKILL.md frontmatter is malformed'
 Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^name: x64dbg-debugging$') 'skill name is missing or invalid'
 Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^description: .{20,1024}$') 'skill description is missing or unbounded'
-Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  version: "0\.3\.0"$') 'independent skill version is missing'
-Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  minimum-backend-version: "0\.3\.0"$') 'minimum backend version is missing'
+Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  version: "0\.4\.0"$') 'independent skill version is missing'
+Assert-Skill ($frontmatter.Groups[1].Value -match '(?m)^  minimum-backend-version: "0\.4\.0"$') 'minimum backend version is missing'
 Assert-Skill (Test-Path -LiteralPath $markerPath -PathType Leaf) 'managed ownership marker is missing'
 
 $allText = Get-ChildItem -LiteralPath $skillRoot -Recurse -File | ForEach-Object {
@@ -35,6 +35,7 @@ foreach ($reference in @('references\recipes.md', 'references\troubleshooting.md
 $published = @(
     'debugger.state', 'debugger.snapshot', 'debugger.wait_for_pause', 'debugger.pause', 'debugger.resume',
     'debugger.step_into', 'debugger.step_over', 'debugger.stop', 'debuggee.launch',
+    'debuggee.attach', 'debuggee.detach',
     'registers.read', 'address.resolve', 'memory.read', 'memory.write', 'memory.map',
     'modules.list', 'threads.list', 'breakpoints.list', 'breakpoints.set',
     'breakpoints.remove', 'disassembly.read', 'expression.evaluate', 'symbols.search',

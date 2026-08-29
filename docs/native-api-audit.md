@@ -28,6 +28,12 @@ characters cannot enter the command and raw command-line arguments are not
 accepted. Timeout after submission is reported as unknown and is never retried
 automatically.
 
+`debuggee.attach` accepts only a validated numeric PID, rejects the debugger
+host and owned sidecar PIDs, and renders the fixed command as hexadecimal. It
+does not enumerate or pre-open processes. `debuggee.detach` contains no caller
+text. Both operations use callback-maintained session origin and report a
+post-admission timeout as an unknown mutation outcome.
+
 Structured module-relative addresses are resolved with
 `Script::Module::GetList` inside the same executor work item as the consuming
 native operation. The resolver validates list ownership, exact case-insensitive
@@ -61,6 +67,8 @@ not mutated anything.
 | `memory.write` | `DbgMemWrite`, `DbgMemRead` | paused | max 4 KiB; read-back verification |
 | breakpoint set/remove | `DbgCmdExec`, `DbgGetBpxTypeAt` | paused | validated address only; bounded observation loop |
 | `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; ignores transient process-created pause and confirms a later actionable callback |
+| `debuggee.attach` | `DbgCmdExec` (`attach 0x<pid>`) | absent | rejects debugger/sidecar PIDs; matching pre-attach `CB_ATTACH` PID, then a newer paused callback and current PID; no enumeration or process handle retained |
+| `debuggee.detach` | `DbgCmdExec` (`detach`) | attached and paused/running | matching `CB_DETACH`, then newer `CB_STOPDEBUG`; preserves the externally owned process; generic stop is rejected |
 | `analysis.function` | `DbgCmdExec` (`analr`), private command fence, `Script::Function::GetInfo` | paused | one resolved function in a module no larger than 128 MiB; queue-fence plus marker and generation confirmation; no GUI selection |
 | `symbols.search` | `Script::Symbol::GetList` | paused | `BridgeFree(list.data)`; rejects count above 65,536; bounded literal filtering and generation recheck |
 | `functions.list` | `Script::Function::GetList`, `Script::Symbol::GetList` | paused | both lists released with `BridgeFree`; each rejects count above 65,536; bounded name join and generation recheck |
@@ -70,9 +78,11 @@ not mutated anything.
 Pause metadata is copied synchronously from `CB_SYSTEMBREAKPOINT`,
 `CB_BREAKPOINT`, `CB_EXCEPTION`, and `CB_STEPPED`. The plugin retains no callback
 pointer. A following generic `CB_PAUSEDEBUG` cannot overwrite a specific reason
-for the same stop. Stop, disconnect, and unload notify the same condition
-variable used by active observation requests and stop the single-slot command
-fence before joining the executor.
+for the same stop. `CB_ATTACH` and `CB_DETACH` copy their PID values immediately;
+no callback `PROCESS_INFORMATION` pointer is retained. Session origin is cleared
+by `CB_STOPDEBUG`. Stop, disconnect, and unload notify the same condition variable
+used by active observation requests and stop the single-slot command fence before
+joining the executor.
 
 ## Unload invariant
 

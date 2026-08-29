@@ -693,3 +693,44 @@ reported `already_known: false`, installed the inclusive marker
 analysis left generation 27 unchanged, replayed byte-for-byte under the same
 operation ID, exposed one inbound main reference, and ended with the debuggee
 stopped and no owned sidecar.
+
+## 2026-08-29 attach/detach lifecycle follow-up
+
+ADR 0017 adds PID-only `debuggee.attach`, explicit `debuggee.detach`, and
+callback-maintained `session_origin`. It deliberately does not enumerate local
+processes. PIDs are validated as JSON integers, rendered as x64dbg hexadecimal
+constants, and correlated with `CB_ATTACH`, a later paused callback, and the
+current process ID. Attached sessions reject `debugger.stop`; detach requires
+`CB_DETACH` followed by `CB_STOPDEBUG`, preventing generic cleanup from killing a
+process the debugger did not create.
+
+The first x64 integration exposed that this x64dbg build can hand control back on
+the attached process's `process_created` pause without emitting a distinct later
+system-breakpoint callback. The contract now accepts that paused callback only
+after the matching pre-attach PID event; launch continues to ignore its transient
+process-created pause. A 500 ms native response margin also prevents an exact
+deadline race from leaving an unread late IPC response after unknown outcomes.
+
+Fresh isolated x32 and x64 tests independently started architecture-matched
+fixtures, rejected self-attach, attached by numeric PID, replayed the same
+operation result, rejected destructive stop, detached, and proved each fixture
+remained alive. Test cleanup then terminated only its own exact fixture PID. The
+backend and workflow skill advance to 0.4.0. `checksum.exe` was not used as the
+attach target because it is not a stable long-running benign lifecycle fixture.
+
+The final package gate retained 49 Rust unit/contract tests, six supervised
+shutdown tests, and eight native tests on each architecture. An integration
+runner issue found during the final x32 rerun was independent of MCP: PowerShell
+`Start-Process` could block while starting the 32-bit GUI before returning its
+process handle. The runner now creates explicitly owned `.NET Process` instances
+with `UseShellExecute=false`; both x32 and x64 then completed attach/detach in a
+bounded run with no debugger, sidecar, or fixture left behind.
+
+Package SHA-256 is
+`0262abcd35c06e7c91fea9bf89be2f95e0d55e5b7b9e5c2c4a5dd4a1eecf149b`.
+Deployment preserved the installed bearer token, refreshed both static Codex
+registrations, and installed workflow skill 0.4.0. The installed regression run
+loaded `checksum.exe` at `0x1000000`, resolved RVA `0xa78a0` to `0x10a78a0`, hit
+the software breakpoint once, held generation 27 across all paused reads, replayed
+the existing analysis result exactly, found both compact-context strings on page
+one, stopped the launched debuggee, and left no owned sidecar.

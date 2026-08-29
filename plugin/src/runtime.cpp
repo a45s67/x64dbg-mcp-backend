@@ -130,6 +130,7 @@ struct Request {
     std::string expression;
     std::string path;
     std::string workingDirectory;
+    std::uint32_t targetProcessId{0U};
     AddressReference address;
     std::size_t length{0};
     std::vector<std::string> registerNames;
@@ -157,7 +158,8 @@ bool IsMutation(const std::string_view method) {
            method == "debugger.step_into" || method == "debugger.step_over" ||
            method == "debugger.stop" || method == "memory.write" ||
            method == "breakpoints.set" || method == "breakpoints.remove" ||
-           method == "debuggee.launch" || method == "analysis.function";
+           method == "debuggee.launch" || method == "debuggee.attach" ||
+           method == "debuggee.detach" || method == "analysis.function";
 }
 
 bool IsPageMethod(const std::string_view method) {
@@ -399,6 +401,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::string expression;
     std::string path;
     std::string workingDirectory;
+    std::uint32_t targetProcessId = 0U;
     AddressReference addressValue;
     std::size_t lengthValue = 0;
     std::vector<std::string> registerNames;
@@ -478,6 +481,20 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         if (directoryValue != nullptr) {
             workingDirectory.assign(json_string_value(directoryValue),
                                     json_string_length(directoryValue));
+        }
+    } else if (methodValue == "debuggee.attach") {
+        json_t* process = json_object_get(payload, "process_id");
+        if (json_object_size(payload) != 2U ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !json_is_integer(process) || json_integer_value(process) < 1 ||
+            json_integer_value(process) > 4294967295LL) {
+            return std::nullopt;
+        }
+        targetProcessId = static_cast<std::uint32_t>(json_integer_value(process));
+    } else if (methodValue == "debuggee.detach") {
+        if (json_object_size(payload) != 1U ||
+            !json_is_string(json_object_get(payload, "operation_id"))) {
+            return std::nullopt;
         }
     } else if (methodValue == "expression.evaluate") {
         json_t* value = json_object_get(payload, "expression");
@@ -750,7 +767,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     return Request{std::string(requestIdValue), std::string(methodValue),
                    static_cast<std::uint64_t>(json_integer_value(deadline)), mutation,
                    std::move(expression), std::move(path), std::move(workingDirectory),
-                   addressValue, lengthValue, std::move(registerNames), pageLimit,
+                   targetProcessId, addressValue, lengthValue, std::move(registerNames), pageLimit,
                    cursorGeneration, cursorIndex, instructionCount,
                    std::move(writeBytes), afterGeneration, waitTimeoutMs,
                    std::move(moduleFilter), std::move(query), std::move(stringEncoding),
@@ -1134,6 +1151,10 @@ std::optional<std::uint64_t> Runtime::BeginPausedSnapshotForTesting() noexcept {
 
 bool Runtime::PausedSnapshotCurrentForTesting(const std::uint64_t generation) noexcept {
     return PausedSnapshotCurrent(generation);
+}
+
+SessionOrigin Runtime::SessionOriginForTesting() const noexcept {
+    return sessionOrigin_.load();
 }
 #endif
 
@@ -1649,6 +1670,54 @@ void Runtime::Worker() noexcept {
                            ",\"state_generation\":" +
                            std::to_string(resolvedGeneration) + "}}";
                 }
+                if (parsed->method == "debuggee.attach") {
+                    if (debuggeeState_.load() != DebuggeeState::absent || DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "attach requires no current debuggee", false, false);
+                    }
+                    const DWORD sidecarId = sidecarProcess_ == nullptr
+                                                ? 0U
+                                                : GetProcessId(sidecarProcess_);
+                    if (parsed->targetProcessId == GetCurrentProcessId() ||
+                        (sidecarId != 0U && parsed->targetProcessId == sidecarId)) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "cannot attach to the debugger host or its owned sidecar",
+                                             false, false);
+                    }
+                    const std::uint64_t before = generation_.load();
+                    const std::string command =
+                        "attach " + HexValue(parsed->targetProcessId);
+                    if (!DbgCmdExec(command.c_str())) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected attach", true,
+                                             false);
+                    }
+                    const auto attachDeadline =
+                        requestDeadline > std::chrono::steady_clock::now() +
+                                              std::chrono::milliseconds(500)
+                            ? requestDeadline - std::chrono::milliseconds(500)
+                            : requestDeadline;
+                    if (!WaitForAttachPause(parsed->targetProcessId, before,
+                                            attachDeadline)) {
+                        std::ostringstream diagnostic;
+                        diagnostic << "attach confirmation mismatch: requested="
+                                   << HexValue(parsed->targetProcessId)
+                                   << ", callback=" << HexValue(attachProcessId_.load())
+                                   << ", current=" << HexValue(processId_.load())
+                                   << ", attach_generation=" << attachGeneration_.load()
+                                   << ", pause_generation=" << pausedGeneration_.load();
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             diagnostic.str(),
+                                             false, true);
+                    }
+                    const std::uint64_t confirmed = ObservedGeneration(DebuggeeState::paused);
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(confirmed) +
+                           ",\"status\":\"ok\",\"result\":{\"debuggee_state\":\"paused\"" +
+                           ",\"session_origin\":\"attached\",\"process_id\":" +
+                           JsonString(HexValue(parsed->targetProcessId)) +
+                           ",\"state_generation\":" + std::to_string(confirmed) + "}}";
+                }
                 if (parsed->method == "debuggee.launch") {
                     if (debuggeeState_.load() != DebuggeeState::absent || DbgIsDebugging()) {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
@@ -1700,6 +1769,35 @@ void Runtime::Worker() noexcept {
                            JsonString(*workingDirectory) + ",\"state_generation\":" +
                            std::to_string(confirmed) + "}}";
                 }
+                if (parsed->method == "debuggee.detach") {
+                    const DebuggeeState state = debuggeeState_.load();
+                    const std::uint32_t detachedProcess = processId_.load();
+                    if (sessionOrigin_.load() != SessionOrigin::attached ||
+                        (state != DebuggeeState::paused && state != DebuggeeState::running) ||
+                        detachedProcess == 0U || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "detach requires an active attached session", false,
+                                             false);
+                    }
+                    const std::uint64_t before = generation_.load();
+                    if (!DbgCmdExec("detach")) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected detach", true,
+                                             false);
+                    }
+                    if (!WaitForDetach(detachedProcess, before, requestDeadline)) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "detach outcome was not callback-confirmed", false,
+                                             true);
+                    }
+                    const std::uint64_t confirmed = ObservedGeneration(DebuggeeState::absent);
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(confirmed) +
+                           ",\"status\":\"ok\",\"result\":{\"debuggee_state\":\"absent\"" +
+                           ",\"session_origin\":null,\"detached_process_id\":" +
+                           JsonString(HexValue(detachedProcess)) +
+                           ",\"state_generation\":" + std::to_string(confirmed) + "}}";
+                }
                 if (parsed->method == "debugger.pause" || parsed->method == "debugger.resume" ||
                     parsed->method == "debugger.step_into" ||
                     parsed->method == "debugger.step_over" || parsed->method == "debugger.stop") {
@@ -1728,11 +1826,16 @@ void Runtime::Worker() noexcept {
                         expected = DebuggeeState::absent;
                         valid = state == DebuggeeState::starting || state == DebuggeeState::running ||
                                 state == DebuggeeState::paused;
+                        if (sessionOrigin_.load() == SessionOrigin::attached) valid = false;
                     }
                     if (!valid || !DbgIsDebugging()) {
-                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
-                                             "operation is not valid in the current debugger state",
-                                             false, false);
+                        const char* message =
+                            parsed->method == "debugger.stop" &&
+                                    sessionOrigin_.load() == SessionOrigin::attached
+                                ? "stop is unsafe for an attached session; use debuggee.detach"
+                                : "operation is not valid in the current debugger state";
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE", message, false,
+                                             false);
                     }
                     const std::uint64_t before = generation_.load();
                     if (!DbgCmdExec(command)) {
@@ -2900,6 +3003,7 @@ std::string Runtime::StateResponse(const std::string& requestId) {
     std::uint64_t generation = 0;
     std::uint32_t processId = 0;
     std::uint32_t threadId = 0;
+    SessionOrigin origin = SessionOrigin::none;
     PauseObservation pause;
     {
         std::lock_guard lock(stateMutex_);
@@ -2907,6 +3011,7 @@ std::string Runtime::StateResponse(const std::string& requestId) {
         generation = generation_.load();
         processId = processId_.load();
         threadId = activeThreadId_.load();
+        origin = sessionOrigin_.load();
         pause = latestPause_;
     }
     const char* stateName = "absent";
@@ -2948,7 +3053,11 @@ std::string Runtime::StateResponse(const std::string& requestId) {
            "x86" +
 #endif
            "\",\"plugin_state\":\"ready\",\"debuggee_state\":\"" + stateName +
-           "\",\"process_id\":" +
+           "\",\"session_origin\":" +
+           (origin == SessionOrigin::launched
+                ? "\"launched\""
+                : origin == SessionOrigin::attached ? "\"attached\"" : "null") +
+           ",\"process_id\":" +
            (processId == 0U ? "null" : JsonString(HexValue(processId))) +
            ",\"active_thread_id\":" +
            (threadId == 0U ? "null" : JsonString(HexValue(threadId))) +
@@ -2961,7 +3070,8 @@ std::string Runtime::StateResponse(const std::string& requestId) {
                 : "null") +
            ",\"next_actions\":" +
            (state == DebuggeeState::absent || state == DebuggeeState::exited
-                ? "[{\"code\":\"CALL_DEBUGGEE_LAUNCH\",\"tool\":\"debuggee.launch\"}]"
+                ? "[{\"code\":\"CALL_DEBUGGEE_LAUNCH\",\"tool\":\"debuggee.launch\"},"
+                  "{\"code\":\"CALL_DEBUGGEE_ATTACH\",\"tool\":\"debuggee.attach\"}]"
                 : "[]") +
            ",\"state_generation\":" + std::to_string(generation) + "}}";
 }
@@ -3044,6 +3154,43 @@ bool Runtime::WaitForActionableLaunchPause(
            latestPause_.kind != PauseReasonKind::processCreated;
 }
 
+bool Runtime::WaitForAttachPause(
+    const std::uint32_t processId, const std::uint64_t afterGeneration,
+    const std::chrono::steady_clock::time_point deadline) noexcept {
+    std::unique_lock lock(stateMutex_);
+    return stateChanged_.wait_until(lock, deadline, [this, processId, afterGeneration] {
+        return pluginState_.load() != PluginState::ready ||
+               (attachGeneration_.load() > afterGeneration &&
+                attachProcessId_.load() == processId &&
+                pausedGeneration_.load() > attachGeneration_.load() &&
+                debuggeeState_.load() == DebuggeeState::paused &&
+                processId_.load() == processId);
+    }) &&
+           pluginState_.load() == PluginState::ready &&
+           attachGeneration_.load() > afterGeneration &&
+           attachProcessId_.load() == processId &&
+           pausedGeneration_.load() > attachGeneration_.load() &&
+           debuggeeState_.load() == DebuggeeState::paused && processId_.load() == processId;
+}
+
+bool Runtime::WaitForDetach(
+    const std::uint32_t processId, const std::uint64_t afterGeneration,
+    const std::chrono::steady_clock::time_point deadline) noexcept {
+    std::unique_lock lock(stateMutex_);
+    return stateChanged_.wait_until(lock, deadline, [this, processId, afterGeneration] {
+        return pluginState_.load() != PluginState::ready ||
+               (detachGeneration_.load() > afterGeneration &&
+                detachProcessId_.load() == processId &&
+                absentGeneration_.load() > detachGeneration_.load() &&
+                debuggeeState_.load() == DebuggeeState::absent);
+    }) &&
+           pluginState_.load() == PluginState::ready &&
+           detachGeneration_.load() > afterGeneration &&
+           detachProcessId_.load() == processId &&
+           absentGeneration_.load() > detachGeneration_.load() &&
+           debuggeeState_.load() == DebuggeeState::absent;
+}
+
 std::uint64_t Runtime::ObservedGeneration(const DebuggeeState state) const noexcept {
     switch (state) {
     case DebuggeeState::paused: return pausedGeneration_.load();
@@ -3064,8 +3211,15 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     bool clearProcess = false;
     bool hasPauseReason = false;
     bool refineCurrentPause = false;
+    bool resetOrigin = false;
+    bool markLaunched = false;
+    bool markAttached = false;
+    bool markDetaching = false;
     switch (callbackType) {
-    case CB_INITDEBUG: next = DebuggeeState::starting; break;
+    case CB_INITDEBUG:
+        resetOrigin = true;
+        next = DebuggeeState::starting;
+        break;
     case CB_CREATEPROCESS: {
         const auto* info = static_cast<const PLUG_CB_CREATEPROCESS*>(callbackInfo);
         if (info != nullptr && info->fdProcessInfo != nullptr) {
@@ -3073,6 +3227,7 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
             callbackThreadId = info->fdProcessInfo->dwThreadId;
         }
         next = DebuggeeState::paused;
+        markLaunched = true;
         pause.kind = PauseReasonKind::processCreated;
         hasPauseReason = true;
         break;
@@ -3124,10 +3279,29 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
         hasPauseReason = true;
         break;
     case CB_RESUMEDEBUG: next = DebuggeeState::running; break;
+    case CB_ATTACH: {
+        const auto* info = static_cast<const PLUG_CB_ATTACH*>(callbackInfo);
+        if (info != nullptr && info->dwProcessId != 0U) {
+            callbackProcessId = info->dwProcessId;
+        }
+        markAttached = true;
+        next = DebuggeeState::starting;
+        break;
+    }
+    case CB_DETACH: {
+        const auto* info = static_cast<const PLUG_CB_DETACH*>(callbackInfo);
+        if (info != nullptr && info->fdProcessInfo != nullptr) {
+            callbackProcessId = info->fdProcessInfo->dwProcessId;
+        }
+        markDetaching = true;
+        next = DebuggeeState::stopping;
+        break;
+    }
     case CB_STOPPINGDEBUG: next = DebuggeeState::stopping; break;
     case CB_EXITPROCESS: next = DebuggeeState::exited; break;
     case CB_STOPDEBUG:
         clearProcess = true;
+        resetOrigin = true;
         next = DebuggeeState::absent;
         break;
     case CB_DEBUGEVENT: {
@@ -3144,6 +3318,11 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     default: return;
     }
     std::lock_guard lock(stateMutex_);
+    if (resetOrigin) sessionOrigin_.store(SessionOrigin::none);
+    if (markAttached) sessionOrigin_.store(SessionOrigin::attached);
+    if (markLaunched && sessionOrigin_.load() != SessionOrigin::attached) {
+        sessionOrigin_.store(SessionOrigin::launched);
+    }
     if (clearProcess) {
         processId_.store(0U);
         activeThreadId_.store(0U);
@@ -3168,6 +3347,14 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     }
     debuggeeState_.store(next);
     const std::uint64_t observed = generation_.fetch_add(1U) + 1U;
+    if (markAttached) {
+        attachProcessId_.store(callbackProcessId.value_or(0U));
+        attachGeneration_.store(observed);
+    }
+    if (markDetaching) {
+        detachProcessId_.store(callbackProcessId.value_or(processId_.load()));
+        detachGeneration_.store(observed);
+    }
     switch (next) {
     case DebuggeeState::paused:
         pausedGeneration_.store(observed);

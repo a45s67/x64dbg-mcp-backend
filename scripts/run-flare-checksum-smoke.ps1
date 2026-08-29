@@ -93,9 +93,10 @@ try {
         throw 'Installed x64 backend did not become ready.'
     }
     if ($ready.debugger_state -ne 'absent' -or $ready.diagnostic_code -ne 'NO_DEBUGGEE' -or
-        @($ready.next_actions).Count -ne 1 -or
-        $ready.next_actions[0].tool -ne 'debuggee.launch') {
-        throw 'Installed readiness did not advertise the explicit launch action.'
+        @($ready.next_actions).Count -ne 2 -or
+        $ready.next_actions[0].tool -ne 'debuggee.launch' -or
+        $ready.next_actions[1].tool -ne 'debuggee.attach') {
+        throw 'Installed readiness did not advertise explicit launch and attach actions.'
     }
 
     $null = Invoke-Mcp 'initialize' @{
@@ -108,9 +109,10 @@ try {
         throw 'Installed debugger did not start without a debuggee.'
     }
     if ($initial.diagnostic_code -ne 'NO_DEBUGGEE' -or
-        @($initial.next_actions).Count -ne 1 -or
-        $initial.next_actions[0].tool -ne 'debuggee.launch') {
-        throw 'Installed debugger.state did not advertise the explicit launch action.'
+        @($initial.next_actions).Count -ne 2 -or
+        $initial.next_actions[0].tool -ne 'debuggee.launch' -or
+        $initial.next_actions[1].tool -ne 'debuggee.attach') {
+        throw 'Installed debugger.state did not advertise launch and attach actions.'
     }
     $launch = Invoke-Tool 'debuggee.launch' @{
         operation_id = [Guid]::NewGuid().ToString()

@@ -68,7 +68,7 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             optional_integer(object, "timeout_ms", 1, 9_000)
         }
         "debugger.pause" | "debugger.resume" | "debugger.step_into" | "debugger.step_over"
-        | "debugger.stop" => operation(object, &[]),
+        | "debugger.stop" | "debuggee.detach" => operation(object, &[]),
         "debuggee.launch" => {
             exact_keys(object, &["operation_id", "path"], &["working_directory"])?;
             validate_operation_id(object)?;
@@ -77,6 +77,10 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
                 validate_path(object, "working_directory")?;
             }
             Ok(())
+        }
+        "debuggee.attach" => {
+            operation(object, &["process_id"])?;
+            integer(object, "process_id", 1, 4_294_967_295)
         }
         "registers.read" => {
             exact_keys(object, &[], &["names"])?;
@@ -497,6 +501,21 @@ fn build_catalog() -> Vec<Value> {
             ),
             true,
         ),
+        mutation_tool(
+            "debuggee.attach",
+            "Attach this matching-architecture debugger to one explicitly supplied PID and wait for pre-attach PID plus actionable-pause confirmation. No process enumeration is performed.",
+            operation_schema(vec![(
+                "process_id",
+                json!({"type":"integer","minimum":1,"maximum":4_294_967_295_u64}),
+            )]),
+            true,
+        ),
+        mutation_tool(
+            "debuggee.detach",
+            "Detach from an attached session without terminating the pre-existing process and wait for callback-confirmed absent state.",
+            operation_schema(vec![]),
+            false,
+        ),
         read_tool(
             "registers.read",
             "Read selected registers, or the bounded core register set when names is omitted. Requires a paused debuggee.",
@@ -879,7 +898,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 26);
+        assert_eq!(catalog().len(), 28);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -984,6 +1003,26 @@ mod tests {
                     "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
                     "path":"C:\\samples\\fixture.exe",
                     "arguments":"unbounded raw command line"
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "debuggee.attach",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "process_id":4_294_967_295_u64
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "debuggee.attach",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "process_id":4_294_967_296_u64
                 })
             )
             .is_err()

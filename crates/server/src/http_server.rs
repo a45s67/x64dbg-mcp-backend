@@ -147,7 +147,10 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Result<Resp
     let (diagnostic_code, next_actions) = if matches!(debuggee_state, "absent" | "exited") {
         (
             json!("NO_DEBUGGEE"),
-            json!([{ "code": "CALL_DEBUGGEE_LAUNCH", "tool": "debuggee.launch" }]),
+            json!([
+                { "code": "CALL_DEBUGGEE_LAUNCH", "tool": "debuggee.launch" },
+                { "code": "CALL_DEBUGGEE_ATTACH", "tool": "debuggee.attach" }
+            ]),
         )
     } else {
         (serde_json::Value::Null, json!([]))
@@ -157,6 +160,7 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Result<Resp
         "backend": snapshot.get("backend").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
         "plugin_connected": true,
         "debugger_state": debuggee_state,
+        "session_origin": snapshot.get("session_origin").cloned().unwrap_or(serde_json::Value::Null),
         "diagnostic_code": diagnostic_code,
         "next_actions": next_actions,
         "protocol_version": "2025-06-18",
@@ -430,6 +434,8 @@ mod tests {
         assert_eq!(value["diagnostic_code"], "NO_DEBUGGEE");
         assert_eq!(value["next_actions"][0]["code"], "CALL_DEBUGGEE_LAUNCH");
         assert_eq!(value["next_actions"][0]["tool"], "debuggee.launch");
+        assert_eq!(value["next_actions"][1]["code"], "CALL_DEBUGGEE_ATTACH");
+        assert_eq!(value["next_actions"][1]["tool"], "debuggee.attach");
     }
 
     #[tokio::test]
@@ -562,7 +568,7 @@ mod tests {
         let value =
             mcp_request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#).await;
         let tools = value["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 28);
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.state"));
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.snapshot"));
         assert!(tools.iter().any(|tool| tool["name"] == "strings.search"));

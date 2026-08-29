@@ -19,6 +19,7 @@ namespace mcp {
 
 enum class PluginState : std::uint8_t { starting, ready, draining, stopped };
 enum class DebuggeeState : std::uint8_t { absent, starting, paused, running, stopping, exited };
+enum class SessionOrigin : std::uint8_t { none, launched, attached };
 enum class PauseReasonKind : std::uint8_t {
     unknown,
     processCreated,
@@ -58,6 +59,7 @@ public:
     [[nodiscard]] PauseObservation PauseForTesting() noexcept;
     [[nodiscard]] std::optional<std::uint64_t> BeginPausedSnapshotForTesting() noexcept;
     [[nodiscard]] bool PausedSnapshotCurrentForTesting(std::uint64_t generation) noexcept;
+    [[nodiscard]] SessionOrigin SessionOriginForTesting() const noexcept;
 #endif
 
 private:
@@ -72,6 +74,10 @@ private:
                             std::chrono::steady_clock::time_point deadline) noexcept;
     bool WaitForActionableLaunchPause(std::uint64_t afterGeneration,
                                       std::chrono::steady_clock::time_point deadline) noexcept;
+    bool WaitForAttachPause(std::uint32_t processId, std::uint64_t afterGeneration,
+                            std::chrono::steady_clock::time_point deadline) noexcept;
+    bool WaitForDetach(std::uint32_t processId, std::uint64_t afterGeneration,
+                       std::chrono::steady_clock::time_point deadline) noexcept;
     [[nodiscard]] std::uint64_t ObservedGeneration(DebuggeeState state) const noexcept;
     [[nodiscard]] std::optional<std::uint64_t> BeginPausedSnapshot() noexcept;
     [[nodiscard]] std::optional<std::uint64_t> BeginActiveSnapshot() noexcept;
@@ -82,12 +88,17 @@ private:
 
     std::atomic<PluginState> pluginState_{PluginState::stopped};
     std::atomic<DebuggeeState> debuggeeState_{DebuggeeState::absent};
+    std::atomic<SessionOrigin> sessionOrigin_{SessionOrigin::none};
     std::atomic<std::uint64_t> generation_{0};
     std::atomic<std::uint64_t> pausedGeneration_{0};
     std::atomic<std::uint64_t> runningGeneration_{0};
     std::atomic<std::uint64_t> absentGeneration_{0};
     std::atomic<std::uint32_t> processId_{0};
     std::atomic<std::uint32_t> activeThreadId_{0};
+    std::atomic<std::uint32_t> attachProcessId_{0};
+    std::atomic<std::uint64_t> attachGeneration_{0};
+    std::atomic<std::uint32_t> detachProcessId_{0};
+    std::atomic<std::uint64_t> detachGeneration_{0};
     HANDLE instanceMutex_{nullptr};
     HANDLE pipe_{INVALID_HANDLE_VALUE};
     HANDLE nonceWriter_{nullptr};

@@ -4,11 +4,14 @@
 
 | Debuggee state | Useful next actions | Avoid |
 |---|---|---|
-| `absent` | Explicitly request `debuggee.launch` if authorized | Reads that require a target; starting a separate sidecar |
+| `absent` | Explicitly request `debuggee.launch` or PID-only `debuggee.attach` if authorized | Reads that require a target; process enumeration; starting a separate sidecar |
 | `starting` | Wait for the launch mutation's callback confirmation | A second launch or speculative resume |
 | `paused` | Resolve addresses; inspect; set/remove breakpoints; step or resume if authorized | Large unfiltered reads |
 | `running` | Use `debugger.wait_for_pause` after a known resume generation, or explicitly pause | Register/memory/disassembly reads; polling loops |
-| `stopping` / `exited` | Re-read `debugger.state` and wait for bounded teardown | Retrying stop with a new operation ID |
+| `stopping` / `exited` | Re-read `debugger.state` and wait for bounded teardown | Retrying stop/detach with a new operation ID |
+
+For `session_origin: "attached"`, cleanup uses `debuggee.detach`. The backend rejects
+`debugger.stop` for that origin because stop can terminate a process the debugger did not create.
 
 If the plugin reports draining, cancelled, or unavailable, stop issuing work and let debugger
 shutdown finish.

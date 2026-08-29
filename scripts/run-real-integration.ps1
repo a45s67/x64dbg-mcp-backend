@@ -97,10 +97,11 @@ try {
         throw 'Sidecar did not become ready through the isolated debugger plugin.'
     }
     if ($ready.debugger_state -ne 'absent' -or $ready.diagnostic_code -ne 'NO_DEBUGGEE' -or
-        @($ready.next_actions).Count -ne 1 -or
+        @($ready.next_actions).Count -ne 2 -or
         $ready.next_actions[0].code -ne 'CALL_DEBUGGEE_LAUNCH' -or
-        $ready.next_actions[0].tool -ne 'debuggee.launch') {
-        throw 'Readiness did not advertise the bounded absent-debuggee launch action.'
+        $ready.next_actions[0].tool -ne 'debuggee.launch' -or
+        $ready.next_actions[1].tool -ne 'debuggee.attach') {
+        throw 'Readiness did not advertise bounded launch and attach actions.'
     }
     Write-Verbose 'Sidecar is ready'
 
@@ -112,9 +113,10 @@ try {
         throw "Isolated debugger did not start without a debuggee; actual=$($beforeLaunch.debuggee_state)"
     }
     if ($beforeLaunch.diagnostic_code -ne 'NO_DEBUGGEE' -or
-        @($beforeLaunch.next_actions).Count -ne 1 -or
-        $beforeLaunch.next_actions[0].tool -ne 'debuggee.launch') {
-        throw 'debugger.state did not advertise the absent-debuggee launch action.'
+        @($beforeLaunch.next_actions).Count -ne 2 -or
+        $beforeLaunch.next_actions[0].tool -ne 'debuggee.launch' -or
+        $beforeLaunch.next_actions[1].tool -ne 'debuggee.attach') {
+        throw 'debugger.state did not advertise absent-debuggee launch and attach actions.'
     }
     $invalidLaunch = Invoke-Mcp 'tools/call' @{
         name = 'debuggee.launch'

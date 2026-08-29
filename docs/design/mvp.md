@@ -115,8 +115,8 @@ All JSON health and structured HTTP error responses also declare
 apply JSON's UTF-8 default correctly.
 
 When the plugin is connected without a debuggee, readiness remains HTTP 200 and reports
-`diagnostic_code: "NO_DEBUGGEE"` with the single non-executing action hint
-`{"code":"CALL_DEBUGGEE_LAUNCH","tool":"debuggee.launch"}`. A disconnected diagnostic
+`diagnostic_code: "NO_DEBUGGEE"` with non-executing `debuggee.launch` and
+`debuggee.attach` action hints. A disconnected diagnostic
 sidecar returns HTTP 503 with `PLUGIN_DISCONNECTED` and `START_DEBUGGER_WITH_PLUGIN`.
 Structured HTTP errors always contain bounded `details`; media-type and protocol validation
 errors list their accepted values as specified by ADR 0010.
@@ -168,6 +168,8 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `debugger.step_over` | mutate | paused | One instruction, then bounded wait for pause |
 | `debugger.stop` | mutate | starting/running/paused | Stop current debug session |
 | `debuggee.launch` | destructive mutation | absent | Canonicalize and load an existing executable, then wait past process creation for an actionable callback pause |
+| `debuggee.attach` | destructive mutation | absent | Attach to one explicit PID; no enumeration; PID plus paused-callback confirmation |
+| `debuggee.detach` | mutate | attached paused/running | Detach without terminating the pre-existing process; callback-confirmed absent state |
 | `registers.read` | read | paused | Selected registers or bounded complete register set |
 | `address.resolve` | read | paused | Resolve absolute or module/RVA input and return canonical location metadata |
 | `analysis.function` | mutate | paused | Explicitly analyze one addressed function in a module up to 128 MiB; private queue-fence and marker confirmation |
@@ -205,6 +207,7 @@ The plugin maintains an atomic/versioned snapshot:
 plugin: starting -> ready -> draining -> stopped
 debuggee: absent -> starting -> paused <-> running -> stopping -> absent
                                       \-> exited -> absent
+origin:   none -> launched|attached -> none
 ```
 
 Transitions come from x64dbg callbacks, not inference from a command return value.

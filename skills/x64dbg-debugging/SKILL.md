@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.3.0"
-  minimum-backend-version: "0.3.0"
+  version: "0.4.0"
+  minimum-backend-version: "0.4.0"
   mcp-protocol: "2025-06-18"
 ---
 
@@ -13,6 +13,11 @@ metadata:
 Use the connected `x64dbg` server for 64-bit PE targets and `x32dbg` for 32-bit PE targets. The
 debugger plugin owns its HTTP sidecar: start the matching debugger normally, and do not launch a
 detached server process when the endpoint is offline.
+
+For an explicitly authorized existing process, use `debuggee.attach(process_id, operation_id)`;
+the backend never enumerates processes. Attached sessions report `session_origin: "attached"`.
+Use `debuggee.detach` to preserve that pre-existing process—never use `debugger.stop` as attached
+session cleanup.
 
 Begin with `debugger.state`. Respect the reported state and each tool schema; most inspection
 requires `paused`. Tool names below are backend-local. A Gateway may prepend a namespace, so

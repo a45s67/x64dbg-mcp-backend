@@ -23,6 +23,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0014-release-acceptance-gates.md`](docs/adr/0014-release-acceptance-gates.md)
 - [`docs/adr/0015-token-efficient-string-context.md`](docs/adr/0015-token-efficient-string-context.md)
 - [`docs/adr/0016-explicit-function-analysis.md`](docs/adr/0016-explicit-function-analysis.md)
+- [`docs/adr/0017-attach-and-detach-lifecycle.md`](docs/adr/0017-attach-and-detach-lifecycle.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
 - [`docs/install.md`](docs/install.md)
@@ -55,6 +56,9 @@ reconstructable `before`, `match`, and `after` fields; use `context_bytes` to tu
 each side without returning an entire compiler/runtime string pool.
 `analysis.function` is a separate, explicit mutation for one concrete address;
 it uses a private command-queue fence and never depends on the user's GUI selection.
+Existing processes can be attached only by an explicit numeric PID. State exposes
+whether the session was launched or attached; attached sessions must use
+`debuggee.detach`, so generic cleanup cannot terminate a pre-existing process.
 
 Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
 It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer

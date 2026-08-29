@@ -187,6 +187,12 @@ try {
         $beforeLaunch.next_actions[1].tool -ne 'debuggee.attach') {
         throw 'debugger.state did not advertise absent-debuggee launch and attach actions.'
     }
+    $initialEvents = Invoke-Tool 'events.list' @{ limit = 1 } 212
+    if (@($initialEvents.items).Count -ne 0 -or $initialEvents.oldest_sequence -ne 0 -or
+        $initialEvents.latest_sequence -ne 0 -or $initialEvents.overflowed -or
+        $initialEvents.has_more -or $null -ne $initialEvents.next_after_sequence) {
+        throw 'A fresh backend instance did not expose an empty event history.'
+    }
     $invalidLaunch = Invoke-Mcp 'tools/call' @{
         name = 'debuggee.launch'
         arguments = @{
@@ -235,6 +241,25 @@ try {
     }
     if ($null -ne $state.diagnostic_code -or @($state.next_actions).Count -ne 0) {
         throw 'Paused debugger.state retained a stale bootstrap diagnostic.'
+    }
+    [string[]]$startupEventTypes = @('process_created', 'system_breakpoint', 'dll_loaded')
+    $startupEventPageOne = Invoke-Tool 'events.list' @{
+        types = $startupEventTypes; limit = 1
+    } 213
+    if (@($startupEventPageOne.items).Count -ne 1 -or !$startupEventPageOne.has_more -or
+        $startupEventPageOne.overflowed -or !$startupEventPageOne.next_after_sequence -or
+        $startupEventPageOne.items[0].type -notin $startupEventTypes -or
+        !$startupEventPageOne.items[0].state_generation) {
+        throw 'Filtered debugger-event history did not return a bounded first page.'
+    }
+    $startupEventPageTwo = Invoke-Tool 'events.list' @{
+        after_sequence = $startupEventPageOne.next_after_sequence
+        types = $startupEventTypes; limit = 256
+    } 214
+    if (@($startupEventPageTwo.items).Count -lt 1 -or
+        $startupEventPageTwo.items[0].sequence -le $startupEventPageOne.items[0].sequence -or
+        $startupEventPageTwo.next_after_sequence -le $startupEventPageOne.next_after_sequence) {
+        throw 'Debugger-event continuation did not preserve sequence order and filter semantics.'
     }
     Write-Verbose 'Debuggee is paused'
 
@@ -1099,7 +1124,28 @@ try {
     $breakpointRemove = Invoke-Tool 'breakpoints.remove' @{
         operation_id = [Guid]::NewGuid().ToString(); address = $moduleEntryRef
     } 20
+    $actionEvents = Invoke-Tool 'events.list' @{
+        types = @('breakpoint', 'paused', 'stepped'); limit = 256
+    } 216
+    foreach ($requiredEventType in @('breakpoint', 'paused', 'stepped')) {
+        if (@($actionEvents.items | Where-Object { $_.type -eq $requiredEventType }).Count -lt 1) {
+            throw "Debugger-event history omitted callback type $requiredEventType."
+        }
+    }
+    $breakpointEvent = @($actionEvents.items | Where-Object { $_.type -eq 'breakpoint' })[0]
+    if (!$breakpointEvent.address -or !$breakpointEvent.breakpoint_type -or
+        $null -eq $breakpointEvent.hit_count) {
+        throw 'Debugger-event breakpoint metadata was not structured and applicable.'
+    }
     $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 21
+    $stoppedEvents = Invoke-Tool 'events.list' @{
+        types = @('debug_stopped'); limit = 16
+    } 215
+    $debugStoppedEvent = @($stoppedEvents.items | Where-Object { $_.type -eq 'debug_stopped' })[-1]
+    if (!$debugStoppedEvent -or $debugStoppedEvent.sequence -gt $stoppedEvents.latest_sequence -or
+        $debugStoppedEvent.state_generation -gt $stop.state_generation) {
+        throw 'The callback-confirmed debug stop was absent from debugger-event history.'
+    }
 
     $report = [ordered]@{
         backend = $Backend
@@ -1122,6 +1168,11 @@ try {
         sleep_import_resolution = $sleepImport.resolution
         fixture_exports = $fixtureExports.matched_count
         forwarded_export = $forwardedExport.forward_name
+        event_history_initially_empty = $true
+        startup_event_first_type = $startupEventPageOne.items[0].type
+        startup_event_continuation_count = @($startupEventPageTwo.items).Count
+        debug_stopped_event_sequence = $debugStoppedEvent.sequence
+        action_event_types_verified = $true
         threads = $threads.items.Count
         memory_regions = $memoryMap.items.Count
         compact_snapshot_instructions = @($compactSnapshot.disassembly).Count

@@ -76,6 +76,12 @@ provider is an observation, not the original PE descriptor DLL. Use `exports.lis
 and forwarder metadata. Both are bounded known-only views and never reconstruct imports, follow a
 forwarder, download symbols, or analyze a module.
 
+Use `events.list` for bounded callback history instead of polling or inventing a
+stream. Retain `next_after_sequence` for continuation, repeat the same closed
+type filter, and treat `overflowed: true` as a required resynchronization signal:
+re-read current state before interpreting retained events. Event text and native
+callback pointers are intentionally unavailable.
+
 For state-specific sequences, breakpoint loops, compact inspection, and Go triage, read
 [references/recipes.md](references/recipes.md). For connection, authentication, stale cursor,
 timeout, and recovery decisions, read

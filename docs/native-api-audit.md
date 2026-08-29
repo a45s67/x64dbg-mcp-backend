@@ -85,6 +85,7 @@ not mutated anything.
 | `functions.at` | `Script::Function::GetInfo`, `Script::Module::GetList` | paused | one known-only containing marker; validates module ownership and inclusive range; module list released; never queues analysis |
 | `imports.list` | `Script::Module::GetImports`, `DbgMemRead`, `Script::Module::GetList` | paused | exact loaded module; max 65,536 owned records; max 256 architecture-width IAT reads/page; fixed UTF-8 fields and IAT VA/RVA validated; both Bridge lists released |
 | `exports.list` | `Script::Module::GetExports`, `Script::Module::GetList` | paused | exact loaded module; max 65,536 owned records; fixed UTF-8 fields and VA/RVA validated; ordinal and forwarder metadata copied; both Bridge lists released |
+| `events.list` | copied debugger callbacks; no Bridge call | any | 256-record ring under the state mutex; monotonically increasing JSON-safe sequence; max 256 copied results; closed type filter; explicit retained-range overflow; no callback pointer or text retained |
 | `strings.search` | `DbgMemRead`, Windows NLS literal span | paused | caller-owned 64 KiB chunks, 4 KiB fallback, at most 1 MiB/request; deadline/generation checks, cursor-bound `context_bytes`, and UTF-8-safe before/match/after |
 | `references.to` | `DbgGetXrefCountAt`, `DbgXrefGet` | paused | `BridgeFree(info.references)`; rejects count above 65,536; inbound known-only references |
 

@@ -3,6 +3,7 @@
 #include <Windows.h>
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -42,6 +43,30 @@ struct PauseObservation {
     bool firstChance{false};
 };
 
+enum class EventKind : std::uint8_t {
+    debugInitialized, processCreated, systemBreakpoint, breakpoint, exception,
+    paused, stepped, resumed, attached, detached, stopping, processExited,
+    debugStopped, threadCreated, threadExited, dllLoaded, dllUnloaded,
+    debugString, rip
+};
+
+struct EventRecord {
+    std::uint64_t sequence{0};
+    std::uint64_t generation{0};
+    EventKind kind{EventKind::debugInitialized};
+    std::uint32_t processId{0};
+    std::uint32_t threadId{0};
+    std::uint64_t address{0};
+    std::uint64_t code{0};
+    std::uint32_t auxiliary{0};
+    std::uint8_t breakpointType{0};
+    bool hasProcessId{false};
+    bool hasThreadId{false};
+    bool hasAddress{false};
+    bool hasCode{false};
+    bool firstChance{false};
+};
+
 class Runtime final {
 public:
     Runtime() = default;
@@ -60,6 +85,7 @@ public:
     [[nodiscard]] std::optional<std::uint64_t> BeginPausedSnapshotForTesting() noexcept;
     [[nodiscard]] bool PausedSnapshotCurrentForTesting(std::uint64_t generation) noexcept;
     [[nodiscard]] SessionOrigin SessionOriginForTesting() const noexcept;
+    [[nodiscard]] std::vector<EventRecord> EventsForTesting() noexcept;
 #endif
 
 private:
@@ -85,6 +111,7 @@ private:
     [[nodiscard]] bool ActiveSnapshotCurrent(std::uint64_t generation) noexcept;
     [[nodiscard]] bool PauseObservationCurrent(std::uint64_t generation,
                                                std::uint64_t pauseGeneration) noexcept;
+    void RecordEventLocked(EventRecord event) noexcept;
 
     std::atomic<PluginState> pluginState_{PluginState::stopped};
     std::atomic<DebuggeeState> debuggeeState_{DebuggeeState::absent};
@@ -110,6 +137,11 @@ private:
     std::mutex stateMutex_;
     std::condition_variable stateChanged_;
     PauseObservation latestPause_;
+    static constexpr std::size_t kEventCapacity = 256U;
+    std::array<EventRecord, kEventCapacity> eventRing_{};
+    std::size_t eventStart_{0U};
+    std::size_t eventCount_{0U};
+    std::uint64_t nextEventSequence_{1U};
     std::wstring pipeName_;
     std::string nonce_;
     std::string instanceId_;

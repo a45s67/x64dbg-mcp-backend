@@ -640,12 +640,13 @@ mod tests {
         let value =
             mcp_request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#).await;
         let tools = value["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 43);
+        assert_eq!(tools.len(), 44);
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.state"));
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.snapshot"));
         assert!(tools.iter().any(|tool| tool["name"] == "strings.search"));
         assert!(tools.iter().any(|tool| tool["name"] == "imports.list"));
         assert!(tools.iter().any(|tool| tool["name"] == "exports.list"));
+        assert!(tools.iter().any(|tool| tool["name"] == "events.list"));
         assert!(
             tools
                 .iter()

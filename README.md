@@ -34,6 +34,9 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0025-bounded-patch-enumeration.md`](docs/adr/0025-bounded-patch-enumeration.md)
 - [`docs/adr/0026-exact-symbol-resolution.md`](docs/adr/0026-exact-symbol-resolution.md)
 - [`docs/adr/0027-known-function-at-address.md`](docs/adr/0027-known-function-at-address.md)
+- [`docs/adr/0028-structured-launch-arguments.md`](docs/adr/0028-structured-launch-arguments.md)
+- [`docs/adr/0029-bounded-module-imports-and-exports.md`](docs/adr/0029-bounded-module-imports-and-exports.md)
+- [`docs/adr/0030-bounded-debugger-event-history.md`](docs/adr/0030-bounded-debugger-event-history.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/development-roadmap.md`](docs/development-roadmap.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
@@ -91,6 +94,9 @@ snapshot-bound pagination. `callstack.read` uses x64dbg's native unwind for the
 current or one exact thread and labels an empty result inconclusive. Exact
 `symbols.resolve` and `functions.at` queries avoid scanning pages when the
 caller already knows a name or address; both remain bounded known-only reads.
+`events.list` exposes a callback-derived 256-record history in every debugger
+state. Sequence continuation, closed type filters, and explicit overflow
+metadata replace polling without creating a streaming or unbounded log API.
 
 Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
 It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer

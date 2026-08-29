@@ -305,9 +305,11 @@ Evaluate, in order of demonstrated workflow value:
 Do not add a tool when existing bounded tools already return the same information
 with comparable precision.
 
-Progress: ADR 0029 admits `imports.list` and `exports.list`. Both are implemented
-and isolated x32/x64-qualified; event history and section-metadata evaluation
-remain before this stage can close or ship.
+Progress: ADR 0029 admits `imports.list` and `exports.list`; ADR 0030 admits
+`events.list`. All three are implemented and isolated x32/x64-qualified. Event
+history has a directly tested 256-record overwrite boundary plus real callback,
+filter, continuation, and stop visibility. Section-metadata evaluation remains
+before this stage can close or ship.
 
 ### Stage 5: controlled mutation candidates
 

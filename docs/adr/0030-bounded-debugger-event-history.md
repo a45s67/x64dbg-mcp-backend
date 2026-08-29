@@ -50,11 +50,12 @@ connection to drain.
 
 ## Verification
 
-Native policy/lifecycle tests cover empty history, wraparound, overflow,
-sequence order, closed filters, applicable fields, and concurrent callback/read
-snapshots. Contract tests cover enum/array/limit/sequence bounds and unknown
-fields. Isolated x32/x64 runs prove lifecycle, loader/thread, breakpoint,
-exception/step/pause, stop, overflow, and active-request shutdown behavior.
+Native lifecycle tests cover empty history, exact wraparound and sequence order,
+public overflow/filter metadata, and applicable exception fields. Contract tests
+cover enum/array/limit/sequence bounds, duplicates, and unknown fields. Isolated
+x32/x64 runs prove startup/loader filtering and continuation, structured
+breakpoint events, pause/step events, stop visibility, and ordinary bounded
+shutdown behavior.
 
 ## Consequences
 

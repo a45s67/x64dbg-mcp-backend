@@ -180,6 +180,8 @@ struct Request {
     std::optional<std::uint32_t> targetThreadId;
     std::string symbolName;
     std::optional<std::uint64_t> cursorSnapshotFingerprint;
+    std::uint64_t afterEventSequence{0U};
+    std::vector<EventKind> eventTypes;
 };
 
 bool IsMutation(const std::string_view method) {
@@ -196,6 +198,9 @@ bool IsMutation(const std::string_view method) {
            method == "debuggee.launch" || method == "debuggee.attach" ||
            method == "debuggee.detach" || method == "analysis.function";
 }
+
+const char* EventKindName(EventKind kind) noexcept;
+std::optional<EventKind> ParseEventKind(std::string_view value) noexcept;
 
 bool IsPageMethod(const std::string_view method) {
     return method == "modules.list" || method == "threads.list" ||
@@ -509,9 +514,41 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::optional<std::uint32_t> targetThreadId;
     std::string symbolName;
     std::optional<std::uint64_t> cursorSnapshotFingerprint;
+    std::uint64_t afterEventSequence = 0U;
+    std::vector<EventKind> eventTypes;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
+        }
+    } else if (methodValue == "events.list") {
+        json_t* after = json_object_get(payload, "after_sequence");
+        json_t* types = json_object_get(payload, "types");
+        json_t* limit = json_object_get(payload, "limit");
+        const std::size_t expectedFields = (after ? 1U : 0U) + (types ? 1U : 0U) +
+                                           (limit ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields) return std::nullopt;
+        if (after != nullptr) {
+            if (!json_is_integer(after) || json_integer_value(after) < 0 ||
+                json_integer_value(after) > 9007199254740991LL) return std::nullopt;
+            afterEventSequence = static_cast<std::uint64_t>(json_integer_value(after));
+        }
+        if (types != nullptr) {
+            if (!json_is_array(types) || json_array_size(types) < 1U ||
+                json_array_size(types) > 19U) return std::nullopt;
+            for (std::size_t index = 0U; index < json_array_size(types); ++index) {
+                json_t* value = json_array_get(types, index);
+                if (!json_is_string(value)) return std::nullopt;
+                const auto parsedKind = ParseEventKind(std::string_view(
+                    json_string_value(value), json_string_length(value)));
+                if (!parsedKind || std::find(eventTypes.begin(), eventTypes.end(), *parsedKind) !=
+                                       eventTypes.end()) return std::nullopt;
+                eventTypes.push_back(*parsedKind);
+            }
+        }
+        if (limit != nullptr) {
+            if (!json_is_integer(limit) || json_integer_value(limit) < 1 ||
+                json_integer_value(limit) > 256) return std::nullopt;
+            pageLimit = static_cast<std::size_t>(json_integer_value(limit));
         }
     } else if (methodValue == "debugger.snapshot") {
         json_t* registers = json_object_get(payload, "registers");
@@ -1030,7 +1067,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    registerWriteValue, std::move(breakpointAccess), breakpointSize,
                    std::move(instruction), std::move(expectedBytes),
                    std::move(expectedOriginalBytes), fillNop, addressProvided,
-                   targetThreadId, std::move(symbolName), cursorSnapshotFingerprint};
+                   targetThreadId, std::move(symbolName), cursorSnapshotFingerprint,
+                   afterEventSequence, std::move(eventTypes)};
 }
 
 bool IsCanonicalUuid(const std::string_view value) {
@@ -1106,6 +1144,45 @@ std::string PauseReasonJson(const PauseObservation& pause) {
                   std::string(pause.firstChance ? "true" : "false");
     }
     return result + "}";
+}
+
+const char* EventKindName(const EventKind kind) noexcept {
+    switch (kind) {
+    case EventKind::debugInitialized: return "debug_initialized";
+    case EventKind::processCreated: return "process_created";
+    case EventKind::systemBreakpoint: return "system_breakpoint";
+    case EventKind::breakpoint: return "breakpoint";
+    case EventKind::exception: return "exception";
+    case EventKind::paused: return "paused";
+    case EventKind::stepped: return "stepped";
+    case EventKind::resumed: return "resumed";
+    case EventKind::attached: return "attached";
+    case EventKind::detached: return "detached";
+    case EventKind::stopping: return "stopping";
+    case EventKind::processExited: return "process_exited";
+    case EventKind::debugStopped: return "debug_stopped";
+    case EventKind::threadCreated: return "thread_created";
+    case EventKind::threadExited: return "thread_exited";
+    case EventKind::dllLoaded: return "dll_loaded";
+    case EventKind::dllUnloaded: return "dll_unloaded";
+    case EventKind::debugString: return "debug_string";
+    case EventKind::rip: return "rip";
+    }
+    return "unknown";
+}
+
+std::optional<EventKind> ParseEventKind(const std::string_view value) noexcept {
+    constexpr EventKind values[] = {
+        EventKind::debugInitialized, EventKind::processCreated,
+        EventKind::systemBreakpoint, EventKind::breakpoint, EventKind::exception,
+        EventKind::paused, EventKind::stepped, EventKind::resumed, EventKind::attached,
+        EventKind::detached, EventKind::stopping, EventKind::processExited,
+        EventKind::debugStopped, EventKind::threadCreated, EventKind::threadExited,
+        EventKind::dllLoaded, EventKind::dllUnloaded, EventKind::debugString, EventKind::rip};
+    for (const EventKind kind : values) {
+        if (value == EventKindName(kind)) return kind;
+    }
+    return std::nullopt;
 }
 
 #ifndef MCP_LIFECYCLE_HARNESS
@@ -1442,6 +1519,16 @@ bool Runtime::PausedSnapshotCurrentForTesting(const std::uint64_t generation) no
 SessionOrigin Runtime::SessionOriginForTesting() const noexcept {
     return sessionOrigin_.load();
 }
+
+std::vector<EventRecord> Runtime::EventsForTesting() noexcept {
+    std::lock_guard lock(stateMutex_);
+    std::vector<EventRecord> events;
+    events.reserve(eventCount_);
+    for (std::size_t index = 0U; index < eventCount_; ++index) {
+        events.push_back(eventRing_[(eventStart_ + index) % kEventCapacity]);
+    }
+    return events;
+}
 #endif
 
 bool Runtime::Start() {
@@ -1642,6 +1729,97 @@ void Runtime::Worker() noexcept {
             [this, parsed, requestDeadline] {
                 if (parsed->method == "debugger.state") {
                     return StateResponse(parsed->requestId);
+                }
+                if (parsed->method == "events.list") {
+                    std::array<EventRecord, Runtime::kEventCapacity> copied{};
+                    std::size_t copiedCount = 0U;
+                    std::uint64_t oldest = 0U;
+                    std::uint64_t latest = 0U;
+                    bool hasMore = false;
+                    bool overflowed = false;
+                    {
+                        std::lock_guard lock(stateMutex_);
+                        if (eventCount_ != 0U) {
+                            oldest = eventRing_[eventStart_].sequence;
+                            latest = eventRing_[(eventStart_ + eventCount_ - 1U) %
+                                                kEventCapacity].sequence;
+                            overflowed = oldest > 1U && parsed->afterEventSequence < oldest - 1U;
+                        }
+                        for (std::size_t offset = 0U; offset < eventCount_; ++offset) {
+                            const EventRecord& event =
+                                eventRing_[(eventStart_ + offset) % kEventCapacity];
+                            if (event.sequence <= parsed->afterEventSequence ||
+                                (!parsed->eventTypes.empty() &&
+                                 std::find(parsed->eventTypes.begin(), parsed->eventTypes.end(),
+                                           event.kind) == parsed->eventTypes.end())) {
+                                continue;
+                            }
+                            if (copiedCount < parsed->pageLimit) {
+                                copied[copiedCount++] = event;
+                            } else {
+                                hasMore = true;
+                                break;
+                            }
+                        }
+                    }
+                    std::string items = "[";
+                    for (std::size_t index = 0U; index < copiedCount; ++index) {
+                        const EventRecord& event = copied[index];
+                        if (index != 0U) items.push_back(',');
+                        items += "{\"sequence\":" + std::to_string(event.sequence) +
+                                 ",\"type\":" + JsonString(EventKindName(event.kind)) +
+                                 ",\"state_generation\":" +
+                                 std::to_string(event.generation);
+                        if (event.hasProcessId) {
+                            items += ",\"process_id\":" + JsonString(HexValue(event.processId));
+                        }
+                        if (event.hasThreadId) {
+                            items += ",\"thread_id\":" + JsonString(HexValue(event.threadId));
+                        }
+                        if (event.hasAddress) {
+                            items += ",\"address\":" + JsonString(HexValue(event.address));
+                        }
+                        if (event.hasCode) {
+                            items += ",\"code\":" + JsonString(HexValue(event.code));
+                        }
+                        if (event.kind == EventKind::breakpoint) {
+                            const char* type = "unknown";
+                            switch (event.breakpointType) {
+                            case 1U: type = "software"; break;
+                            case 2U: type = "hardware"; break;
+                            case 4U: type = "memory"; break;
+                            case 8U: type = "dll"; break;
+                            case 16U: type = "exception"; break;
+                            default: break;
+                            }
+                            items += ",\"breakpoint_type\":" + JsonString(type) +
+                                     ",\"hit_count\":" + std::to_string(event.auxiliary);
+                        } else if (event.kind == EventKind::exception) {
+                            items += ",\"first_chance\":" +
+                                     std::string(event.firstChance ? "true" : "false");
+                        } else if (event.kind == EventKind::threadExited ||
+                                   event.kind == EventKind::processExited ||
+                                   event.kind == EventKind::rip) {
+                            items += ",\"status\":" + JsonString(HexValue(event.auxiliary));
+                        } else if (event.kind == EventKind::debugString) {
+                            items += ",\"length\":" + std::to_string(event.auxiliary) +
+                                     ",\"unicode\":" +
+                                     std::string(event.firstChance ? "true" : "false");
+                        }
+                        items += "}";
+                    }
+                    items += "]";
+                    const std::string next = copiedCount == 0U
+                                                 ? "null"
+                                                 : std::to_string(copied[copiedCount - 1U].sequence);
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(generation_.load()) +
+                           ",\"status\":\"ok\",\"result\":{\"oldest_sequence\":" +
+                           std::to_string(oldest) + ",\"latest_sequence\":" +
+                           std::to_string(latest) + ",\"overflowed\":" +
+                           (overflowed ? "true" : "false") + ",\"has_more\":" +
+                           (hasMore ? "true" : "false") + ",\"next_after_sequence\":" +
+                           next + ",\"items\":" + items + "}}";
                 }
                 if (parsed->method == "debugger.wait_for_pause") {
                     if (debuggeeState_.load() == DebuggeeState::absent ||
@@ -4792,6 +4970,19 @@ std::uint64_t Runtime::ObservedGeneration(const DebuggeeState state) const noexc
     return 0U;
 }
 
+void Runtime::RecordEventLocked(EventRecord event) noexcept {
+    constexpr std::uint64_t kMaxJsonSafeInteger = 9007199254740991ULL;
+    if (nextEventSequence_ > kMaxJsonSafeInteger) return;
+    event.sequence = nextEventSequence_++;
+    if (eventCount_ < kEventCapacity) {
+        eventRing_[(eventStart_ + eventCount_) % kEventCapacity] = event;
+        ++eventCount_;
+    } else {
+        eventRing_[eventStart_] = event;
+        eventStart_ = (eventStart_ + 1U) % kEventCapacity;
+    }
+}
+
 void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) noexcept {
     DebuggeeState next = debuggeeState_.load();
     PauseObservation pause;
@@ -4804,16 +4995,23 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     bool markLaunched = false;
     bool markAttached = false;
     bool markDetaching = false;
+    EventRecord event;
     switch (callbackType) {
     case CB_INITDEBUG:
+        event.kind = EventKind::debugInitialized;
         resetOrigin = true;
         next = DebuggeeState::starting;
         break;
     case CB_CREATEPROCESS: {
+        event.kind = EventKind::processCreated;
         const auto* info = static_cast<const PLUG_CB_CREATEPROCESS*>(callbackInfo);
         if (info != nullptr && info->fdProcessInfo != nullptr) {
             callbackProcessId = info->fdProcessInfo->dwProcessId;
             callbackThreadId = info->fdProcessInfo->dwThreadId;
+            event.processId = *callbackProcessId;
+            event.threadId = *callbackThreadId;
+            event.hasProcessId = true;
+            event.hasThreadId = true;
         }
         next = DebuggeeState::paused;
         markLaunched = true;
@@ -4822,12 +5020,14 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
         break;
     }
     case CB_SYSTEMBREAKPOINT:
+        event.kind = EventKind::systemBreakpoint;
         next = DebuggeeState::paused;
         pause.kind = PauseReasonKind::systemBreakpoint;
         hasPauseReason = true;
         refineCurrentPause = true;
         break;
     case CB_BREAKPOINT: {
+        event.kind = EventKind::breakpoint;
         next = DebuggeeState::paused;
         pause.kind = PauseReasonKind::breakpoint;
         hasPauseReason = true;
@@ -4838,10 +5038,15 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
             pause.hasAddress = true;
             pause.breakpointType = static_cast<std::uint8_t>(info->breakpoint->type);
             pause.hitCount = info->breakpoint->hitCount;
+            event.address = pause.address;
+            event.hasAddress = true;
+            event.breakpointType = pause.breakpointType;
+            event.auxiliary = pause.hitCount;
         }
         break;
     }
     case CB_EXCEPTION: {
+        event.kind = EventKind::exception;
         next = DebuggeeState::paused;
         pause.kind = PauseReasonKind::exception;
         hasPauseReason = true;
@@ -4854,21 +5059,32 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
                 info->Exception->ExceptionRecord.ExceptionAddress);
             pause.hasAddress = true;
             pause.firstChance = info->Exception->dwFirstChance != 0U;
+            event.code = pause.exceptionCode;
+            event.address = pause.address;
+            event.hasCode = true;
+            event.hasAddress = true;
+            event.firstChance = pause.firstChance;
         }
         break;
     }
     case CB_PAUSEDEBUG:
+        event.kind = EventKind::paused;
         next = DebuggeeState::paused;
         pause.kind = PauseReasonKind::userPause;
         hasPauseReason = true;
         break;
     case CB_STEPPED:
+        event.kind = EventKind::stepped;
         next = DebuggeeState::paused;
         pause.kind = PauseReasonKind::step;
         hasPauseReason = true;
         break;
-    case CB_RESUMEDEBUG: next = DebuggeeState::running; break;
+    case CB_RESUMEDEBUG:
+        event.kind = EventKind::resumed;
+        next = DebuggeeState::running;
+        break;
     case CB_ATTACH: {
+        event.kind = EventKind::attached;
         const auto* info = static_cast<const PLUG_CB_ATTACH*>(callbackInfo);
         if (info != nullptr && info->dwProcessId != 0U) {
             callbackProcessId = info->dwProcessId;
@@ -4878,6 +5094,7 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
         break;
     }
     case CB_DETACH: {
+        event.kind = EventKind::detached;
         const auto* info = static_cast<const PLUG_CB_DETACH*>(callbackInfo);
         if (info != nullptr && info->fdProcessInfo != nullptr) {
             callbackProcessId = info->fdProcessInfo->dwProcessId;
@@ -4886,9 +5103,21 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
         next = DebuggeeState::stopping;
         break;
     }
-    case CB_STOPPINGDEBUG: next = DebuggeeState::stopping; break;
-    case CB_EXITPROCESS: next = DebuggeeState::exited; break;
+    case CB_STOPPINGDEBUG:
+        event.kind = EventKind::stopping;
+        next = DebuggeeState::stopping;
+        break;
+    case CB_EXITPROCESS: {
+        event.kind = EventKind::processExited;
+        const auto* info = static_cast<const PLUG_CB_EXITPROCESS*>(callbackInfo);
+        if (info != nullptr && info->ExitProcess != nullptr) {
+            event.auxiliary = info->ExitProcess->dwExitCode;
+        }
+        next = DebuggeeState::exited;
+        break;
+    }
     case CB_STOPDEBUG:
+        event.kind = EventKind::debugStopped;
         clearProcess = true;
         resetOrigin = true;
         next = DebuggeeState::absent;
@@ -4897,9 +5126,56 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
         const auto* info = static_cast<const PLUG_CB_DEBUGEVENT*>(callbackInfo);
         if (info != nullptr && info->DebugEvent != nullptr) {
             std::lock_guard lock(stateMutex_);
-            processId_.store(info->DebugEvent->dwProcessId);
-            activeThreadId_.store(info->DebugEvent->dwThreadId);
-            generation_.fetch_add(1U);
+            const DEBUG_EVENT& debugEvent = *info->DebugEvent;
+            processId_.store(debugEvent.dwProcessId);
+            activeThreadId_.store(debugEvent.dwThreadId);
+            const std::uint64_t observed = generation_.fetch_add(1U) + 1U;
+            EventRecord generic;
+            generic.generation = observed;
+            generic.processId = debugEvent.dwProcessId;
+            generic.threadId = debugEvent.dwThreadId;
+            generic.hasProcessId = true;
+            generic.hasThreadId = true;
+            bool recordGeneric = true;
+            switch (debugEvent.dwDebugEventCode) {
+            case CREATE_THREAD_DEBUG_EVENT:
+                generic.kind = EventKind::threadCreated;
+                generic.address = reinterpret_cast<std::uintptr_t>(
+                    debugEvent.u.CreateThread.lpStartAddress);
+                generic.hasAddress = generic.address != 0U;
+                break;
+            case EXIT_THREAD_DEBUG_EVENT:
+                generic.kind = EventKind::threadExited;
+                generic.auxiliary = debugEvent.u.ExitThread.dwExitCode;
+                break;
+            case LOAD_DLL_DEBUG_EVENT:
+                generic.kind = EventKind::dllLoaded;
+                generic.address = reinterpret_cast<std::uintptr_t>(debugEvent.u.LoadDll.lpBaseOfDll);
+                generic.hasAddress = generic.address != 0U;
+                break;
+            case UNLOAD_DLL_DEBUG_EVENT:
+                generic.kind = EventKind::dllUnloaded;
+                generic.address =
+                    reinterpret_cast<std::uintptr_t>(debugEvent.u.UnloadDll.lpBaseOfDll);
+                generic.hasAddress = generic.address != 0U;
+                break;
+            case OUTPUT_DEBUG_STRING_EVENT:
+                generic.kind = EventKind::debugString;
+                generic.address = reinterpret_cast<std::uintptr_t>(
+                    debugEvent.u.DebugString.lpDebugStringData);
+                generic.hasAddress = generic.address != 0U;
+                generic.auxiliary = debugEvent.u.DebugString.nDebugStringLength;
+                generic.firstChance = debugEvent.u.DebugString.fUnicode != 0U;
+                break;
+            case RIP_EVENT:
+                generic.kind = EventKind::rip;
+                generic.auxiliary = debugEvent.u.RipInfo.dwError;
+                generic.code = debugEvent.u.RipInfo.dwType;
+                generic.hasCode = true;
+                break;
+            default: recordGeneric = false; break;
+            }
+            if (recordGeneric) RecordEventLocked(generic);
             stateChanged_.notify_all();
         }
         return;
@@ -4930,6 +5206,8 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
             pausedGeneration_.store(observed);
             pause.generation = observed;
             latestPause_ = pause;
+            event.generation = observed;
+            RecordEventLocked(event);
             stateChanged_.notify_all();
             return;
         }
@@ -4959,6 +5237,12 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     case DebuggeeState::stopping:
     case DebuggeeState::exited: break;
     }
+    event.generation = observed;
+    event.processId = processId_.load();
+    event.threadId = activeThreadId_.load();
+    event.hasProcessId = event.hasProcessId || event.processId != 0U;
+    event.hasThreadId = event.hasThreadId || event.threadId != 0U;
+    RecordEventLocked(event);
     stateChanged_.notify_all();
 }
 

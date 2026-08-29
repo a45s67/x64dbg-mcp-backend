@@ -4,6 +4,27 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 static CATALOG: LazyLock<Vec<Value>> = LazyLock::new(build_catalog);
+const EVENT_TYPES: &[&str] = &[
+    "debug_initialized",
+    "process_created",
+    "system_breakpoint",
+    "breakpoint",
+    "exception",
+    "paused",
+    "stepped",
+    "resumed",
+    "attached",
+    "detached",
+    "stopping",
+    "process_exited",
+    "debug_stopped",
+    "thread_created",
+    "thread_exited",
+    "dll_loaded",
+    "dll_unloaded",
+    "debug_string",
+    "rip",
+];
 
 #[must_use]
 pub fn catalog() -> &'static [Value] {
@@ -39,6 +60,28 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
         .ok_or(invalid("arguments", "must be an object"))?;
     match name {
         "debugger.state" => exact_keys(object, &[], &[]),
+        "events.list" => {
+            exact_keys(object, &[], &["after_sequence", "types", "limit"])?;
+            optional_integer(object, "after_sequence", 0, 9_007_199_254_740_991)?;
+            optional_integer(object, "limit", 1, 256)?;
+            if let Some(types) = object.get("types") {
+                let values = types
+                    .as_array()
+                    .filter(|values| !values.is_empty() && values.len() <= 19)
+                    .ok_or(invalid("types", "must contain 1 to 19 event types"))?;
+                let mut seen = std::collections::HashSet::new();
+                for value in values {
+                    let name = value
+                        .as_str()
+                        .filter(|name| EVENT_TYPES.contains(name))
+                        .ok_or(invalid("types", "contains an unknown event type"))?;
+                    if !seen.insert(name) {
+                        return Err(invalid("types", "must not contain duplicates"));
+                    }
+                }
+            }
+            Ok(())
+        }
         "debugger.snapshot" => {
             exact_keys(object, &[], &["registers", "disassembly_count"])?;
             if let Some(registers) = object.get("registers") {
@@ -702,6 +745,27 @@ fn build_catalog() -> Vec<Value> {
             "debugger.state",
             "Read debugger, debuggee, architecture, thread, instruction pointer, and pause state. Use this before state-sensitive operations.",
             object(vec![], vec![]),
+        ),
+        read_tool(
+            "events.list",
+            "Read the fixed-capacity recent debugger event ring by sequence and closed event type; this is diagnostic history, not a trace stream.",
+            object(
+                vec![
+                    (
+                        "after_sequence",
+                        json!({"type":"integer","minimum":0,"maximum":9_007_199_254_740_991_i64}),
+                    ),
+                    (
+                        "types",
+                        json!({"type":"array","minItems":1,"maxItems":19,"uniqueItems":true,"items":{"type":"string","enum":EVENT_TYPES}}),
+                    ),
+                    (
+                        "limit",
+                        json!({"type":"integer","minimum":1,"maximum":256,"default":100}),
+                    ),
+                ],
+                vec![],
+            ),
         ),
         read_tool(
             "debugger.snapshot",
@@ -1441,7 +1505,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 43);
+        assert_eq!(catalog().len(), 44);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -1461,6 +1525,17 @@ mod tests {
     #[test]
     fn validation_enforces_bounds_and_additional_properties() {
         assert!(validate_arguments("debugger.state", &json!({})).is_ok());
+        assert!(
+            validate_arguments(
+                "events.list",
+                &json!({"after_sequence":0,"types":["breakpoint","dll_loaded"],"limit":256})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments("events.list", &json!({"types":["breakpoint","breakpoint"]}))
+                .is_err()
+        );
         assert!(
             validate_arguments(
                 "debugger.snapshot",

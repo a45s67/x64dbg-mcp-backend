@@ -135,11 +135,16 @@ bool ExercisePauseCallbacks(mcp::Runtime& runtime) {
     PLUG_CB_EXCEPTION exceptionInfo{&exception};
     runtime.OnDebuggerEvent(CB_EXCEPTION, &exceptionInfo);
     const mcp::PauseObservation capturedException = runtime.PauseForTesting();
+    const std::vector<mcp::EventRecord> events = runtime.EventsForTesting();
+    const mcp::EventRecord& capturedEvent = events.back();
     return capturedException.kind == mcp::PauseReasonKind::exception &&
            capturedException.hasExceptionCode &&
            capturedException.exceptionCode == EXCEPTION_ACCESS_VIOLATION &&
            capturedException.hasAddress && capturedException.address == 0x402000U &&
-           capturedException.firstChance && capturedException.generation > specific.generation;
+           capturedException.firstChance && capturedException.generation > specific.generation &&
+           capturedEvent.kind == mcp::EventKind::exception && capturedEvent.hasCode &&
+           capturedEvent.code == EXCEPTION_ACCESS_VIOLATION && capturedEvent.hasAddress &&
+           capturedEvent.address == 0x402000U && capturedEvent.firstChance;
 }
 
 bool ExerciseSessionOriginCallbacks(mcp::Runtime& runtime) {
@@ -156,6 +161,37 @@ bool ExerciseSessionOriginCallbacks(mcp::Runtime& runtime) {
     if (runtime.SessionOriginForTesting() != mcp::SessionOrigin::attached) return false;
     runtime.OnDebuggerEvent(CB_STOPDEBUG, nullptr);
     return runtime.SessionOriginForTesting() == mcp::SessionOrigin::none;
+}
+
+bool ExerciseEventRingBoundary(mcp::Runtime& runtime, const unsigned short port) {
+    mcp::Runtime emptyRuntime;
+    if (!emptyRuntime.EventsForTesting().empty()) return false;
+    const std::vector<mcp::EventRecord> before = runtime.EventsForTesting();
+    const std::uint64_t previousLatest = before.empty() ? 0U : before.back().sequence;
+    for (std::uint64_t sequence = 1U; sequence <= 300U; ++sequence) {
+        runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+    }
+    const std::vector<mcp::EventRecord> events = runtime.EventsForTesting();
+    if (events.size() != 256U || events.front().sequence != previousLatest + 45U ||
+        events.back().sequence != previousLatest + 300U) {
+        return false;
+    }
+    for (std::size_t index = 0U; index < events.size(); ++index) {
+        if (events[index].kind != mcp::EventKind::resumed ||
+            events[index].sequence != previousLatest + static_cast<std::uint64_t>(index) + 45U ||
+            (index > 0U && events[index - 1U].generation >= events[index].generation)) {
+            return false;
+        }
+    }
+    constexpr std::string_view body =
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"events.list\",\"arguments\":{\"after_sequence\":0,\"types\":[\"resumed\"],\"limit\":1}}}";
+    const std::string response = PostMcp(port, body);
+    const bool valid = response.starts_with("HTTP/1.1 200") &&
+                       response.find("\"overflowed\":true") != std::string::npos &&
+                       response.find("\"has_more\":true") != std::string::npos &&
+                       response.find("\"type\":\"resumed\"") != std::string::npos;
+    runtime.OnDebuggerEvent(CB_STOPDEBUG, nullptr);
+    return valid;
 }
 } // namespace
 
@@ -240,6 +276,11 @@ int wmain(const int argc, wchar_t** argv) {
         runtime.Stop();
         std::cerr << "attach/detach session-origin callback contract failed\n";
         return 11;
+    }
+    if (!ExerciseEventRingBoundary(runtime, static_cast<unsigned short>(parsedPort))) {
+        runtime.Stop();
+        std::cerr << "bounded debugger-event ring contract failed\n";
+        return 12;
     }
     if (argc == 4 && std::wstring_view(argv[3]) == L"active-wait-shutdown") {
         if (!ExerciseActiveWaitShutdown(runtime, static_cast<unsigned short>(parsedPort))) {

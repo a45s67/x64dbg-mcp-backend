@@ -994,3 +994,26 @@ returned 69. Both followed a one-item filter-bound cursor, resolved the `Sleep`
 IAT record, returned four `mcp_fixture` exports, and preserved
 `AcquireSRWLockExclusive` as forwarder `NTDLL.RtlAcquireSRWLockExclusive`.
 Both completed all pre-existing lifecycle/mutation checks and clean shutdown.
+
+## 2026-08-30 bounded debugger-event history qualification
+
+ADR 0030 admits `events.list` in every debugger state. The native plugin copies
+only bounded scalar metadata from a closed set of specific and generic debugger
+callbacks into a 256-record ring protected by the existing state mutex. It never
+retains callback pointers, debug strings, OS handles, or an event-serving thread.
+Responses copy at most 256 matching records before JSON rendering and expose the
+oldest/latest sequence, continuation sequence, `has_more`, and an explicit
+`overflowed` signal when a caller has fallen behind the retained range.
+
+Rust passes 52 unit/contract tests and seven supervised-shutdown tests. Both
+native architectures pass all 12 tests; the lifecycle harness injects exactly
+300 resume callbacks and verifies that the retained 256 records are the newest
+strictly ordered sequence range, while the public response reports overflow and
+filter continuation. Fresh isolated x64 instance
+`c3ad8716-9c02-4abf-9a69-e76d582a6852` and x32 instance
+`8b971a75-a3c6-4b47-8ef2-47a9c543403c` each began with an empty history, returned
+`process_created` as a one-item filtered first page, continued through 12 later
+startup matches, verified structured breakpoint plus pause and step events,
+completed the existing analysis/mutation workflow, and exposed callback-confirmed
+`debug_stopped` at sequence 46 after debuggee teardown. Both debugger-owned
+sidecars then exited cleanly.

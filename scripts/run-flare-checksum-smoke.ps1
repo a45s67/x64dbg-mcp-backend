@@ -239,6 +239,43 @@ try {
         }
     }
 
+    # Qualify a real installed mutation without changing checksum.exe semantics:
+    # use a non-control register and restore it before the session is stopped.
+    $writableRegister = 'rdi'
+    $registerBeforeWrite = Invoke-Tool 'registers.read' @{ names = @($writableRegister) } 90
+    $originalRegisterValue = $registerBeforeWrite.registers.$writableRegister
+    $testRegisterValue = if ($originalRegisterValue -eq '0x11223344') {
+        '0x55667788'
+    } else {
+        '0x11223344'
+    }
+    $registerWriteArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        name = $writableRegister
+        value = $testRegisterValue
+    }
+    $registerWrite = Invoke-Tool 'registers.write' $registerWriteArguments 91
+    $registerWriteReplay = Invoke-Tool 'registers.write' $registerWriteArguments 92
+    $registerAfterWrite = Invoke-Tool 'registers.read' @{ names = @($writableRegister) } 93
+    if (!$registerWrite.changed -or
+        $registerWrite.previous_value -ne $originalRegisterValue -or
+        $registerWrite.value -ne $testRegisterValue -or
+        $registerAfterWrite.registers.$writableRegister -ne $testRegisterValue -or
+        ($registerWrite | ConvertTo-Json -Compress -Depth 8) -ne
+        ($registerWriteReplay | ConvertTo-Json -Compress -Depth 8)) {
+        throw 'Installed typed register write was not verified, observable, or replay-safe.'
+    }
+    $registerRestore = Invoke-Tool 'registers.write' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        name = $writableRegister
+        value = $originalRegisterValue
+    } 94
+    $registerAfterRestore = Invoke-Tool 'registers.read' @{ names = @($writableRegister) } 95
+    if ($registerRestore.value -ne $originalRegisterValue -or
+        $registerAfterRestore.registers.$writableRegister -ne $originalRegisterValue) {
+        throw 'Installed typed register write did not restore the Flare sample context.'
+    }
+
     $stopSubmitted = $true
     $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 40
     [ordered]@{
@@ -277,6 +314,10 @@ try {
         prompt_string_preview_bytes = [Text.Encoding]::UTF8.GetByteCount($promptString.Item.text)
         prompt_string_page = $promptString.Page
         string_context_bytes = 32
+        register_write_name = $writableRegister
+        register_write_value = $registerWrite.value
+        register_write_replay_equal = $true
+        register_restore_value = $registerAfterRestore.registers.$writableRegister
         stopped = $stop.debuggee_state -eq 'absent'
     } | ConvertTo-Json -Depth 5
 } finally {

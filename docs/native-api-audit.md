@@ -63,7 +63,9 @@ not mutated anything.
 | `breakpoints.list` | `DbgGetBpList` | paused/running | max 256 returned items; `BridgeFree(map.bp)` |
 | `disassembly.read` | `DbgDisasmAt` | paused | max 256 instructions; size must be 1-15 |
 | `expression.evaluate` | `DbgFunctions()->ValFromString` | paused | max 1024-byte expression; no command execution |
-| pause/resume/step/stop | `DbgCmdExec` | operation-specific | fixed command; callback and generation confirmation |
+| pause/resume/step-in/step-over/stop | `DbgCmdExec` | operation-specific | fixed command; callback and generation confirmation |
+| `debugger.step_out` | `DbgCmdExec` (`rtr`), `DbgGetRegDumpEx`, `DbgDisasmAt` | paused | newer paused callback, copied CIP/CSP/reason, exact generation recheck; return+CSP postcondition distinguishes completion from an intervening pause |
+| `registers.write` | `Script::Register::Set`, `DbgGetRegDumpEx` | paused | one allowlisted full-width core register; before/after snapshots, exact read-back, and generation recheck; no batch |
 | `memory.write` | `DbgMemWrite`, `DbgMemRead` | paused | max 4 KiB; read-back verification |
 | breakpoint set/remove | `DbgCmdExec`, `DbgGetBpxTypeAt` | paused | validated address only; bounded observation loop |
 | `debuggee.launch` | `DbgCmdExec` (`InitDebug`) | absent | canonical existing executable/directory; ignores transient process-created pause and confirms a later actionable callback |

@@ -13,6 +13,14 @@
 For `session_origin: "attached"`, cleanup uses `debuggee.detach`. The backend rejects
 `debugger.stop` for that origin because stop can terminate a process the debugger did not create.
 
+For a temporary register change, read the original value, call `registers.write` once with one
+operation ID, and restore with a different operation ID only when restoration is a separately
+authorized mutation. Never batch speculative register changes.
+
+After `debugger.step_out`, require `completed: true` before assuming the frame reached its return.
+When it is false, inspect `pause_reason`, CIP, and disassembly; an existing breakpoint, exception,
+or user pause interrupted the operation and replaying it cannot make further progress.
+
 If the plugin reports draining, cancelled, or unavailable, stop issuing work and let debugger
 shutdown finish.
 

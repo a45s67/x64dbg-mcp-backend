@@ -29,6 +29,7 @@
 #include "_scriptapi_symbol.h"
 #include "jansson/jansson.h"
 #include "memory_filters.h"
+#include "register_policy.h"
 
 namespace mcp {
 namespace {
@@ -151,11 +152,14 @@ struct Request {
     bool committedOnly{false};
     bool executableOnly{false};
     bool compact{false};
+    std::string registerName;
+    std::uint64_t registerWriteValue{0U};
 };
 
 bool IsMutation(const std::string_view method) {
     return method == "debugger.pause" || method == "debugger.resume" ||
            method == "debugger.step_into" || method == "debugger.step_over" ||
+           method == "debugger.step_out" || method == "registers.write" ||
            method == "debugger.stop" || method == "memory.write" ||
            method == "breakpoints.set" || method == "breakpoints.remove" ||
            method == "debuggee.launch" || method == "debuggee.attach" ||
@@ -250,6 +254,14 @@ bool ParseCanonicalHex(json_t* value, duint& output) {
     if (!IsCanonicalHex(value) || json_string_length(value) > sizeof(duint) * 2U + 2U) {
         return false;
     }
+    const std::string_view text(json_string_value(value), json_string_length(value));
+    const auto conversion =
+        std::from_chars(text.data() + 2, text.data() + text.size(), output, 16);
+    return conversion.ec == std::errc{} && conversion.ptr == text.data() + text.size();
+}
+
+bool ParseCanonicalHex64(json_t* value, std::uint64_t& output) {
+    if (!IsCanonicalHex(value) || json_string_length(value) > 18U) return false;
     const std::string_view text(json_string_value(value), json_string_length(value));
     const auto conversion =
         std::from_chars(text.data() + 2, text.data() + text.size(), output, 16);
@@ -422,6 +434,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     bool committedOnly = false;
     bool executableOnly = false;
     bool compact = false;
+    std::string registerName;
+    std::uint64_t registerWriteValue = 0U;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
@@ -555,6 +569,16 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                 registerNames.push_back(std::move(value));
             }
         }
+    } else if (methodValue == "registers.write") {
+        json_t* name = json_object_get(payload, "name");
+        if (json_object_size(payload) != 3U ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !json_is_string(name) || json_string_length(name) < 2U ||
+            json_string_length(name) > 6U ||
+            !ParseCanonicalHex64(json_object_get(payload, "value"), registerWriteValue)) {
+            return std::nullopt;
+        }
+        registerName.assign(json_string_value(name), json_string_length(name));
     } else if (methodValue == "memory.map") {
         json_t* module = json_object_get(payload, "module");
         json_t* committed = json_object_get(payload, "committed_only");
@@ -723,7 +747,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         }
     } else if (methodValue == "debugger.pause" || methodValue == "debugger.resume" ||
                methodValue == "debugger.step_into" || methodValue == "debugger.step_over" ||
-               methodValue == "debugger.stop") {
+               methodValue == "debugger.step_out" || methodValue == "debugger.stop") {
         if (json_object_size(payload) != 1U ||
             !json_is_string(json_object_get(payload, "operation_id"))) {
             return std::nullopt;
@@ -772,7 +796,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(writeBytes), afterGeneration, waitTimeoutMs,
                    std::move(moduleFilter), std::move(query), std::move(stringEncoding),
                    minStringLength, stringContextBytes, cursorFingerprint, discoveryCursorInvalid,
-                   committedOnly, executableOnly, compact};
+                   committedOnly, executableOnly, compact, std::move(registerName),
+                   registerWriteValue};
 }
 
 bool IsAcceptedHandshakeAck(const std::string_view bytes) {
@@ -1798,6 +1823,78 @@ void Runtime::Worker() noexcept {
                            JsonString(HexValue(detachedProcess)) +
                            ",\"state_generation\":" + std::to_string(confirmed) + "}}";
                 }
+                if (parsed->method == "debugger.step_out") {
+                    const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "step out requires a paused debuggee", false, false);
+                    }
+                    REGDUMP_AVX512 beforeDump{};
+                    if (!DbgGetRegDumpEx(&beforeDump, sizeof(beforeDump))) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "initial register snapshot is unavailable", true,
+                                             false);
+                    }
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed before step out submission", true,
+                                             false);
+                    }
+                    const duint initialStackPointer = beforeDump.regcontext.csp;
+                    if (!DbgCmdExec("rtr")) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected step out", true,
+                                             false);
+                    }
+                    if (!WaitForState(DebuggeeState::paused, *snapshot, requestDeadline)) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "step out produced no callback-confirmed pause", false,
+                                             true);
+                    }
+                    std::uint64_t confirmed = 0U;
+                    PauseObservation pause;
+                    {
+                        std::lock_guard lock(stateMutex_);
+                        confirmed = pausedGeneration_.load();
+                        pause = latestPause_;
+                    }
+                    REGDUMP_AVX512 afterDump{};
+                    if (!DbgGetRegDumpEx(&afterDump, sizeof(afterDump))) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "step out paused but its register snapshot is unavailable",
+                                             false, true);
+                    }
+                    DISASM_INSTR instruction{};
+                    DbgDisasmAt(afterDump.regcontext.cip, &instruction);
+                    const int instructionSize = instruction.instr_size;
+                    const std::size_t textLength =
+                        strnlen_s(instruction.instruction, sizeof(instruction.instruction));
+                    const std::string_view instructionText(instruction.instruction, textLength);
+                    if (!PauseObservationCurrent(confirmed, confirmed)) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "debugger changed during step out confirmation", false,
+                                             true);
+                    }
+                    const bool completed = instructionSize > 0 && instructionSize <= 15 &&
+                                           IsReturnInstruction(instructionText) &&
+                                           afterDump.regcontext.csp >= initialStackPointer;
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(confirmed) +
+                           ",\"status\":\"ok\",\"result\":{\"completed\":" +
+                           (completed ? "true" : "false") +
+                           ",\"debuggee_state\":\"paused\",\"pause_reason\":" +
+                           PauseReasonJson(pause) + ",\"instruction_pointer\":" +
+                           JsonString(HexValue(afterDump.regcontext.cip)) +
+                           ",\"stack_pointer\":" +
+                           JsonString(HexValue(afterDump.regcontext.csp)) +
+                           ",\"initial_stack_pointer\":" +
+                           JsonString(HexValue(initialStackPointer)) +
+                           ",\"instruction\":{\"size\":" +
+                           std::to_string(instructionSize > 0 ? instructionSize : 0) +
+                           ",\"text\":" +
+                           JsonString(instructionText) + "},\"state_generation\":" +
+                           std::to_string(confirmed) + "}}";
+                }
                 if (parsed->method == "debugger.pause" || parsed->method == "debugger.resume" ||
                     parsed->method == "debugger.step_into" ||
                     parsed->method == "debugger.step_over" || parsed->method == "debugger.stop") {
@@ -1977,6 +2074,69 @@ void Runtime::Worker() noexcept {
                            JsonString(Hex(bytes)) + ",\"bytes_read\":" +
                            std::to_string(bytes.size()) + ",\"complete\":true,\"state_generation\":" +
                            std::to_string(resolvedGeneration) + "}}";
+                }
+                if (parsed->method == "registers.write") {
+                    const std::optional<WritableRegister> spec =
+                        FindWritableRegister(parsed->registerName);
+                    if (!spec) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "register is not writable on this architecture", false,
+                                             false);
+                    }
+                    if (spec->bits < 64U &&
+                        parsed->registerWriteValue >= (std::uint64_t{1U} << spec->bits)) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "register value exceeds its width", false, false);
+                    }
+                    const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "register write requires a paused debuggee", false,
+                                             false);
+                    }
+                    REGDUMP_AVX512 beforeDump{};
+                    if (!DbgGetRegDumpEx(&beforeDump, sizeof(beforeDump))) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "initial register snapshot is unavailable", true,
+                                             false);
+                    }
+                    const std::optional<duint> previous =
+                        RegisterValue(beforeDump.regcontext, parsed->registerName);
+                    if (!previous) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "register policy has no snapshot mapping", false,
+                                             false);
+                    }
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed before register write", true, false);
+                    }
+                    if (!Script::Register::Set(
+                            spec->id, static_cast<duint>(parsed->registerWriteValue))) {
+                        return ErrorResponse(*parsed, "ACCESS_DENIED",
+                                             "typed register write failed", false, true);
+                    }
+                    REGDUMP_AVX512 afterDump{};
+                    if (!DbgGetRegDumpEx(&afterDump, sizeof(afterDump))) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "register write completed without read-back", false,
+                                             true);
+                    }
+                    const std::optional<duint> observed =
+                        RegisterValue(afterDump.regcontext, parsed->registerName);
+                    if (!PausedSnapshotCurrent(*snapshot) || !observed ||
+                        *observed != static_cast<duint>(parsed->registerWriteValue)) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "register write read-back did not match", false, true);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"name\":" +
+                           JsonString(parsed->registerName) + ",\"previous_value\":" +
+                           JsonString(HexValue(*previous)) + ",\"value\":" +
+                           JsonString(HexValue(*observed)) + ",\"changed\":" +
+                           (*previous == *observed ? "false" : "true") +
+                           ",\"state_generation\":" + std::to_string(*snapshot) + "}}";
                 }
                 if (parsed->method == "registers.read") {
                     const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();

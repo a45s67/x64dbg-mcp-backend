@@ -166,11 +166,13 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `debugger.resume` | mutate | paused | Resume execution |
 | `debugger.step_into` | mutate | paused | One instruction, then bounded wait for pause |
 | `debugger.step_over` | mutate | paused | One instruction, then bounded wait for pause |
+| `debugger.step_out` | mutate | paused | Fixed `rtr`; newer pause plus return/CSP confirmation; interruptions return `completed: false` |
 | `debugger.stop` | mutate | starting/running/paused | Stop current debug session |
 | `debuggee.launch` | destructive mutation | absent | Canonicalize and load an existing executable, then wait past process creation for an actionable callback pause |
 | `debuggee.attach` | destructive mutation | absent | Attach to one explicit PID; no enumeration; PID plus paused-callback confirmation |
 | `debuggee.detach` | mutate | attached paused/running | Detach without terminating the pre-existing process; callback-confirmed absent state |
 | `registers.read` | read | paused | Selected registers or bounded complete register set |
+| `registers.write` | mutate | paused | One full-width core register; typed SDK and exact read-back; no batch writes |
 | `address.resolve` | read | paused | Resolve absolute or module/RVA input and return canonical location metadata |
 | `analysis.function` | mutate | paused | Explicitly analyze one addressed function in a module up to 128 MiB; private queue-fence and marker confirmation |
 | `memory.read` | read | paused | Read at most 64 KiB per call; report partial/unreadable ranges |

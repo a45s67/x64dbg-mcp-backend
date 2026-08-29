@@ -734,3 +734,50 @@ loaded `checksum.exe` at `0x1000000`, resolved RVA `0xa78a0` to `0x10a78a0`, hit
 the software breakpoint once, held generation 27 across all paused reads, replayed
 the existing analysis result exactly, found both compact-context strings on page
 one, stopped the launched debuggee, and left no owned sidecar.
+
+## 2026-08-29 verified register-write and step-out follow-up
+
+ADR 0018 adds one-register `registers.write` and callback-confirmed
+`debugger.step_out`. Register writes accept only architecture-appropriate
+full-width core registers and canonical hexadecimal values. The plugin uses the
+typed register SDK, takes before/after register dumps, verifies exact readback,
+and records the result under the operation ID. Partial, vector, segment, and
+debug-register writes remain outside this stage.
+
+Step-out submits the fixed x64dbg `rtr` command, then waits for a newer paused
+callback instead of sleeping. Its result includes the pause reason, final
+CIP/CSP, decoded instruction, and `completed`. Completion is true only when the
+initial instruction decoded as a return and the final stack pointer satisfies
+the expected postcondition. A breakpoint or exception that interrupts the
+operation is a successful observation with `completed: false`, not a falsely
+reported return and not a reason to retry the mutation blindly.
+
+A focused review compared three pinned local implementations: the Zig
+`x64dbg-mcp-server` fine-grained catalog, the layered C++ `x64dbg-mcp`, and the
+TypeScript action-based `x64dbg_mcp`. We retained atomic backend-local tools and
+adopted workflow-oriented descriptions plus strict breakpoint validation. We did
+not adopt mega-action unions, arbitrary debugger-command interpolation, fixed
+sleeps, batch partial mutations, or mutation contracts without replay identity.
+The durable comparison is in `reference-implementation-review.md`.
+
+Rust retained 49 unit/contract tests and six supervised-shutdown tests. Both
+native architectures passed nine tests, including the new register-policy suite.
+Fresh isolated x32 and x64 integrations each wrote EDI/RDI, proved exact
+readback and byte-identical operation replay, restored the original value under
+a fresh operation ID, and rejected an over-wide EFLAGS value. Each architecture
+also proved that a breakpoint can interrupt step-out with `completed: false`,
+then removed it and confirmed a normal return with `completed: true`; both
+sidecars stopped cleanly.
+
+The installed `checksum.exe` regression again resolved `CHECKSUM.EXE+0xa78a0`
+to `0x10a78a0`, hit the software breakpoint at generation 27, retained stable
+paused reads, replayed function analysis, and found both bounded string previews.
+It then changed RDI to `0x11223344`, observed exact replay and readback, restored
+the original `0x1`, stopped the debuggee, and left no owned sidecar. Step-out was
+not forced through this large interactive Go main function; the deterministic
+x32/x64 fixture remains the mandatory step-out qualification target.
+
+The backend and managed skill advance to 0.5.0. Package SHA-256 is
+`80290feb663e4acdd3c00b5b579f3d1209111c22b57cf3b85a6bedd51e446cde`.
+Deployment preserved the installed bearer token and refreshed both static Codex
+registrations.

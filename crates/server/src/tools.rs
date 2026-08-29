@@ -68,7 +68,7 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             optional_integer(object, "timeout_ms", 1, 9_000)
         }
         "debugger.pause" | "debugger.resume" | "debugger.step_into" | "debugger.step_over"
-        | "debugger.stop" | "debuggee.detach" => operation(object, &[]),
+        | "debugger.step_out" | "debugger.stop" | "debuggee.detach" => operation(object, &[]),
         "debuggee.launch" => {
             exact_keys(object, &["operation_id", "path"], &["working_directory"])?;
             validate_operation_id(object)?;
@@ -106,6 +106,51 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
                 if unique.len() != names.len() {
                     return Err(invalid("names", "register names must be unique"));
                 }
+            }
+            Ok(())
+        }
+        "registers.write" => {
+            operation(object, &["name", "value"])?;
+            let name = string(object, "name", 2, 6)?;
+            if !matches!(
+                name,
+                "rax"
+                    | "rbx"
+                    | "rcx"
+                    | "rdx"
+                    | "rsi"
+                    | "rdi"
+                    | "rbp"
+                    | "rsp"
+                    | "rip"
+                    | "r8"
+                    | "r9"
+                    | "r10"
+                    | "r11"
+                    | "r12"
+                    | "r13"
+                    | "r14"
+                    | "r15"
+                    | "eax"
+                    | "ebx"
+                    | "ecx"
+                    | "edx"
+                    | "esi"
+                    | "edi"
+                    | "ebp"
+                    | "esp"
+                    | "eip"
+                    | "eflags"
+            ) {
+                return Err(invalid("name", "must be a supported full-width register"));
+            }
+            let value = string(object, "value", 3, 18)?;
+            if !value.starts_with("0x")
+                || !value[2..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(invalid("value", "must be canonical lowercase hexadecimal"));
             }
             Ok(())
         }
@@ -481,6 +526,12 @@ fn build_catalog() -> Vec<Value> {
             false,
         ),
         mutation_tool(
+            "debugger.step_out",
+            "Run toward the current frame's return using fixed rtr, then return a generation-correlated pause snapshot. Check completed: an earlier breakpoint, exception, or user pause returns completed=false and must not be blindly retried.",
+            operation_schema(vec![]),
+            false,
+        ),
+        mutation_tool(
             "debugger.stop",
             "Stop the current debug session and wait for callback confirmation.",
             operation_schema(vec![]),
@@ -526,6 +577,29 @@ fn build_catalog() -> Vec<Value> {
                 )],
                 vec![],
             ),
+        ),
+        mutation_tool(
+            "registers.write",
+            "Write one full-width core register in a paused debuggee through the typed SDK, then verify exact read-back. Names are architecture-specific; partial, vector, segment, and debug registers are excluded.",
+            operation_schema(vec![
+                (
+                    "name",
+                    json!({
+                        "type":"string",
+                        "enum":[
+                            "rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","rip",
+                            "r8","r9","r10","r11","r12","r13","r14","r15",
+                            "eax","ebx","ecx","edx","esi","edi","ebp","esp","eip",
+                            "eflags"
+                        ]
+                    }),
+                ),
+                (
+                    "value",
+                    json!({"type":"string","pattern":"^0x[0-9a-f]{1,16}$","minLength":3,"maxLength":18}),
+                ),
+            ]),
+            false,
         ),
         read_tool(
             "address.resolve",
@@ -898,7 +972,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 28);
+        assert_eq!(catalog().len(), 30);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -933,6 +1007,28 @@ mod tests {
             validate_arguments(
                 "debugger.wait_for_pause",
                 &json!({"after_generation":7,"timeout_ms":9001})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "registers.write",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "name":"r15",
+                    "value":"0xffffffffffffffff"
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "registers.write",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "name":"dr0",
+                    "value":"0x1"
+                })
             )
             .is_err()
         );

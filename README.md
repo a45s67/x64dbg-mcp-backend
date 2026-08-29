@@ -24,8 +24,10 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0015-token-efficient-string-context.md`](docs/adr/0015-token-efficient-string-context.md)
 - [`docs/adr/0016-explicit-function-analysis.md`](docs/adr/0016-explicit-function-analysis.md)
 - [`docs/adr/0017-attach-and-detach-lifecycle.md`](docs/adr/0017-attach-and-detach-lifecycle.md)
+- [`docs/adr/0018-register-write-and-step-out.md`](docs/adr/0018-register-write-and-step-out.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
+- [`docs/reference-implementation-review.md`](docs/reference-implementation-review.md)
 - [`docs/install.md`](docs/install.md)
 - [`docs/release-readiness.md`](docs/release-readiness.md)
 
@@ -59,6 +61,9 @@ it uses a private command-queue fence and never depends on the user's GUI select
 Existing processes can be attached only by an explicit numeric PID. State exposes
 whether the session was launched or attached; attached sessions must use
 `debuggee.detach`, so generic cleanup cannot terminate a pre-existing process.
+One-register writes use the typed SDK plus exact read-back. `debugger.step_out`
+returns compact pause context and an explicit `completed` flag, so an intervening
+breakpoint or exception is not mistaken for reaching the return.
 
 Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
 It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer

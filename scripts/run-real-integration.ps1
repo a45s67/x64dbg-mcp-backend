@@ -400,6 +400,49 @@ try {
         throw 'Pagination cursor generation does not match its snapshot.'
     }
 
+    $writableRegister = if ($Backend -eq 'x32') { 'edi' } else { 'rdi' }
+    $originalRegisterValue = $registers.registers.$writableRegister
+    $testRegisterValue = if ($originalRegisterValue -eq '0x11223344') {
+        '0x55667788'
+    } else {
+        '0x11223344'
+    }
+    $registerWriteArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        name = $writableRegister
+        value = $testRegisterValue
+    }
+    $registerWrite = Invoke-Tool 'registers.write' $registerWriteArguments 80
+    $registerWriteReplay = Invoke-Tool 'registers.write' $registerWriteArguments 81
+    $registerAfterWrite = Invoke-Tool 'registers.read' @{ names = @($writableRegister) } 82
+    if (!$registerWrite.changed -or $registerWrite.previous_value -ne $originalRegisterValue -or
+        $registerWrite.value -ne $testRegisterValue -or
+        $registerAfterWrite.registers.$writableRegister -ne $testRegisterValue -or
+        ($registerWrite | ConvertTo-Json -Compress -Depth 8) -ne
+        ($registerWriteReplay | ConvertTo-Json -Compress -Depth 8)) {
+        throw 'Typed register write was not verified, observable, or replay-safe.'
+    }
+    $registerRestore = Invoke-Tool 'registers.write' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        name = $writableRegister
+        value = $originalRegisterValue
+    } 83
+    $registerAfterRestore = Invoke-Tool 'registers.read' @{ names = @($writableRegister) } 84
+    if ($registerRestore.value -ne $originalRegisterValue -or
+        $registerAfterRestore.registers.$writableRegister -ne $originalRegisterValue) {
+        throw 'Typed register write did not restore the fixture context.'
+    }
+    $tooWideRegister = Invoke-Mcp 'tools/call' @{
+        name = 'registers.write'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString()
+            name = 'eflags'; value = '0x100000000'
+        }
+    } 85
+    if (!$tooWideRegister.isError -or
+        $tooWideRegister.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Register write did not reject a value wider than eflags.'
+    }
+
     $writeOperation = [Guid]::NewGuid().ToString()
     $write = Invoke-Tool 'memory.write' @{
         operation_id = $writeOperation; address = $moduleEntryRef; data_hex = $moduleMemory.data_hex.Substring(0, 2)
@@ -409,6 +452,70 @@ try {
     } 12
     if (($write | ConvertTo-Json -Compress) -ne ($writeReplay | ConvertTo-Json -Compress)) {
         throw 'Mutation replay did not return the recorded memory.write result.'
+    }
+    $stepOutBreakpoint = Invoke-Tool 'breakpoints.set' @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $analysisRef
+    } 86
+    if (!$stepOutBreakpoint.present) {
+        throw 'Could not set the fixture function breakpoint for step-out.'
+    }
+    $stepOutEntryPause = $null
+    for ($stepOutAttempt = 0; $stepOutAttempt -lt 6; $stepOutAttempt++) {
+        $stepOutResume = Invoke-Tool 'debugger.resume' @{
+            operation_id = [Guid]::NewGuid().ToString()
+        } (87 + $stepOutAttempt * 2)
+        $stepOutWait = Invoke-Tool 'debugger.wait_for_pause' @{
+            after_generation = $stepOutResume.state_generation; timeout_ms = 9000
+        } (88 + $stepOutAttempt * 2)
+        if ($stepOutWait.pause_reason.kind -eq 'breakpoint' -and
+            $stepOutWait.pause_reason.address -eq $analysis.requested_location.address) {
+            $stepOutEntryPause = $stepOutWait
+            break
+        }
+    }
+    if (!$stepOutEntryPause) {
+        throw 'Fixture analysis target was not reached for step-out qualification.'
+    }
+    $null = Invoke-Tool 'breakpoints.remove' @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $analysisRef
+    } 100
+    $stepOutDisassembly = Invoke-Tool 'disassembly.read' @{
+        address = $analysisRef; count = 6
+    } 101
+    $stepOutInterruptInstruction = @($stepOutDisassembly.items | Select-Object -Skip 1 |
+        Where-Object { !$_.text.StartsWith('ret', [StringComparison]::OrdinalIgnoreCase) } |
+        Select-Object -First 1)[0]
+    if (!$stepOutInterruptInstruction) {
+        throw 'Fixture function has no deterministic inner instruction for interruption testing.'
+    }
+    $null = Invoke-Tool 'breakpoints.set' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = @{ absolute = $stepOutInterruptInstruction.address }
+    } 102
+    $interruptedStepOutArguments = @{ operation_id = [Guid]::NewGuid().ToString() }
+    $interruptedStepOut = Invoke-Tool 'debugger.step_out' $interruptedStepOutArguments 103
+    $interruptedStepOutReplay = Invoke-Tool 'debugger.step_out' $interruptedStepOutArguments 104
+    if ($interruptedStepOut.completed -or
+        $interruptedStepOut.pause_reason.kind -ne 'breakpoint' -or
+        $interruptedStepOut.instruction_pointer -ne $stepOutInterruptInstruction.address -or
+        ($interruptedStepOut | ConvertTo-Json -Compress -Depth 8) -ne
+        ($interruptedStepOutReplay | ConvertTo-Json -Compress -Depth 8)) {
+        throw 'Step-out did not expose and replay its deterministic breakpoint interruption.'
+    }
+    $null = Invoke-Tool 'breakpoints.remove' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = @{ absolute = $stepOutInterruptInstruction.address }
+    } 105
+    $stepOutArguments = @{ operation_id = [Guid]::NewGuid().ToString() }
+    $stepOut = Invoke-Tool 'debugger.step_out' $stepOutArguments 106
+    $stepOutReplay = Invoke-Tool 'debugger.step_out' $stepOutArguments 107
+    if (!$stepOut.completed -or $stepOut.debuggee_state -ne 'paused' -or
+        !($stepOut.instruction.text.StartsWith('ret', [StringComparison]::OrdinalIgnoreCase)) -or
+        [Convert]::ToUInt64($stepOut.stack_pointer.Substring(2), 16) -lt
+        [Convert]::ToUInt64($stepOut.initial_stack_pointer.Substring(2), 16) -or
+        ($stepOut | ConvertTo-Json -Compress -Depth 8) -ne
+        ($stepOutReplay | ConvertTo-Json -Compress -Depth 8)) {
+        throw 'Step-out was not callback-confirmed at the fixture return or replay-safe.'
     }
     $resume = $null
     $startupPause = $null
@@ -546,6 +653,15 @@ try {
         stale_discovery_cursor_rejected = $true
         write_verified = $write.verified
         write_replay_equal = $true
+        register_written = $writableRegister
+        register_write_verified = $true
+        register_write_replay_equal = $true
+        register_restored = $true
+        register_width_rejected = $true
+        step_out_completed = $stepOut.completed
+        step_out_interruption_reported = $true
+        step_out_instruction = $stepOut.instruction.text
+        step_out_replay_equal = $true
         resume_state = $resume.debuggee_state
         resume_generation = $resume.state_generation
         startup_pause_reason = if ($startupPause) { $startupPause.pause_reason.kind } else { $null }

@@ -110,7 +110,7 @@ Assert-PeMachine 'server/x64dbg-mcp-server.exe' 0x8664
 
 $version = Get-Content -LiteralPath (Join-Path $root 'version.json') -Raw | ConvertFrom-Json
 if ($version.name -cne 'x64dbg-mcp-backend' -or $version.mcp_protocol -cne '2025-06-18' -or
-    $version.ipc_protocol.major -ne 1 -or $version.ipc_protocol.minor -ne 0 -or
+    $version.ipc_protocol.major -ne 1 -or $version.ipc_protocol.minor -ne 1 -or
     @($version.targets).Count -ne 2 -or
     @($version.targets | Where-Object { $_ -ceq 'x32dbg' }).Count -ne 1 -or
     @($version.targets | Where-Object { $_ -ceq 'x64dbg' }).Count -ne 1) {

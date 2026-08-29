@@ -41,6 +41,13 @@ $env:X64DBG_MCP_TOKEN = $token
 $env:X64DBG_MCP_SERVER_PATH = $server
 
 function Invoke-Mcp([string]$Method, $Params, [int]$Id) {
+    if ($Method -eq 'tools/call' -and $null -ne $Params.arguments.operation_id -and
+        $null -eq $Params.arguments.instance_id) {
+        if ([string]::IsNullOrWhiteSpace($script:InstanceId)) {
+            throw 'Mutation attempted before backend instance identity was observed.'
+        }
+        $Params.arguments.instance_id = $script:InstanceId
+    }
     $body = @{ jsonrpc = '2.0'; id = $Id; method = $Method; params = $Params } |
         ConvertTo-Json -Depth 12 -Compress
     $bytes = [Text.Encoding]::UTF8.GetBytes($body)
@@ -95,12 +102,16 @@ try {
     if ($ready.status -ne 'ready' -or $ready.debugger_state -ne 'absent') {
         throw 'Isolated debugger did not become ready without a debuggee.'
     }
+    $script:InstanceId = ([Guid]::Parse([string]$ready.instance_id)).ToString()
 
     $null = Invoke-Mcp 'initialize' @{
         protocolVersion = '2025-06-18'; capabilities = @{}
         clientInfo = @{ name = 'attach-integration'; version = '1' }
     } 1
     $before = Invoke-Tool 'debugger.state' @{} 2
+    if ($before.instance_id -ne $script:InstanceId) {
+        throw 'Readiness and debugger.state reported different backend instances.'
+    }
     if ($before.session_origin -ne $null -or
         @($before.next_actions | Where-Object { $_.tool -eq 'debuggee.attach' }).Count -ne 1) {
         throw 'Absent state omitted the explicit attach action or retained an origin.'
@@ -169,6 +180,7 @@ try {
     [ordered]@{
         backend = $Backend
         architecture = $state.architecture
+        instance_id = $script:InstanceId
         debugger_host_process_id = $debuggerProcess.Id
         fixture_process_id = $fixtureProcess.Id
         sidecar_port = $port

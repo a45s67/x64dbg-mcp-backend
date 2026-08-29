@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 0;
+pub const PROTOCOL_MINOR: u16 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const LENGTH_PREFIX_BYTES: usize = 4;
 
@@ -34,6 +34,7 @@ pub struct HandshakeAck {
     pub protocol_minor: u16,
     pub accepted: bool,
     pub error_code: Option<String>,
+    pub instance_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

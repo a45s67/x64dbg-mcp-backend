@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.7.0',
+    [string]$Version = '0.8.0',
     [string]$OutputDirectory
 )
 
@@ -71,8 +71,8 @@ try {
         name = 'x64dbg-mcp-backend'
         version = $Version
         mcp_protocol = '2025-06-18'
-        ipc_protocol = @{ major = 1; minor = 0 }
-        skills = @{ 'x64dbg-debugging' = '0.7.0' }
+        ipc_protocol = @{ major = 1; minor = 1 }
+        skills = @{ 'x64dbg-debugging' = '0.8.0' }
         x64dbg_baseline = @{ release = '2026.05.27'; commit = '9c8ca1cae0b6d56cc44f31fddcb10e3b02ffbb87' }
         targets = @('x32dbg', 'x64dbg')
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stage 'version.json') -Encoding UTF8

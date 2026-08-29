@@ -116,8 +116,12 @@ The Gateway integration must preserve these transport properties:
 - `Content-Type: application/json` and an `Accept` value allowing
   `application/json`;
 - no automatic retry of tools whose `readOnlyHint` is false;
+- retain the authenticated readiness or `debugger.state` `instance_id` and send
+  it with every mutation;
 - the caller-generated `operation_id` must remain unchanged if the Gateway asks
-  for the recorded result of an ambiguous mutation.
+  for the recorded result of an ambiguous mutation within the same instance;
+- on `BACKEND_RESTARTED`, stop and refresh state instead of forwarding the old
+  mutation to the replacement instance.
 
 ## Manual and diagnostic launch
 

@@ -861,3 +861,36 @@ Deployment preserves both config-file bearer tokens and refreshes the two Codex
 entries with static Authorization headers. The final offline-verified package
 SHA-256 is
 `1173aa212815c6dc3f39c1516e96daa8772781fc272cceef11a8d941912720c3`.
+
+## 2026-08-29 backend instance identity and restart-safety follow-up
+
+ADR 0023 separates sidecar correlation from both debugger generation and the
+secret launch nonce. Each sidecar now creates one UUID v4, transfers it to the
+plugin in IPC protocol 1.1, and exposes the same value through authenticated
+readiness, MCP initialization metadata, and `debugger.state`. Every mutation
+requires that observed `instance_id` plus its own operation UUID. A mismatch
+returns non-retryable `BACKEND_RESTARTED` with an unknown outcome before ledger
+admission or native dispatch.
+
+Rust passes 52 unit/contract tests and seven supervised-shutdown tests. The new
+restart case stops one supervised sidecar, confirms the replacement UUID differs,
+sends a stale resume request, observes `BACKEND_RESTARTED`, and proves no frame
+crossed the replacement plugin pipe. The x86 and x64 native suites each pass all
+11 lifecycle/policy tests. Fresh isolated x32 and x64 workflows reported distinct
+canonical identities, exercised the full existing catalog, closed their owned
+sidecars, and released both loopback listeners. The soak harness now performs
+unprivileged before/after PID ownership checks instead of depending on WMI/CIM.
+
+The installed 0.8.0 `checksum.exe` qualification used instance
+`90c494c4-1690-48f2-9d9c-dd8e6240d1f9`, resolved `CHECKSUM.EXE+0xa78a0` to
+`0x4478a0` from relocated base `0x3a0000`, and retained generation 26 across its
+paused register, memory, and disassembly snapshots. Register write/restore,
+verified patch/restore, hardware and memory breakpoints, analysis, resume, and
+stop all used the same instance precondition while same-operation replay remained
+byte-identical. The debuggee stopped, the debugger and sidecar exited, and port
+43164 closed.
+
+The backend still publishes 37 tools; this safety stage changes mutation inputs
+rather than adding tools. The backend and managed skill advance to 0.8.0. The
+offline-verified package SHA-256 is
+`fd8f1c8da3c916a55d6c0ebdbb9d5f4f2df7ec4cda7e23e8097be3c5c5b886f1`.

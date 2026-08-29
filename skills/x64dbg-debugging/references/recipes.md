@@ -13,6 +13,11 @@
 For `session_origin: "attached"`, cleanup uses `debuggee.detach`. The backend rejects
 `debugger.stop` for that origin because stop can terminate a process the debugger did not create.
 
+Retain the `instance_id` from the initial state observation and supply it with
+every mutation in the workflow. If a later state reports another value, discard
+all pending mutation requests from the old instance and reassess from the new
+state; operation-ledger results do not survive that boundary.
+
 For a temporary register change, read the original value, call `registers.write` once with one
 operation ID, and restore with a different operation ID only when restoration is a separately
 authorized mutation. Never batch speculative register changes.
@@ -51,8 +56,10 @@ no-op patches, multi-command text, and unsafe address-only restore.
 
 1. Identify the loaded module with `modules.list`. Prefer a stable module/RVA reference.
 2. If needed, inspect it with `address.resolve`; do not manually add the ASLR base.
-3. With explicit mutation authority, call `breakpoints.set` using a new operation UUID.
-4. Call `debugger.resume` using a different new operation UUID and retain its returned generation.
+3. With explicit mutation authority, call `breakpoints.set` using the current instance UUID and a
+   new operation UUID.
+4. Call `debugger.resume` using the same instance UUID and a different new operation UUID; retain
+   its returned generation.
 5. Call `debugger.wait_for_pause` with `after_generation` equal to the resume generation.
 6. Confirm the pause kind and verify the pause address or instruction pointer matches the intended
    breakpoint. Loader/system/exception pauses may need another explicit resume cycle.

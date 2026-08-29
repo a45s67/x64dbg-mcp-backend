@@ -112,6 +112,7 @@ private:
     PauseObservation latestPause_;
     std::wstring pipeName_;
     std::string nonce_;
+    std::string instanceId_;
 };
 
 } // namespace mcp

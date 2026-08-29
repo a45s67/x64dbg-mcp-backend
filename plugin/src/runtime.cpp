@@ -885,18 +885,37 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(expectedOriginalBytes), fillNop};
 }
 
-bool IsAcceptedHandshakeAck(const std::string_view bytes) {
+bool IsCanonicalUuid(const std::string_view value) {
+    if (value.size() != 36U) return false;
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        if (index == 8U || index == 13U || index == 18U || index == 23U) {
+            if (value[index] != '-') return false;
+        } else if (!((value[index] >= '0' && value[index] <= '9') ||
+                     (value[index] >= 'a' && value[index] <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<std::string> AcceptedHandshakeInstanceId(const std::string_view bytes) {
     json_error_t error{};
     JsonOwner root(json_loadb(bytes.data(), bytes.size(), JSON_REJECT_DUPLICATES, &error));
-    if (!root || !json_is_object(root.get()) || json_object_size(root.get()) != 4U) {
-        return false;
+    if (!root || !json_is_object(root.get()) || json_object_size(root.get()) != 5U) {
+        return std::nullopt;
     }
     json_t* major = json_object_get(root.get(), "protocol_major");
     json_t* minor = json_object_get(root.get(), "protocol_minor");
     json_t* accepted = json_object_get(root.get(), "accepted");
     json_t* errorCode = json_object_get(root.get(), "error_code");
-    return json_is_integer(major) && json_integer_value(major) == 1 && json_is_integer(minor) &&
-           json_integer_value(minor) == 0 && json_is_true(accepted) && json_is_null(errorCode);
+    json_t* instanceId = json_object_get(root.get(), "instance_id");
+    if (!json_is_integer(major) || json_integer_value(major) != 1 ||
+        !json_is_integer(minor) || json_integer_value(minor) != 1 ||
+        !json_is_true(accepted) || !json_is_null(errorCode) || !json_is_string(instanceId)) {
+        return std::nullopt;
+    }
+    const std::string value(json_string_value(instanceId), json_string_length(instanceId));
+    return IsCanonicalUuid(value) ? std::optional<std::string>(value) : std::nullopt;
 }
 
 std::string HexValue(const std::uint64_t value) {
@@ -1432,17 +1451,22 @@ void Runtime::Worker() noexcept {
         return;
     }
     std::ostringstream handshake;
-    handshake << "{\"protocol_major\":1,\"protocol_minor\":0,\"backend\":\""
+    handshake << "{\"protocol_major\":1,\"protocol_minor\":1,\"backend\":\""
               << kBackendUtf8 << "\",\"plugin_pid\":" << GetCurrentProcessId()
               << ",\"nonce\":" << JsonString(nonce_) << "}";
     std::string ack;
-    if (!WriteFrame(pipe_, handshake.str()) || !ReadFrame(pipe_, ack) ||
-        !IsAcceptedHandshakeAck(ack)) {
+    if (!WriteFrame(pipe_, handshake.str()) || !ReadFrame(pipe_, ack)) {
+        PluginLog("[x64dbg-mcp-backend] sidecar IPC handshake failed");
+        return;
+    }
+    const std::optional<std::string> instanceId = AcceptedHandshakeInstanceId(ack);
+    if (!instanceId) {
         PluginLog("[x64dbg-mcp-backend] sidecar IPC handshake failed");
         return;
     }
     {
         std::lock_guard lock(stateMutex_);
+        instanceId_ = *instanceId;
         pluginState_.store(PluginState::ready);
         generation_.fetch_add(1U);
     }
@@ -3712,6 +3736,7 @@ std::string Runtime::StateResponse(const std::string& requestId) {
     std::uint64_t generation = 0;
     std::uint32_t processId = 0;
     std::uint32_t threadId = 0;
+    std::string instanceId;
     SessionOrigin origin = SessionOrigin::none;
     PauseObservation pause;
     {
@@ -3720,6 +3745,7 @@ std::string Runtime::StateResponse(const std::string& requestId) {
         generation = generation_.load();
         processId = processId_.load();
         threadId = activeThreadId_.load();
+        instanceId = instanceId_;
         origin = sessionOrigin_.load();
         pause = latestPause_;
     }
@@ -3754,7 +3780,8 @@ std::string Runtime::StateResponse(const std::string& requestId) {
     }
     return "{\"request_id\":" + JsonString(requestId) + ",\"state_generation\":" +
            std::to_string(generation) +
-           ",\"status\":\"ok\",\"result\":{\"backend\":\"" + kBackendUtf8 +
+           ",\"status\":\"ok\",\"result\":{\"instance_id\":" + JsonString(instanceId) +
+           ",\"backend\":\"" + kBackendUtf8 +
            "\",\"architecture\":\"" +
 #ifdef _WIN64
            "x86_64" +
@@ -4119,6 +4146,7 @@ void Runtime::Stop() noexcept {
     CloseHandleValue(instanceMutex_);
     SecureZeroMemory(nonce_.data(), nonce_.size());
     nonce_.clear();
+    instanceId_.clear();
     pluginState_.store(PluginState::stopped);
 }
 

@@ -44,6 +44,13 @@ $baseUri = "http://127.0.0.1:$port"
 $headers = @{ Authorization = "Bearer $token"; Accept = 'application/json' }
 
 function Invoke-Mcp([string]$Method, $Params, [int]$Id) {
+    if ($Method -eq 'tools/call' -and $null -ne $Params.arguments.operation_id -and
+        $null -eq $Params.arguments.instance_id) {
+        if ([string]::IsNullOrWhiteSpace($script:InstanceId)) {
+            throw 'Mutation attempted before backend instance identity was observed.'
+        }
+        $Params.arguments.instance_id = $script:InstanceId
+    }
     $request = @{ jsonrpc = '2.0'; id = $Id; method = $Method; params = $Params } |
         ConvertTo-Json -Depth 12 -Compress
     $requestBytes = [System.Text.Encoding]::UTF8.GetBytes($request)
@@ -96,6 +103,7 @@ try {
     if ($ready.status -ne 'ready') {
         throw 'Sidecar did not become ready through the isolated debugger plugin.'
     }
+    $script:InstanceId = ([Guid]::Parse([string]$ready.instance_id)).ToString()
     if ($ready.debugger_state -ne 'absent' -or $ready.diagnostic_code -ne 'NO_DEBUGGEE' -or
         @($ready.next_actions).Count -ne 2 -or
         $ready.next_actions[0].code -ne 'CALL_DEBUGGEE_LAUNCH' -or
@@ -109,6 +117,9 @@ try {
         protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'real-integration'; version = '1' }
     } 1
     $beforeLaunch = Invoke-Tool 'debugger.state' @{} 2
+    if ($beforeLaunch.instance_id -ne $script:InstanceId) {
+        throw 'Readiness and debugger.state reported different backend instances.'
+    }
     if ($beforeLaunch.debuggee_state -ne 'absent') {
         throw "Isolated debugger did not start without a debuggee; actual=$($beforeLaunch.debuggee_state)"
     }
@@ -834,6 +845,7 @@ try {
 
     $report = [ordered]@{
         backend = $Backend
+        instance_id = $script:InstanceId
         debugger_host_process_id = $debuggerProcess.Id
         sidecar_port = $port
         architecture = $state.architecture

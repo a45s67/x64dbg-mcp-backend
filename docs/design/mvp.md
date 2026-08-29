@@ -98,13 +98,14 @@ Otherwise HTTP 503. Response is bounded and contains no target path or token:
 ```json
 {
   "status":"ready",
+  "instance_id":"11111111-2222-4333-8444-555555555555",
   "backend":"x64dbg",
   "plugin_connected":true,
   "debugger_state":"paused",
   "diagnostic_code":null,
   "next_actions":[],
   "protocol_version":"2025-06-18",
-  "version":"0.1.0"
+  "version":"0.8.0"
 }
 ```
 
@@ -144,7 +145,8 @@ Stable backend codes include `UNAUTHENTICATED`, `INVALID_ARGUMENT`,
 `INVALID_DEBUGGER_STATE`, `NO_DEBUGGEE`, `NOT_FOUND`, `ACCESS_DENIED`,
 `REQUEST_TOO_LARGE`, `OUTPUT_LIMIT_EXCEEDED`, `STALE_CURSOR`, `BUSY`, `TIMEOUT`, `CANCELLED`,
 `PLUGIN_UNAVAILABLE`, `VERSION_MISMATCH`, `INSTANCE_ALREADY_RUNNING`,
-`OPERATION_ID_CONFLICT`, `UNSUPPORTED`, and `INTERNAL`. Internal errors expose a
+`OPERATION_ID_CONFLICT`, `BACKEND_RESTARTED`, `BACKEND_IDENTITY_MISMATCH`,
+`UNSUPPORTED`, and `INTERNAL`. Internal errors expose a
 correlation ID, never stack traces or raw OS error text.
 
 ## 4. Initial tool catalog
@@ -197,7 +199,9 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `strings.search` | read | paused | Scan at most 1 MiB per request for bounded ASCII/UTF-8 or UTF-16LE strings with configurable match context |
 | `references.to` | read | paused | Paginate up to 65,536 retained inbound xrefs for an address |
 
-Every mutating tool requires `operation_id` as a canonical lowercase UUID. Arbitrary debugger
+Every mutating tool requires both the current backend `instance_id` and a fresh
+`operation_id`, each a canonical lowercase UUID. The sidecar rejects a stale
+instance before ledger admission or native IPC dispatch. Arbitrary debugger
 command execution, arbitrary process attach, file upload/download, scripting, shell
 execution, and unbounded search are intentionally excluded from the MVP. They need
 separate threat-model ADRs.

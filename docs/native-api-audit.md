@@ -106,6 +106,12 @@ injects a sidecar crash for both architectures and verifies bounded plugin stop.
 Any new native API requires updating this table and adding state, bound,
 allocation, timeout, and unload tests.
 
+ADR 0023 adds no debugger API. The plugin stores only the sidecar-generated
+canonical `instance_id` received after authenticated IPC negotiation, copies it
+under the existing state mutex into `debugger.state`, and clears it during owned
+shutdown. The public mutation precondition is enforced and removed by Rust
+before native IPC dispatch, so it does not broaden the native parser or executor.
+
 ADR 0007 discovery is enabled after schema, generation/deadline, filter-bound cursor, Unicode,
 ownership, and isolated dual-architecture gates passed. It never triggers
 analysis. ADR 0016 separately permits only address-taking `analr` with an

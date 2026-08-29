@@ -70,8 +70,19 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
         "debugger.pause" | "debugger.resume" | "debugger.step_into" | "debugger.step_over"
         | "debugger.step_out" | "debugger.stop" | "debuggee.detach" => operation(object, &[]),
         "debuggee.launch" => {
-            exact_keys(object, &["operation_id", "path"], &["working_directory"])?;
+            if !object.contains_key("operation_id") {
+                return Err(invalid("operation_id", "must be a UUID"));
+            }
+            if !object.contains_key("instance_id") {
+                return Err(invalid("instance_id", "must be a UUID"));
+            }
+            exact_keys(
+                object,
+                &["operation_id", "instance_id", "path"],
+                &["working_directory"],
+            )?;
             validate_operation_id(object)?;
+            validate_instance_id(object)?;
             validate_path(object, "path")?;
             if object.contains_key("working_directory") {
                 validate_path(object, "working_directory")?;
@@ -354,11 +365,16 @@ fn operation(
     if !object.contains_key("operation_id") {
         return Err(invalid("operation_id", "must be a UUID"));
     }
-    let mut required = Vec::with_capacity(fields.len() + 1);
+    if !object.contains_key("instance_id") {
+        return Err(invalid("instance_id", "must be a UUID"));
+    }
+    let mut required = Vec::with_capacity(fields.len() + 2);
     required.push("operation_id");
+    required.push("instance_id");
     required.extend_from_slice(fields);
     exact_keys(object, &required, &[])?;
-    validate_operation_id(object)
+    validate_operation_id(object)?;
+    validate_instance_id(object)
 }
 
 fn validate_operation_id(object: &serde_json::Map<String, Value>) -> Result<(), ValidationError> {
@@ -369,6 +385,15 @@ fn validate_operation_id(object: &serde_json::Map<String, Value>) -> Result<(), 
             "operation_id",
             "must be a canonical lowercase UUID",
         ));
+    }
+    Ok(())
+}
+
+fn validate_instance_id(object: &serde_json::Map<String, Value>) -> Result<(), ValidationError> {
+    let id = string(object, "instance_id", 36, 36)?;
+    let parsed = Uuid::parse_str(id).map_err(|_| invalid("instance_id", "must be a UUID"))?;
+    if parsed.hyphenated().to_string() != id {
+        return Err(invalid("instance_id", "must be a canonical lowercase UUID"));
     }
     Ok(())
 }
@@ -1103,6 +1128,19 @@ fn operation_schema(mut properties: Vec<(&'static str, Value)>) -> Value {
     properties.insert(
         0,
         (
+            "instance_id",
+            json!({
+                "type":"string",
+                "format":"uuid",
+                "pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "minLength":36,
+                "maxLength":36
+            }),
+        ),
+    );
+    properties.insert(
+        0,
+        (
             "operation_id",
             json!({
                 "type":"string",
@@ -1113,8 +1151,8 @@ fn operation_schema(mut properties: Vec<(&'static str, Value)>) -> Value {
             }),
         ),
     );
-    let mut required = vec!["operation_id"];
-    required.extend(properties.iter().skip(1).map(|(name, _)| *name));
+    let mut required = vec!["operation_id", "instance_id"];
+    required.extend(properties.iter().skip(2).map(|(name, _)| *name));
     object(properties, required)
 }
 
@@ -1126,7 +1164,7 @@ fn operation_schema_with_optional(
     let required_names = properties.iter().map(|(name, _)| *name).collect::<Vec<_>>();
     properties.extend(optional_properties);
     let mut schema = operation_schema(properties);
-    let mut required = vec![json!("operation_id")];
+    let mut required = vec![json!("operation_id"), json!("instance_id")];
     required.extend(required_names.into_iter().map(|name| json!(name)));
     schema["required"] = Value::Array(required);
     schema
@@ -1151,7 +1189,23 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{catalog, validate_arguments};
+    use super::{catalog, is_mutation, validate_arguments as validate_raw};
+
+    const INSTANCE_ID: &str = "11111111-2222-4333-8444-555555555555";
+
+    fn validate_arguments(name: &str, arguments: &Value) -> Result<(), super::ValidationError> {
+        let mut arguments = arguments.clone();
+        if is_mutation(name)
+            && arguments.get("operation_id").is_some()
+            && arguments.get("instance_id").is_none()
+        {
+            arguments
+                .as_object_mut()
+                .expect("test mutation arguments with operation_id are objects")
+                .insert("instance_id".to_owned(), json!(INSTANCE_ID));
+        }
+        validate_raw(name, &arguments)
+    }
 
     fn next_u64(state: &mut u64) -> u64 {
         *state = state
@@ -1203,6 +1257,11 @@ mod tests {
         for tool in catalog() {
             assert_eq!(tool["inputSchema"]["additionalProperties"], false);
             assert!(tool["annotations"]["openWorldHint"].is_boolean());
+            if tool["annotations"]["readOnlyHint"] == false {
+                let required = tool["inputSchema"]["required"].as_array().unwrap();
+                assert!(required.contains(&json!("operation_id")));
+                assert!(required.contains(&json!("instance_id")));
+            }
         }
     }
 
@@ -1537,6 +1596,28 @@ mod tests {
             let error = validate_arguments("debugger.resume", &json!({"operation_id":invalid_id}))
                 .unwrap_err();
             assert_eq!(error.field, "operation_id");
+        }
+
+        let missing = validate_raw(
+            "debugger.resume",
+            &json!({"operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813"}),
+        )
+        .unwrap_err();
+        assert_eq!(missing.field, "instance_id");
+        for invalid_id in [
+            "backend-1",
+            "11111111-2222-4333-8444-55555555555A",
+            "{11111111-2222-4333-8444-555555555555}",
+        ] {
+            let error = validate_raw(
+                "debugger.resume",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "instance_id":invalid_id
+                }),
+            )
+            .unwrap_err();
+            assert_eq!(error.field, "instance_id");
         }
     }
 

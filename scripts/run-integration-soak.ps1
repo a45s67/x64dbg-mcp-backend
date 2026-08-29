@@ -28,9 +28,12 @@ function Test-LoopbackPortOpen([int]$Port) {
 }
 
 $reports = @()
+$observedInstanceIds = @{}
 foreach ($iteration in 1..$Iterations) {
     foreach ($currentBackend in $backends) {
         Write-Verbose "Integration soak $iteration/$Iterations ($currentBackend)"
+        $existingSidecarIds = @(Get-Process -Name 'x64dbg-mcp-server' -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.Id })
         $arguments = @{
             Backend = $currentBackend
         }
@@ -42,14 +45,19 @@ foreach ($iteration in 1..$Iterations) {
         }
         $json = & $runner @arguments | Out-String
         $report = $json | ConvertFrom-Json
-        if (!$report.debugger_host_process_id -or !$report.sidecar_port) {
+        if (!$report.debugger_host_process_id -or !$report.sidecar_port -or !$report.instance_id) {
             throw 'Integration report omitted lifecycle ownership fields.'
         }
+        $canonicalInstanceId = ([Guid]::Parse([string]$report.instance_id)).ToString()
+        if ($observedInstanceIds.ContainsKey($canonicalInstanceId)) {
+            throw "Backend instance identity was reused: $canonicalInstanceId"
+        }
+        $observedInstanceIds[$canonicalInstanceId] = $true
 
         $deadline = [DateTime]::UtcNow.AddSeconds(5)
         do {
-            $ownedSidecars = @(Get-CimInstance Win32_Process -Filter "Name = 'x64dbg-mcp-server.exe'" |
-                Where-Object { $_.ParentProcessId -eq [uint32]$report.debugger_host_process_id })
+            $ownedSidecars = @(Get-Process -Name 'x64dbg-mcp-server' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Id -notin $existingSidecarIds })
             $portOpen = Test-LoopbackPortOpen ([int]$report.sidecar_port)
             if ($ownedSidecars.Count -eq 0 -and !$portOpen) {
                 break

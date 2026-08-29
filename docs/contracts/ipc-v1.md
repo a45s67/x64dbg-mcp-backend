@@ -29,12 +29,30 @@ named-pipe frame is:
 ```json
 {
   "protocol_major": 1,
-  "protocol_minor": 0,
+  "protocol_minor": 1,
   "backend": "x64dbg",
   "plugin_pid": 4242,
   "nonce": "at-least-32-unpredictable-characters"
 }
 ```
+
+After authenticating the nonce, the sidecar returns:
+
+```json
+{
+  "protocol_major": 1,
+  "protocol_minor": 1,
+  "accepted": true,
+  "error_code": null,
+  "instance_id": "11111111-2222-4333-8444-555555555555"
+}
+```
+
+The sidecar generates a new unpredictable UUID v4 for every process. A rejected
+acknowledgement sets `instance_id` to null. The plugin validates and retains an
+accepted canonical lowercase UUID before entering `ready`, then includes it in
+`debugger.state`. The launch nonce remains secret and is never reused as public
+identity.
 
 Major versions must match exactly. A peer may accept an older or equal minor
 version within the same major. The receiving Rust sidecar compares the nonce in
@@ -55,6 +73,9 @@ Authentication failure closes the pipe without detailed logging.
 
 `operation_id` is null for reads and required for mutations. `deadline_unix_ms`
 is admission metadata, not permission to continue forever after the deadline.
+The public MCP `instance_id` mutation precondition is checked and removed by the
+sidecar before this IPC request is encoded. The in-memory operation ledger and
+`instance_id` therefore have the same sidecar-process lifetime.
 Address-taking payloads accept a legacy canonical hexadecimal string or one of
 the closed structured forms:
 

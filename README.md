@@ -29,6 +29,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0020-bounded-assembly-and-verified-patches.md`](docs/adr/0020-bounded-assembly-and-verified-patches.md)
 - [`docs/adr/0021-native-mutation-fuzzing-and-asan.md`](docs/adr/0021-native-mutation-fuzzing-and-asan.md)
 - [`docs/adr/0022-defer-fuzzing-pending-toolchain-survey.md`](docs/adr/0022-defer-fuzzing-pending-toolchain-survey.md)
+- [`docs/adr/0023-backend-instance-identity.md`](docs/adr/0023-backend-instance-identity.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/development-roadmap.md`](docs/development-roadmap.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
@@ -38,6 +39,11 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 
 The Gateway owns any dotted namespace prefix. This backend therefore publishes
 backend-local tool names such as `debugger.state` and `memory.read`.
+
+Authenticated readiness, MCP initialization metadata, and `debugger.state`
+publish one unpredictable `instance_id` per sidecar. Every mutation is bound to
+the observed instance as well as its own `operation_id`; a replacement backend
+returns `BACKEND_RESTARTED` before dispatch instead of accepting a blind retry.
 
 Address-taking tools preserve canonical absolute strings and also accept stable
 module-relative references, so clients do not need to redo ASLR arithmetic:

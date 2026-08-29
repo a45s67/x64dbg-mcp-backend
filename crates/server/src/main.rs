@@ -3,6 +3,7 @@ use std::{future::IntoFuture, io::Read, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
+use uuid::Uuid;
 use x64dbg_mcp_server::{
     adapter::{DebuggerAdapter, DisconnectedAdapter},
     config::Config,
@@ -21,12 +22,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(Config::load_from(arguments.config)?);
     let pipe_name = arguments.pipe;
     let plugin_supervised = pipe_name.is_some();
-    let adapter = connect_plugin_if_configured(&config, pipe_name.as_deref()).await?;
+    let instance_id = Uuid::new_v4();
+    let adapter = connect_plugin_if_configured(&config, pipe_name.as_deref(), instance_id).await?;
     let listener = TcpListener::bind(config.socket_addr()).await?;
     info!(address = %listener.local_addr()?, "MCP sidecar listening");
 
     let shutdown_timeout = config.shutdown_timeout();
-    let state = AppState::with_adapter(config, adapter);
+    let state = AppState::with_adapter_and_instance(config, adapter, instance_id);
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let server = axum::serve(listener, http_server::router(state))
         .with_graceful_shutdown(async {
@@ -50,14 +52,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn connect_plugin_if_configured(
     config: &Config,
     pipe_name: Option<&str>,
+    instance_id: Uuid,
 ) -> Result<Arc<dyn DebuggerAdapter>, Box<dyn std::error::Error>> {
     let Some(pipe_name) = pipe_name else {
         return Ok(Arc::new(DisconnectedAdapter));
     };
     let nonce = read_launch_nonce()?;
     let (stream, handshake) =
-        x64dbg_mcp_server::ipc_transport::connect_named_pipe(pipe_name, &nonce).await?;
-    info!(backend = ?handshake.backend, plugin_pid = handshake.plugin_pid, "plugin IPC authenticated");
+        x64dbg_mcp_server::ipc_transport::connect_named_pipe(pipe_name, &nonce, instance_id)
+            .await?;
+    info!(backend = ?handshake.backend, plugin_pid = handshake.plugin_pid, %instance_id, "plugin IPC authenticated");
     Ok(Arc::new(IpcAdapter::established(
         stream,
         config.request_timeout(),
@@ -69,6 +73,7 @@ async fn connect_plugin_if_configured(
 async fn connect_plugin_if_configured(
     _config: &Config,
     _pipe_name: Option<&str>,
+    _instance_id: Uuid,
 ) -> Result<Arc<dyn DebuggerAdapter>, Box<dyn std::error::Error>> {
     Ok(Arc::new(DisconnectedAdapter))
 }

@@ -62,7 +62,8 @@ a broad set whose state, completion, or side effects are ambiguous.
 
 ### Treat mutation retries as a protocol problem
 
-- Every mutation requires a canonical lowercase UUID `operation_id`.
+- Every mutation requires the current canonical lowercase UUID `instance_id`
+  and a fresh canonical lowercase UUID `operation_id`.
 - Completed calls replay the recorded result without re-execution.
 - Reusing an ID with different arguments is a conflict.
 - Timeout or disconnect after admission produces an explicit unknown outcome.
@@ -204,7 +205,7 @@ their failure and ownership models are genuinely the same.
 
 ## Active roadmap
 
-### Stage 1: backend instance identity and restart safety
+### Stage 1: backend instance identity and restart safety (completed in 0.8.0)
 
 Goal: make debugger/sidecar restart boundaries observable so clients never
 mistake a new backend for the process that admitted an earlier mutation.
@@ -223,6 +224,14 @@ Deliverables:
 Exit: a client can distinguish unavailable, unauthorized, no-debuggee, and
 restarted-backend states and can safely stop rather than replay an uncertain
 mutation across an instance boundary.
+
+Completed on 2026-08-29 under ADR 0023. The authenticated handshake,
+readiness, MCP metadata, and native state share a sidecar-generated UUID v4;
+all mutation schemas bind to it. Unit/contract tests prove mismatch rejection
+before adapter dispatch, supervised restart proves the replacement pipe receives
+no stale request, x32/x64 lifecycle and isolated integration pass, and the
+installed `checksum.exe` qualification preserves identity through all mutation
+families and clean shutdown.
 
 ### Stage 2: bounded read-only analysis ergonomics
 
@@ -328,4 +337,3 @@ A stage is complete only when:
 - no owned process, listener, thread, handle, or temporary debugger state remains
   after the test; and
 - limitations are stated accurately rather than hidden behind a success result.
-

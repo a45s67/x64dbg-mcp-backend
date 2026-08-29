@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     adapter::{DebuggerAdapter, ToolError},
@@ -27,7 +28,7 @@ struct Request {
     params: Value,
 }
 
-pub async fn handle(body: &[u8], adapter: &dyn DebuggerAdapter) -> Response {
+pub async fn handle(body: &[u8], adapter: &dyn DebuggerAdapter, instance_id: Uuid) -> Response {
     let value: Value = match serde_json::from_slice(body) {
         Ok(value) => value,
         Err(_) => return rpc_error(None, -32700, "Parse error"),
@@ -63,10 +64,10 @@ pub async fn handle(body: &[u8], adapter: &dyn DebuggerAdapter) -> Response {
 
     let id = request.id.unwrap_or(Value::Null);
     let result = match request.method.as_str() {
-        "initialize" => initialize(&request.params),
+        "initialize" => initialize(&request.params, instance_id),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools::catalog() })),
-        "tools/call" => call_tool(&request.params, adapter).await,
+        "tools/call" => call_tool(&request.params, adapter, instance_id).await,
         _ => Err((-32601, "Method not found")),
     };
     match result {
@@ -100,6 +101,7 @@ fn within_json_limits(value: &Value, depth: usize) -> bool {
 async fn call_tool(
     params: &Value,
     adapter: &dyn DebuggerAdapter,
+    instance_id: Uuid,
 ) -> Result<Value, (i32, &'static str)> {
     let name = params
         .get("name")
@@ -120,7 +122,46 @@ async fn call_tool(
             details: json!({ "field": error.field }),
         }));
     }
-    Ok(match adapter.call(name, arguments).await {
+    let mut dispatched_arguments = arguments.clone();
+    if tools::is_mutation(name) {
+        let supplied = arguments
+            .get("instance_id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .expect("validated mutation instance_id must be a UUID");
+        if supplied != instance_id {
+            return Ok(tool_failure(ToolError {
+                code: "BACKEND_RESTARTED",
+                message: "backend instance changed; mutation was not dispatched",
+                retryable: false,
+                details: json!({
+                    "outcome": "unknown",
+                    "expected_instance_id": supplied,
+                    "current_instance_id": instance_id,
+                    "diagnostic_code": "REFRESH_BACKEND_STATE",
+                    "next_actions": [{ "code": "CALL_DEBUGGER_STATE", "tool": "debugger.state" }]
+                }),
+            }));
+        }
+        dispatched_arguments
+            .as_object_mut()
+            .expect("validated arguments are an object")
+            .remove("instance_id");
+    }
+    let expected_instance_id = instance_id.hyphenated().to_string();
+    Ok(match adapter.call(name, &dispatched_arguments).await {
+        Ok(value)
+            if name == "debugger.state"
+                && value.get("instance_id").and_then(Value::as_str)
+                    != Some(expected_instance_id.as_str()) =>
+        {
+            tool_failure(ToolError {
+                code: "BACKEND_IDENTITY_MISMATCH",
+                message: "plugin and sidecar instance identities do not match",
+                retryable: false,
+                details: json!({ "instance_id": instance_id }),
+            })
+        }
         Ok(value) => tool_success(value),
         Err(error) => tool_failure(error),
     })
@@ -153,7 +194,7 @@ fn tool_failure(error: ToolError) -> Value {
     })
 }
 
-fn initialize(params: &Value) -> Result<Value, (i32, &'static str)> {
+fn initialize(params: &Value, instance_id: Uuid) -> Result<Value, (i32, &'static str)> {
     let requested = params.get("protocolVersion").and_then(Value::as_str);
     if requested != Some(PROTOCOL_VERSION) {
         return Err((-32602, "Unsupported protocol version"));
@@ -161,7 +202,8 @@ fn initialize(params: &Value) -> Result<Value, (i32, &'static str)> {
     Ok(json!({
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": { "tools": { "listChanged": false } },
-        "serverInfo": { "name": "x64dbg-mcp-backend", "version": env!("CARGO_PKG_VERSION") }
+        "serverInfo": { "name": "x64dbg-mcp-backend", "version": env!("CARGO_PKG_VERSION") },
+        "_meta": { "x64dbg-mcp-backend/instance_id": instance_id }
     }))
 }
 
@@ -176,11 +218,36 @@ fn rpc_error(id: Option<Value>, code: i32, message: &'static str) -> Response {
 
 #[cfg(test)]
 mod contract_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
     use axum::body::to_bytes;
     use serde_json::{Value, json};
 
     use super::handle;
-    use crate::adapter::DisconnectedAdapter;
+    use crate::adapter::{DebuggerAdapter, DisconnectedAdapter, ToolError};
+
+    fn instance_id() -> uuid::Uuid {
+        uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap()
+    }
+
+    struct RecordingAdapter {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl DebuggerAdapter for RecordingAdapter {
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        async fn call(&self, name: &str, arguments: &Value) -> Result<Value, ToolError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(name, "debugger.resume");
+            assert!(arguments.get("instance_id").is_none());
+            Ok(json!({"debuggee_state":"running","state_generation":8}))
+        }
+    }
 
     fn next_u64(state: &mut u64) -> u64 {
         *state = state
@@ -222,7 +289,7 @@ mod contract_tests {
     }
 
     async fn assert_golden(request: &str, expected: &str) {
-        let response = handle(request.as_bytes(), &DisconnectedAdapter).await;
+        let response = handle(request.as_bytes(), &DisconnectedAdapter, instance_id()).await;
         let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let actual: Value = serde_json::from_slice(&bytes).unwrap();
         let expected: Value = serde_json::from_str(expected).unwrap();
@@ -248,10 +315,82 @@ mod contract_tests {
     }
 
     #[tokio::test]
+    async fn stale_mutation_is_rejected_before_adapter_dispatch() {
+        let adapter = RecordingAdapter {
+            calls: AtomicUsize::new(0),
+        };
+        let stale_id = uuid::Uuid::parse_str("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").unwrap();
+        let request = json!({
+            "jsonrpc":"2.0",
+            "id":3,
+            "method":"tools/call",
+            "params":{
+                "name":"debugger.resume",
+                "arguments":{
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "instance_id":stale_id
+                }
+            }
+        });
+        let response = handle(
+            &serde_json::to_vec(&request).unwrap(),
+            &adapter,
+            instance_id(),
+        )
+        .await;
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["result"]["isError"], true);
+        assert_eq!(
+            value["result"]["structuredContent"]["error"]["code"],
+            "BACKEND_RESTARTED"
+        );
+        assert_eq!(
+            value["result"]["structuredContent"]["error"]["retryable"],
+            false
+        );
+        assert_eq!(
+            value["result"]["structuredContent"]["error"]["details"]["outcome"],
+            "unknown"
+        );
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn current_mutation_dispatches_without_public_identity_field() {
+        let adapter = RecordingAdapter {
+            calls: AtomicUsize::new(0),
+        };
+        let request = json!({
+            "jsonrpc":"2.0",
+            "id":4,
+            "method":"tools/call",
+            "params":{
+                "name":"debugger.resume",
+                "arguments":{
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "instance_id":instance_id()
+                }
+            }
+        });
+        let response = handle(
+            &serde_json::to_vec(&request).unwrap(),
+            &adapter,
+            instance_id(),
+        )
+        .await;
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["result"]["isError"], false);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn request_shape_and_json_complexity_are_bounded() {
         let extra = handle(
             br#"{"jsonrpc":"2.0","id":1,"method":"ping","extra":true}"#,
             &DisconnectedAdapter,
+            instance_id(),
         )
         .await;
         let bytes = to_bytes(extra.into_body(), 4096).await.unwrap();
@@ -261,6 +400,7 @@ mod contract_tests {
         let invalid_id = handle(
             br#"{"jsonrpc":"2.0","id":true,"method":"ping"}"#,
             &DisconnectedAdapter,
+            instance_id(),
         )
         .await;
         let bytes = to_bytes(invalid_id.into_body(), 4096).await.unwrap();
@@ -274,7 +414,12 @@ mod contract_tests {
         let request = serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "ping", "params": params
         });
-        let deep = handle(&serde_json::to_vec(&request).unwrap(), &DisconnectedAdapter).await;
+        let deep = handle(
+            &serde_json::to_vec(&request).unwrap(),
+            &DisconnectedAdapter,
+            instance_id(),
+        )
+        .await;
         let bytes = to_bytes(deep.into_body(), 4096).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["error"]["code"], -32600);
@@ -299,8 +444,12 @@ mod contract_tests {
                 "method": method,
                 "params": generated_json(&mut state, 0),
             });
-            let response =
-                handle(&serde_json::to_vec(&request).unwrap(), &DisconnectedAdapter).await;
+            let response = handle(
+                &serde_json::to_vec(&request).unwrap(),
+                &DisconnectedAdapter,
+                instance_id(),
+            )
+            .await;
             let bytes = to_bytes(response.into_body(), 64 * 1024)
                 .await
                 .unwrap_or_else(|error| panic!("seed={SEED:#x} case={case}: {error}"));
@@ -320,7 +469,7 @@ mod contract_tests {
             for byte in &mut body {
                 *byte = u8::try_from(next_u64(&mut state) & 0xff).unwrap();
             }
-            let response = handle(&body, &DisconnectedAdapter).await;
+            let response = handle(&body, &DisconnectedAdapter, instance_id()).await;
             let bytes = to_bytes(response.into_body(), 64 * 1024)
                 .await
                 .unwrap_or_else(|error| panic!("seed={SEED:#x} raw_case={case}: {error}"));

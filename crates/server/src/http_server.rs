@@ -15,6 +15,7 @@ use axum::{
 use serde_json::json;
 use subtle::ConstantTimeEq;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use uuid::Uuid;
 
 use crate::{
     adapter::{DebuggerAdapter, DisconnectedAdapter},
@@ -31,6 +32,7 @@ pub struct AppState {
     in_flight: Arc<Semaphore>,
     adapter: Arc<dyn DebuggerAdapter>,
     rate_window: Arc<Mutex<RateWindow>>,
+    instance_id: Uuid,
 }
 
 struct RateWindow {
@@ -45,6 +47,14 @@ impl AppState {
     }
 
     pub fn with_adapter(config: Arc<Config>, adapter: Arc<dyn DebuggerAdapter>) -> Self {
+        Self::with_adapter_and_instance(config, adapter, Uuid::new_v4())
+    }
+
+    pub fn with_adapter_and_instance(
+        config: Arc<Config>,
+        adapter: Arc<dyn DebuggerAdapter>,
+        instance_id: Uuid,
+    ) -> Self {
         let in_flight = Arc::new(Semaphore::new(config.max_inflight));
         Self {
             config,
@@ -54,6 +64,7 @@ impl AppState {
                 started: Instant::now(),
                 requests: 0,
             })),
+            instance_id,
         }
     }
 }
@@ -135,11 +146,19 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Result<Resp
     authenticate(&state, &headers)?;
     authorize_origin(&state, &headers)?;
     if !state.adapter.is_ready() {
-        return Ok(not_ready());
+        return Ok(not_ready(state.instance_id));
     }
     let Ok(snapshot) = state.adapter.call("debugger.state", &json!({})).await else {
-        return Ok(not_ready());
+        return Ok(not_ready(state.instance_id));
     };
+    let expected_instance_id = state.instance_id.hyphenated().to_string();
+    if snapshot
+        .get("instance_id")
+        .and_then(serde_json::Value::as_str)
+        != Some(expected_instance_id.as_str())
+    {
+        return Ok(association_failure(state.instance_id));
+    }
     let debuggee_state = snapshot
         .get("debuggee_state")
         .and_then(serde_json::Value::as_str)
@@ -157,6 +176,7 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Result<Resp
     };
     let mut response = Json(json!({
         "status": "ready",
+        "instance_id": state.instance_id,
         "backend": snapshot.get("backend").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
         "plugin_connected": true,
         "debugger_state": debuggee_state,
@@ -171,14 +191,31 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Result<Resp
     Ok(response)
 }
 
-fn not_ready() -> Response {
+fn not_ready(instance_id: Uuid) -> Response {
     let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({
             "status": "not_ready",
+            "instance_id": instance_id,
             "plugin_connected": false,
             "diagnostic_code": "PLUGIN_DISCONNECTED",
             "next_actions": [{ "code": "START_DEBUGGER_WITH_PLUGIN" }]
+        })),
+    )
+        .into_response();
+    set_json_utf8(&mut response);
+    response
+}
+
+fn association_failure(instance_id: Uuid) -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "status": "not_ready",
+            "instance_id": instance_id,
+            "plugin_connected": true,
+            "diagnostic_code": "BACKEND_IDENTITY_MISMATCH",
+            "next_actions": [{ "code": "RESTART_DEBUGGER_WITH_PLUGIN" }]
         })),
     )
         .into_response();
@@ -207,7 +244,7 @@ async fn mcp_post(
             "request body exceeds configured limit",
         )
     })?;
-    let mut response = mcp::handle(&body, state.adapter.as_ref()).await;
+    let mut response = mcp::handle(&body, state.adapter.as_ref(), state.instance_id).await;
     set_json_utf8(&mut response);
     bound_response(response, state.config.max_output_bytes).await
 }
@@ -346,16 +383,21 @@ mod tests {
 
     use super::{AppState, JSON_UTF8, bound_response, router};
     use crate::{
-        adapter::{FakeAbsentAdapter, FakeAdapter},
+        adapter::{FakeAbsentAdapter, FakeAdapter, FakeMismatchedAdapter},
         config::Config,
     };
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
+    fn instance_id() -> uuid::Uuid {
+        uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap()
+    }
+
     fn app() -> axum::Router {
-        router(AppState::with_adapter(
+        router(AppState::with_adapter_and_instance(
             Arc::new(Config::for_test(TOKEN)),
             Arc::new(FakeAdapter),
+            instance_id(),
         ))
     }
 
@@ -408,15 +450,17 @@ mod tests {
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["debugger_state"], "paused");
+        assert_eq!(value["instance_id"], instance_id().to_string());
         assert!(value["diagnostic_code"].is_null());
         assert_eq!(value["next_actions"], serde_json::json!([]));
     }
 
     #[tokio::test]
     async fn authenticated_absent_debuggee_advertises_explicit_launch_action() {
-        let app = router(AppState::with_adapter(
+        let app = router(AppState::with_adapter_and_instance(
             Arc::new(Config::for_test(TOKEN)),
             Arc::new(FakeAbsentAdapter),
+            instance_id(),
         ));
         let response = app
             .oneshot(
@@ -436,6 +480,30 @@ mod tests {
         assert_eq!(value["next_actions"][0]["tool"], "debuggee.launch");
         assert_eq!(value["next_actions"][1]["code"], "CALL_DEBUGGEE_ATTACH");
         assert_eq!(value["next_actions"][1]["tool"], "debuggee.attach");
+    }
+
+    #[tokio::test]
+    async fn authenticated_readiness_fails_closed_on_identity_mismatch() {
+        let app = router(AppState::with_adapter_and_instance(
+            Arc::new(Config::for_test(TOKEN)),
+            Arc::new(FakeMismatchedAdapter),
+            instance_id(),
+        ));
+        let response = app
+            .oneshot(
+                Request::get("/health/ready")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["instance_id"], instance_id().to_string());
+        assert_eq!(value["plugin_connected"], true);
+        assert_eq!(value["diagnostic_code"], "BACKEND_IDENTITY_MISMATCH");
     }
 
     #[tokio::test]
@@ -561,6 +629,10 @@ mod tests {
         assert_eq!(value["id"], 1);
         assert_eq!(value["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(value["result"]["serverInfo"]["name"], "x64dbg-mcp-backend");
+        assert_eq!(
+            value["result"]["_meta"]["x64dbg-mcp-backend/instance_id"],
+            instance_id().to_string()
+        );
     }
 
     #[tokio::test]

@@ -9,7 +9,10 @@ use std::{
 
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::Mutex;
-use tokio::{io::AsyncWriteExt, net::TcpStream};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 use uuid::Uuid;
 use x64dbg_mcp_server::ipc::{
     BackendType, Handshake, HandshakeAck, PROTOCOL_MAJOR, PROTOCOL_MINOR, read_frame, write_frame,
@@ -24,6 +27,7 @@ struct SupervisedSidecar {
     stdin: Option<ChildStdin>,
     pipe: NamedPipeServer,
     port: u16,
+    instance_id: Uuid,
 }
 
 impl Drop for SupervisedSidecar {
@@ -90,12 +94,14 @@ async fn start_sidecar(shutdown_timeout_ms: u64) -> SupervisedSidecar {
     .unwrap();
     let ack: HandshakeAck = read_frame(&mut pipe).await.unwrap();
     assert!(ack.accepted);
+    let instance_id = ack.instance_id.expect("accepted handshake has instance ID");
 
     let sidecar = SupervisedSidecar {
         child,
         stdin: Some(stdin),
         pipe,
         port,
+        instance_id,
     };
 
     let readiness_probe = tokio::time::timeout(Duration::from_secs(2), async {
@@ -201,7 +207,10 @@ async fn queued_mutation_is_cancelled_without_crossing_ipc() {
     let first = receive_ipc_request(&mut sidecar.pipe).await;
     assert_eq!(first.method, "debugger.state");
     let operation_id = Uuid::new_v4();
-    let arguments = format!(r#"{{"operation_id":"{operation_id}"}}"#);
+    let arguments = format!(
+        r#"{{"operation_id":"{operation_id}","instance_id":"{}"}}"#,
+        sidecar.instance_id
+    );
     let _queued = send_tool_request(sidecar.port, 2, "debugger.resume", &arguments).await;
     assert!(
         tokio::time::timeout(
@@ -219,7 +228,10 @@ async fn queued_mutation_is_cancelled_without_crossing_ipc() {
 async fn active_mutation_is_sent_once_and_not_replayed_on_shutdown() {
     let mut sidecar = start_sidecar(200).await;
     let operation_id = Uuid::new_v4();
-    let arguments = format!(r#"{{"operation_id":"{operation_id}"}}"#);
+    let arguments = format!(
+        r#"{{"operation_id":"{operation_id}","instance_id":"{}"}}"#,
+        sidecar.instance_id
+    );
     let _active = send_tool_request(sidecar.port, 1, "debugger.resume", &arguments).await;
     let request = receive_ipc_request(&mut sidecar.pipe).await;
     assert_eq!(request.method, "debugger.resume");
@@ -244,4 +256,37 @@ async fn disconnected_http_client_does_not_outlive_shutdown_deadline() {
     assert_eq!(request.method, "debugger.state");
     drop(client);
     assert_exits_after_supervisor_eof(&mut sidecar).await;
+}
+
+#[tokio::test]
+async fn replacement_sidecar_rejects_stale_mutation_without_ipc_dispatch() {
+    let mut original = start_sidecar(200).await;
+    let stale_instance_id = original.instance_id;
+    assert_exits_after_supervisor_eof(&mut original).await;
+
+    let mut replacement = start_sidecar(200).await;
+    assert_ne!(replacement.instance_id, stale_instance_id);
+    let operation_id = Uuid::new_v4();
+    let arguments =
+        format!(r#"{{"operation_id":"{operation_id}","instance_id":"{stale_instance_id}"}}"#);
+    let mut client = send_tool_request(replacement.port, 7, "debugger.resume", &arguments).await;
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+        .await
+        .expect("stale mutation HTTP response timed out")
+        .unwrap();
+    let response = String::from_utf8(response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.contains("BACKEND_RESTARTED"));
+    assert!(response.contains("REFRESH_BACKEND_STATE"));
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(150),
+            read_frame::<_, x64dbg_mcp_server::ipc::IpcRequest>(&mut replacement.pipe)
+        )
+        .await
+        .is_err(),
+        "stale mutation crossed the replacement plugin IPC boundary"
+    );
+    assert_exits_after_supervisor_eof(&mut replacement).await;
 }

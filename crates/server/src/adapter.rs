@@ -62,6 +62,7 @@ impl DebuggerAdapter for FakeAdapter {
     async fn call(&self, name: &str, arguments: &Value) -> Result<Value, ToolError> {
         match name {
             "debugger.state" => Ok(json!({
+                "instance_id": "11111111-2222-4333-8444-555555555555",
                 "backend": "x64dbg",
                 "plugin_state": "ready",
                 "debuggee_state": "paused",
@@ -135,6 +136,7 @@ impl DebuggerAdapter for FakeAbsentAdapter {
     async fn call(&self, name: &str, _arguments: &Value) -> Result<Value, ToolError> {
         if name == "debugger.state" {
             Ok(json!({
+                "instance_id": "11111111-2222-4333-8444-555555555555",
                 "backend": "x64dbg",
                 "plugin_state": "ready",
                 "debuggee_state": "absent",
@@ -149,6 +151,35 @@ impl DebuggerAdapter for FakeAbsentAdapter {
                     "code": "CALL_DEBUGGEE_LAUNCH",
                     "tool": "debuggee.launch"
                 }]
+            }))
+        } else {
+            Err(ToolError {
+                code: "UNSUPPORTED",
+                message: "tool is not implemented by the fake adapter",
+                retryable: false,
+                details: json!({ "tool": name }),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct FakeMismatchedAdapter;
+
+#[cfg(test)]
+#[async_trait]
+impl DebuggerAdapter for FakeMismatchedAdapter {
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    async fn call(&self, name: &str, _arguments: &Value) -> Result<Value, ToolError> {
+        if name == "debugger.state" {
+            Ok(json!({
+                "instance_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                "backend": "x64dbg",
+                "debuggee_state": "paused"
             }))
         } else {
             Err(ToolError {

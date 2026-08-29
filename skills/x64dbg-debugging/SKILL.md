@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.7.0"
-  minimum-backend-version: "0.7.0"
+  version: "0.8.0"
+  minimum-backend-version: "0.8.0"
   mcp-protocol: "2025-06-18"
 ---
 
@@ -19,8 +19,8 @@ the backend never enumerates processes. Attached sessions report `session_origin
 Use `debuggee.detach` to preserve that pre-existing process. Never use `debugger.stop` as attached
 session cleanup.
 
-Begin with `debugger.state`. Respect the reported state and each tool schema; most inspection
-requires `paused`. Tool names below are backend-local. A Gateway may prepend a namespace, so
+Begin with `debugger.state` and retain its `instance_id`. Respect the reported state and each tool
+schema; most inspection requires `paused`. Tool names below are backend-local. A Gateway may prepend a namespace, so
 select the connected backend whose published tool name ends with the documented local name.
 
 Use `registers.write` for one full-width core register at a time. Preserve the original value
@@ -45,10 +45,12 @@ Prefer `{ "module": "sample.exe", "rva": "0x..." }` for address-taking tools. Th
 translation native and atomic. Use `address.resolve` when the absolute runtime address or canonical
 location metadata is itself useful.
 
-Every intended mutation needs a fresh canonical lowercase UUID `operation_id`. If submission or
-confirmation is ambiguous, preserve that ID and inspect state; never invent a new ID to force a
-blind retry. Do not infer authority to launch, write, set a breakpoint, resume, or stop from an
-analysis request.
+Every intended mutation needs the current `instance_id` plus a fresh canonical lowercase UUID
+`operation_id`. If the backend reports `BACKEND_RESTARTED`, stop and re-observe state; never send
+the old mutation to the replacement instance. If submission or confirmation is ambiguous within
+one instance, preserve that operation ID and inspect state; never invent a new ID to force a blind
+retry. Do not infer authority to launch, write, set a breakpoint, resume, or stop from an analysis
+request.
 
 After `debugger.resume`, pass its confirmed `state_generation` to
 `debugger.wait_for_pause(after_generation=...)`. Validate the returned pause reason, instruction

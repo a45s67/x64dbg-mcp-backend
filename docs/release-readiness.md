@@ -16,6 +16,22 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -InstalledFlareSamplePath C:\Users\fish\Downloads\Flare-On11_Challenges\checksum.exe
 ```
 
+For a read-only-at-initial-pause check of another architecture-matched PE in an
+isolated integration tree:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\run-generic-sample-smoke.ps1 -Backend x32 `
+  -IntegrationRoot artifacts\integration `
+  -SamplePath C:\path\to\sample-x86.exe
+```
+
+The generic runner validates the PE machine before launch, refuses to compete
+with an already-running debugger of the same backend type, never resumes the
+sample, performs bounded initial-pause reads, submits one stop operation, and
+requires both the isolated debugger and its listener to exit. It is diagnostic
+evidence, not a substitute for the release gate.
+
 ## Evidence matrix
 
 | Requirement | Repository evidence |
@@ -30,6 +46,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 | No blind mutation retry | instance-bound mutation schemas, replacement-sidecar no-dispatch test, operation-ledger tests, shutdown mutation cases, and workflow skill contracts |
 | Automated unit, contract, integration, and shutdown tests | package gate plus `scripts/run-integration-soak.ps1` |
 | Installable x32/x64 package | idempotent installer tests, SBOM/checksums, PE architecture validation, and offline verifier |
+
+Recent additional real-sample observations are recorded in
+[`field-notes-flare-samples.md`](field-notes-flare-samples.md).
 
 ## Publisher gates
 

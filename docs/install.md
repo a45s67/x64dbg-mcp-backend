@@ -51,6 +51,12 @@ Never install the x32 and x64 backends on the same port. The MVP permits one
 debugger instance per backend type, so a second x32dbg or x64dbg instance reports
 an explicit single-instance failure.
 
+If Windows refuses to start x32dbg before any plugin log appears, inspect the
+x64dbg distribution itself for a `Zone.Identifier` alternate stream or an
+untrusted signature chain. Resolve that distribution-level trust decision at
+the downloaded archive/source; the backend installer deliberately does not
+remove Mark-of-the-Web or change machine security policy.
+
 ## Verify health
 
 Liveness intentionally needs no token:

@@ -1,5 +1,9 @@
 #include "breakpoint_policy.h"
 
+#include <cstring>
+#include <iomanip>
+#include <sstream>
+
 namespace mcp {
 namespace {
 
@@ -167,6 +171,27 @@ bool MemoryBreakpointMatches(const BRIDGEBP& breakpoint,
     return breakpoint.type == bp_memory && (!requireEnabled || breakpoint.enabled) &&
            breakpoint.typeEx == static_cast<unsigned char>(NativeMemoryAccess(access)) &&
            observedSize == static_cast<duint>(size);
+}
+
+std::string RunToBreakpointName(const std::string_view operationId) {
+    return "__x64dbg_mcp_run_to_" + std::string(operationId);
+}
+
+std::string RunToBreakpointSetCommand(const duint target,
+                                      const std::string_view ownedName) {
+    std::ostringstream command;
+    command << "bp 0x" << std::hex << std::nouppercase << target << ", \""
+            << ownedName << "\", ss";
+    return command.str();
+}
+
+bool RunToBreakpointOwned(const BRIDGEBP& breakpoint,
+                          const duint target,
+                          const std::string_view expectedName) noexcept {
+    const std::size_t length = strnlen_s(breakpoint.name, sizeof(breakpoint.name));
+    return breakpoint.type == bp_normal && breakpoint.addr == target &&
+           breakpoint.singleshoot && length < sizeof(breakpoint.name) &&
+           std::string_view(breakpoint.name, length) == expectedName;
 }
 
 } // namespace mcp

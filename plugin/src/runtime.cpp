@@ -182,12 +182,15 @@ struct Request {
     std::optional<std::uint64_t> cursorSnapshotFingerprint;
     std::uint64_t afterEventSequence{0U};
     std::vector<EventKind> eventTypes;
+    std::string operationId;
+    std::size_t runToTimeoutMs{9000U};
 };
 
 bool IsMutation(const std::string_view method) {
     return method == "debugger.pause" || method == "debugger.resume" ||
            method == "debugger.step_into" || method == "debugger.step_over" ||
-           method == "debugger.step_out" || method == "registers.write" ||
+           method == "debugger.step_out" || method == "debugger.run_to_address" ||
+           method == "registers.write" ||
            method == "debugger.stop" || method == "memory.write" ||
            method == "breakpoints.set" || method == "breakpoints.remove" ||
            method == "breakpoints.hardware.set" ||
@@ -517,6 +520,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::optional<std::uint64_t> cursorSnapshotFingerprint;
     std::uint64_t afterEventSequence = 0U;
     std::vector<EventKind> eventTypes;
+    std::size_t runToTimeoutMs = 9000U;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
@@ -997,6 +1001,20 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             *parsedPatched == *parsedOriginal) return std::nullopt;
         expectedBytes = *parsedPatched;
         expectedOriginalBytes = *parsedOriginal;
+    } else if (methodValue == "debugger.run_to_address") {
+        json_t* timeout = json_object_get(payload, "timeout_ms");
+        const std::size_t expectedFields = timeout == nullptr ? 2U : 3U;
+        if (json_object_size(payload) != expectedFields ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !ParseAddressReference(json_object_get(payload, "address"), addressValue) ||
+            (timeout != nullptr &&
+             (!json_is_integer(timeout) || json_integer_value(timeout) < 100 ||
+              json_integer_value(timeout) > 20000))) {
+            return std::nullopt;
+        }
+        if (timeout != nullptr) {
+            runToTimeoutMs = static_cast<std::size_t>(json_integer_value(timeout));
+        }
     } else if (methodValue == "debugger.pause" || methodValue == "debugger.resume" ||
                methodValue == "debugger.step_into" || methodValue == "debugger.step_over" ||
                methodValue == "debugger.step_out" || methodValue == "debugger.stop") {
@@ -1070,7 +1088,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(instruction), std::move(expectedBytes),
                    std::move(expectedOriginalBytes), fillNop, addressProvided,
                    targetThreadId, std::move(symbolName), cursorSnapshotFingerprint,
-                   afterEventSequence, std::move(eventTypes)};
+                   afterEventSequence, std::move(eventTypes), std::move(operationIdValue),
+                   runToTimeoutMs};
 }
 
 bool IsCanonicalUuid(const std::string_view value) {
@@ -1477,6 +1496,16 @@ std::string ErrorResponse(const Request& request, const std::string_view code,
                           const std::string_view message, const bool retryable,
                           const bool unknown) {
     return ErrorResponseForId(request.requestId, code, message, retryable, unknown);
+}
+
+std::string ErrorResponseWithDetails(const Request& request, const std::string_view code,
+                                     const std::string_view message, const bool retryable,
+                                     const std::string_view details) {
+    return "{\"request_id\":" + JsonString(request.requestId) +
+           ",\"state_generation\":0,\"status\":\"error\",\"error\":{\"code\":" +
+           JsonString(code) + ",\"message\":" + JsonString(message) +
+           ",\"retryable\":" + (retryable ? "true" : "false") +
+           ",\"details\":" + std::string(details) + "}}";
 }
 
 std::filesystem::path ModuleDirectory() {
@@ -1996,6 +2025,7 @@ void Runtime::Worker() noexcept {
                                            (parsed->method == "symbols.resolve" &&
                                             parsed->addressProvided) ||
                                            parsed->method == "analysis.function" ||
+                                           parsed->method == "debugger.run_to_address" ||
                                            parsed->method == "memory.read" ||
                                            parsed->method == "memory.write" ||
                                            parsed->method == "breakpoints.set" ||
@@ -2301,6 +2331,283 @@ void Runtime::Worker() noexcept {
                            ",\"bytes_restored\":" + std::to_string(spanSize) +
                            ",\"patch_tracked\":false,\"state_generation\":" +
                            std::to_string(resolvedGeneration) + "}}";
+                }
+                if (parsed->method == "debugger.run_to_address") {
+                    const duint target = resolvedLocation->address;
+                    if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed before run-to validation", true,
+                                             false);
+                    }
+                    REGDUMP_AVX512 initial{};
+                    if (!DbgGetRegDumpEx(&initial, sizeof(initial))) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "register snapshot is unavailable", true, false);
+                    }
+                    DISASM_INSTR targetInstruction{};
+                    DbgDisasmAt(target, &targetInstruction);
+                    if (targetInstruction.instr_size <= 0 || targetInstruction.instr_size > 15) {
+                        return ErrorResponse(*parsed, "ACCESS_DENIED",
+                                             "run-to target is not decodable", false, false);
+                    }
+                    if ((DbgGetBpxTypeAt(target) & bp_normal) != 0) {
+                        return ErrorResponse(*parsed, "CONFLICT",
+                                             "run-to target already has a software breakpoint",
+                                             false, false);
+                    }
+                    if (initial.regcontext.cip == target) {
+                        PauseObservation pause;
+                        {
+                            std::lock_guard lock(stateMutex_);
+                            pause = latestPause_;
+                        }
+                        return "{\"request_id\":" + JsonString(parsed->requestId) +
+                               ",\"state_generation\":" +
+                               std::to_string(resolvedGeneration) +
+                               ",\"status\":\"ok\",\"result\":{\"completed\":true," +
+                               "\"resumed\":false,\"target\":" +
+                               LocationJson(*resolvedLocation, resolvedGeneration) +
+                               ",\"debuggee_state\":\"paused\",\"pause_reason\":" +
+                               PauseReasonJson(pause) +
+                               ",\"instruction_pointer\":" + JsonString(HexValue(target)) +
+                               ",\"interruption\":null,\"temporary_breakpoint_cleaned\":true," +
+                               "\"state_generation\":" +
+                               std::to_string(resolvedGeneration) + "}}";
+                    }
+
+                    const DBGFUNCTIONS* functions = DbgFunctions();
+                    if (functions == nullptr || functions->GetBridgeBp == nullptr) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "software breakpoint read-back is unavailable",
+                                             false, false);
+                    }
+                    const std::string ownedName = RunToBreakpointName(parsed->operationId);
+                    const auto ownsBreakpoint = [&ownedName, target](const BRIDGEBP& breakpoint) {
+                        return RunToBreakpointOwned(breakpoint, target, ownedName);
+                    };
+                    const auto cleanupOwned = [this, functions, target, &ownsBreakpoint](
+                                                  const auto deadline) {
+                        BRIDGEBP current{};
+                        if (!functions->GetBridgeBp(bp_normal, target, &current)) {
+                            return (DbgGetBpxTypeAt(target) & bp_normal) == 0 ? 0 : 2;
+                        }
+                        if (!ownsBreakpoint(current)) return 1;
+                        const std::string command = "bc " + HexValue(target);
+                        if (!DbgCmdExec(command.c_str())) return 2;
+                        while (pluginState_.load() == PluginState::ready &&
+                               std::chrono::steady_clock::now() < deadline) {
+                            BRIDGEBP observed{};
+                            if (!functions->GetBridgeBp(bp_normal, target, &observed)) {
+                                return (DbgGetBpxTypeAt(target) & bp_normal) == 0 ? 0 : 2;
+                            }
+                            if (!ownsBreakpoint(observed)) return 1;
+                            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                        }
+                        return 2;
+                    };
+
+                    std::uint64_t fenceToken = 0U;
+                    for (int attempt = 0; attempt < 4 && fenceToken == 0U; ++attempt) {
+                        if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&fenceToken),
+                                            static_cast<ULONG>(sizeof(fenceToken)),
+                                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+                            fenceToken = 0U;
+                        }
+                    }
+                    if (fenceToken == 0U || !commandFence_.Arm(fenceToken)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "run-to command fence is unavailable", true, false);
+                    }
+                    const std::string setCommand =
+                        RunToBreakpointSetCommand(target, ownedName);
+                    if (!DbgCmdExec(setCommand.c_str())) {
+                        commandFence_.Cancel(fenceToken);
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected run-to setup", true,
+                                             false);
+                    }
+                    std::ostringstream fenceText;
+                    fenceText << "x64dbg_mcp_fence_internal " << std::hex << std::nouppercase
+                              << std::setw(16) << std::setfill('0') << fenceToken;
+                    if (!DbgCmdExec(fenceText.str().c_str())) {
+                        commandFence_.Cancel(fenceToken);
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "run-to setup was admitted without a completion fence",
+                                             false, true);
+                    }
+                    if (commandFence_.Wait(fenceToken, requestDeadline) !=
+                        CommandFenceWait::completed) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "run-to setup was not command-queue confirmed", false,
+                                             true);
+                    }
+                    BRIDGEBP installed{};
+                    const bool installedPresent =
+                        functions->GetBridgeBp(bp_normal, target, &installed);
+                    if (!installedPresent || !ownsBreakpoint(installed) || !installed.enabled ||
+                        !installed.active) {
+                        const int cleanup = cleanupOwned(requestDeadline);
+                        const std::size_t installedNameLength =
+                            installedPresent
+                                ? strnlen_s(installed.name, sizeof(installed.name))
+                                : 0U;
+                        const std::string installedName =
+                            installedPresent
+                                ? BoundedNativeError(std::span<const char>(
+                                      installed.name,
+                                      (std::min)(installedNameLength, sizeof(installed.name))))
+                                : std::string{};
+                        const std::string details =
+                            std::string("{\"phase\":\"setup_readback\",\"present\":") +
+                            (installedPresent ? "true" : "false") +
+                            ",\"name\":" +
+                            (installedPresent ? JsonString(installedName) : "null") +
+                            ",\"type\":" + std::to_string(installed.type) +
+                            ",\"enabled\":" + (installed.enabled ? "true" : "false") +
+                            ",\"active\":" + (installed.active ? "true" : "false") +
+                            ",\"singleshoot\":" +
+                            (installed.singleshoot ? "true" : "false") +
+                            ",\"cleanup\":" + std::to_string(cleanup) +
+                            (cleanup == 2 ? ",\"outcome\":\"unknown\"}" : "}");
+                        return ErrorResponseWithDetails(
+                            *parsed, cleanup == 1 ? "CONFLICT" : "INTERNAL",
+                            "run-to breakpoint setup could not be verified", false, details);
+                    }
+                    if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                        const int cleanup = cleanupOwned(requestDeadline);
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during run-to setup", false,
+                                             cleanup != 0);
+                    }
+
+                    const std::uint64_t beforeRun = generation_.load();
+                    if (!DbgCmdExec("run")) {
+                        const int cleanup = cleanupOwned(requestDeadline);
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected run-to execution",
+                                             false, cleanup != 0);
+                    }
+                    const auto now = std::chrono::steady_clock::now();
+                    const auto requestedDeadline =
+                        now + std::chrono::milliseconds(parsed->runToTimeoutMs);
+                    const auto actionDeadline =
+                        (std::min)(requestedDeadline,
+                                   requestDeadline - std::chrono::seconds(3));
+                    bool timedOut = false;
+                    bool processExited = false;
+                    PauseObservation finalPause;
+                    std::uint64_t finalGeneration = 0U;
+                    {
+                        std::unique_lock lock(stateMutex_);
+                        const bool terminal = stateChanged_.wait_until(
+                            lock, actionDeadline, [this, beforeRun] {
+                                const DebuggeeState state = debuggeeState_.load();
+                                return pluginState_.load() != PluginState::ready ||
+                                       pausedGeneration_.load() > beforeRun ||
+                                       absentGeneration_.load() > beforeRun ||
+                                       state == DebuggeeState::exited;
+                            });
+                        if (pluginState_.load() != PluginState::ready) {
+                            return ErrorResponse(*parsed, "CANCELLED",
+                                                 "plugin drained during run-to", true, true);
+                        }
+                        const DebuggeeState state = debuggeeState_.load();
+                        processExited = absentGeneration_.load() > beforeRun ||
+                                        state == DebuggeeState::absent ||
+                                        state == DebuggeeState::exited;
+                        if (pausedGeneration_.load() > beforeRun) {
+                            finalPause = latestPause_;
+                            finalGeneration = pausedGeneration_.load();
+                        } else if (!processExited && !terminal) {
+                            timedOut = true;
+                        }
+                    }
+                    if (processExited) {
+                        if (!WaitForState(DebuggeeState::absent, beforeRun, requestDeadline) &&
+                            debuggeeState_.load() != DebuggeeState::absent) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "debuggee exited before run-to cleanup was confirmed",
+                                                 false, true);
+                        }
+                        const std::uint64_t stoppedGeneration = absentGeneration_.load();
+                        return "{\"request_id\":" + JsonString(parsed->requestId) +
+                               ",\"state_generation\":" +
+                               std::to_string(stoppedGeneration) +
+                               ",\"status\":\"ok\",\"result\":{\"completed\":false," +
+                               "\"resumed\":true,\"target\":" +
+                               LocationJson(*resolvedLocation, resolvedGeneration) +
+                               ",\"debuggee_state\":\"absent\",\"pause_reason\":null," +
+                               "\"instruction_pointer\":null,\"interruption\":\"process_exited\"," +
+                               "\"temporary_breakpoint_cleaned\":true,\"state_generation\":" +
+                               std::to_string(stoppedGeneration) + "}}";
+                    }
+                    if (timedOut) {
+                        const std::uint64_t beforePause = generation_.load();
+                        if (!DbgCmdExec("pause") ||
+                            !WaitForState(DebuggeeState::paused, beforePause, requestDeadline)) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "run-to timeout could not be paused for cleanup",
+                                                 false, true);
+                        }
+                        {
+                            std::lock_guard lock(stateMutex_);
+                            finalPause = latestPause_;
+                            finalGeneration = pausedGeneration_.load();
+                        }
+                    }
+                    if (finalGeneration == 0U || debuggeeState_.load() != DebuggeeState::paused) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "run-to outcome was not callback-confirmed", false,
+                                             true);
+                    }
+                    const bool completed =
+                        !timedOut && finalPause.kind == PauseReasonKind::breakpoint &&
+                        finalPause.hasAddress && finalPause.address == target &&
+                        finalPause.breakpointType == bp_normal;
+                    const int cleanup = cleanupOwned(requestDeadline);
+                    if (cleanup != 0) {
+                        return ErrorResponse(*parsed, cleanup == 1 ? "CONFLICT" : "TIMEOUT",
+                                             cleanup == 1
+                                                 ? "run-to target breakpoint ownership changed"
+                                                 : "run-to temporary breakpoint cleanup was not confirmed",
+                                             false, true);
+                    }
+                    REGDUMP_AVX512 finalDump{};
+                    if (!DbgGetRegDumpEx(&finalDump, sizeof(finalDump)) ||
+                        !PauseObservationCurrent(finalGeneration, finalPause.generation)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed after run-to cleanup", true, false);
+                    }
+                    const char* interruption = nullptr;
+                    if (!completed) {
+                        if (timedOut) {
+                            interruption = "timeout";
+                        } else {
+                            switch (finalPause.kind) {
+                            case PauseReasonKind::breakpoint: interruption = "breakpoint"; break;
+                            case PauseReasonKind::exception: interruption = "exception"; break;
+                            case PauseReasonKind::step: interruption = "step"; break;
+                            case PauseReasonKind::userPause: interruption = "user_pause"; break;
+                            case PauseReasonKind::processCreated:
+                            case PauseReasonKind::systemBreakpoint:
+                            case PauseReasonKind::unknown: interruption = "unknown"; break;
+                            }
+                        }
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(finalGeneration) +
+                           ",\"status\":\"ok\",\"result\":{\"completed\":" +
+                           (completed ? "true" : "false") +
+                           ",\"resumed\":true,\"target\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"debuggee_state\":\"paused\",\"pause_reason\":" +
+                           PauseReasonJson(finalPause) +
+                           ",\"instruction_pointer\":" +
+                           JsonString(HexValue(finalDump.regcontext.cip)) +
+                           ",\"interruption\":" +
+                           (interruption == nullptr ? "null" : JsonString(interruption)) +
+                           ",\"temporary_breakpoint_cleaned\":true,\"state_generation\":" +
+                           std::to_string(finalGeneration) + "}}";
                 }
                 if (parsed->method == "analysis.function") {
                     if (!resolvedLocation->module || !resolvedLocation->moduleBase ||

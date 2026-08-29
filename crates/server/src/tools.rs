@@ -110,6 +110,17 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             integer(object, "after_generation", 0, 9_007_199_254_740_991)?;
             optional_integer(object, "timeout_ms", 1, 9_000)
         }
+        "debugger.run_to_address" => {
+            exact_keys(
+                object,
+                &["operation_id", "instance_id", "address"],
+                &["timeout_ms"],
+            )?;
+            validate_operation_id(object)?;
+            validate_instance_id(object)?;
+            validate_address_ref(object, "address")?;
+            optional_integer(object, "timeout_ms", 100, 20_000)
+        }
         "debugger.pause" | "debugger.resume" | "debugger.step_into" | "debugger.step_over"
         | "debugger.step_out" | "debugger.stop" | "debuggee.detach" => operation(object, &[]),
         "debuggee.launch" => {
@@ -832,6 +843,18 @@ fn build_catalog() -> Vec<Value> {
             false,
         ),
         mutation_tool(
+            "debugger.run_to_address",
+            "Run from a paused state to one absolute or module-relative address through an exactly owned single-shot breakpoint. Interruption and timeout are bounded and the temporary breakpoint is cleaned before a successful result.",
+            operation_schema_with_optional(
+                vec![("address", address_ref())],
+                vec![(
+                    "timeout_ms",
+                    json!({"type":"integer","minimum":100,"maximum":20000,"default":9000}),
+                )],
+            ),
+            false,
+        ),
+        mutation_tool(
             "debugger.stop",
             "Stop the current debug session and wait for callback confirmation.",
             operation_schema(vec![]),
@@ -1510,7 +1533,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 45);
+        assert_eq!(catalog().len(), 46);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -1561,6 +1584,30 @@ mod tests {
             validate_arguments(
                 "debugger.wait_for_pause",
                 &json!({"after_generation":7,"timeout_ms":9001})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "debugger.run_to_address",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "instance_id":"11111111-2222-4333-8444-555555555555",
+                    "address":{"module":"fixture.exe","rva":"0x1000"},
+                    "timeout_ms":20000
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "debugger.run_to_address",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "instance_id":"11111111-2222-4333-8444-555555555555",
+                    "address":"0x1000",
+                    "timeout_ms":20001
+                })
             )
             .is_err()
         );

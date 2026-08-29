@@ -330,6 +330,32 @@ must be implemented one at a time:
 No proposal may use fixed sleep, unbounded synchronous tracing, delete-all
 cleanup, or automatic retry to simplify its implementation.
 
+Completed for 0.12.0 with one admitted tool, `debugger.run_to_address`, under
+ADR 0032. It owns an operation-derived named single-shot breakpoint for the
+entire bounded executor transaction, reports interruption rather than claiming
+false completion, and removes only the exact temporary record it created.
+Isolated x32/x64 tests cover caller-breakpoint preservation, target completion,
+same-operation replay, changed-argument conflict, timeout pause, cleanup, and
+shutdown.
+
+The other candidates are deliberately not admitted in this stage:
+
+- arbitrary conditional expressions would reopen the debugger-expression and
+  command-injection boundary; a future proposal must define a closed condition
+  language before conditional breakpoints can be reconsidered;
+- exception breakpoints need a separate, demonstrated workflow and precise
+  first/second-chance plus process-wide ownership semantics;
+- thread suspend/resume can deadlock a debuggee or strand externally managed
+  thread state, while thread switching currently lacks a necessary workflow
+  that cannot be served by explicit thread IDs on reads; and
+- trace sessions require a new long-lived ownership object, cancellation model,
+  output store, and unload proof. They cannot be approximated by monopolizing
+  the single executor with an unbounded step loop.
+
+Stage 5 therefore closes with the one mutation whose ownership and completion
+could be proven. Reconsidering any deferred candidate starts with a new ADR and
+new workflow evidence; it is not an implicit continuation of this release.
+
 ## Parked work
 
 The following are intentionally outside the active roadmap until explicitly

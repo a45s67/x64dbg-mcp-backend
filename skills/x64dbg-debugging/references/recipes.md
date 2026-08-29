@@ -54,6 +54,16 @@ no-op patches, multi-command text, and unsafe address-only restore.
 
 ## Breakpoint and pause loop
 
+When the goal is simply to continue to one address, prefer
+`debugger.run_to_address` with module/RVA, the current instance ID, one fresh
+operation ID, and a bounded timeout. It atomically owns and cleans its temporary
+single-shot breakpoint. Check `completed`; an intervening caller breakpoint,
+exception, user pause, process exit, or timeout is a valid incomplete result to
+inspect, not permission to resubmit execution blindly.
+
+Use the explicit sequence below when the breakpoint must intentionally remain
+installed or when the workflow needs separate observation between operations.
+
 1. Identify the loaded module with `modules.list`. Prefer a stable module/RVA reference.
 2. If needed, inspect it with `address.resolve`; do not manually add the ASLR base.
 3. With explicit mutation authority, call `breakpoints.set` using the current instance UUID and a

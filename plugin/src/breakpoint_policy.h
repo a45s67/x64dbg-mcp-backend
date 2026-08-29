@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <string>
 #include <string_view>
 
 #include "bridgemain.h"
@@ -41,5 +42,12 @@ ParseMemoryAccess(std::string_view value) noexcept;
                                            std::size_t size,
                                            duint observedSize,
                                            bool requireEnabled) noexcept;
+
+[[nodiscard]] std::string RunToBreakpointName(std::string_view operationId);
+[[nodiscard]] std::string RunToBreakpointSetCommand(duint target,
+                                                    std::string_view ownedName);
+[[nodiscard]] bool RunToBreakpointOwned(const BRIDGEBP& breakpoint,
+                                        duint target,
+                                        std::string_view expectedName) noexcept;
 
 } // namespace mcp

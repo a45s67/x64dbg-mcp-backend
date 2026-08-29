@@ -66,6 +66,7 @@ not mutated anything.
 | `expression.evaluate` | `DbgFunctions()->ValFromString` | paused | max 1024-byte expression; no command execution |
 | pause/resume/step-in/step-over/stop | `DbgCmdExec` | operation-specific | fixed command; callback and generation confirmation |
 | `debugger.step_out` | `DbgCmdExec` (`rtr`), `DbgGetRegDumpEx`, `DbgDisasmAt` | paused | newer paused callback, copied CIP/CSP/reason, exact generation recheck; return+CSP postcondition distinguishes completion from an intervening pause |
+| `debugger.run_to_address` | `DbgCmdExec` (fixed named `bp`, `run`, optional `pause`/`bc`), private command fence, `GetBridgeBp`, `DbgGetBpxTypeAt`, `DbgGetRegDumpEx`, `DbgDisasmAt` | paused | exact operation-derived single-shot name and typed read-back before run; callback wait bounded to 20 s; intervening pause/process exit are explicit results; cleanup deletes only the exact owned target record and otherwise returns outcome unknown |
 | `registers.write` | `Script::Register::Set`, `DbgGetRegDumpEx` | paused | one allowlisted full-width core register; before/after snapshots, exact read-back, and generation recheck; no batch |
 | `memory.write` | `DbgMemWrite`, `DbgMemRead` | paused | max 4 KiB; read-back verification |
 | breakpoint set/remove | `DbgCmdExec`, `DbgGetBpxTypeAt` | paused | validated address only; bounded observation loop |

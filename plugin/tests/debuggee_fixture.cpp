@@ -19,6 +19,19 @@ mcp_fixture_analysis_target(const std::uint32_t value) {
     return (value ^ 0x5a17c3e9U) + 0x1020304U;
 }
 
+extern "C" __declspec(dllexport) __declspec(noinline) std::uint32_t
+mcp_fixture_run_to_interrupter(const std::uint32_t value) {
+    return value ^ 1U;
+}
+
+extern "C" __declspec(dllexport) __declspec(noinline) std::uint32_t
+mcp_fixture_run_to_target(const std::uint32_t value) {
+    // Keep this body distinct from the interrupter. Release-link identical-code
+    // folding would otherwise give both exported symbols the same address and
+    // invalidate the run-to interruption fixture.
+    return (value ^ 3U) + 1U;
+}
+
 namespace {
 
 constexpr wchar_t kArgumentObservationFile[] = L"mcp-argv-observed.bin";
@@ -86,8 +99,13 @@ bool WriteObservedArguments() {
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (!WriteObservedArguments()) return 2;
     mcp_fixture_marker.store(mcp_fixture_analysis_target(mcp_fixture_marker.load()));
-    while (mcp_fixture_marker.load() != 0U) {
+    std::uint32_t value = mcp_fixture_marker.load();
+    while (value != 0U) {
+        value = mcp_fixture_run_to_interrupter(value);
+        value = mcp_fixture_run_to_target(value);
+        mcp_fixture_marker.store(value);
         Sleep(10U);
+        value = mcp_fixture_marker.load();
     }
     return 0;
 }

@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <limits>
+#include <cstring>
 
 int main() {
     const auto execute = mcp::ParseHardwareAccess("execute");
@@ -81,6 +82,35 @@ int main() {
         mcp::MemoryBreakpointMatches(memory, *memoryWrite, 16U, 8U, true)) {
         std::cerr << "memory read-back policy failed\n";
         return 6;
+    }
+
+    const std::string runToName =
+        mcp::RunToBreakpointName("01234567-89ab-4cde-8fab-0123456789ab");
+    if (runToName != "__x64dbg_mcp_run_to_01234567-89ab-4cde-8fab-0123456789ab" ||
+        mcp::RunToBreakpointSetCommand(0x1234U, runToName) !=
+            "bp 0x1234, \"__x64dbg_mcp_run_to_01234567-89ab-4cde-8fab-0123456789ab\", ss") {
+        std::cerr << "run-to fixed command policy failed\n";
+        return 7;
+    }
+    BRIDGEBP runTo{};
+    runTo.type = bp_normal;
+    runTo.addr = 0x1234U;
+    runTo.singleshoot = true;
+    memcpy_s(runTo.name, sizeof(runTo.name), runToName.data(), runToName.size());
+    if (!mcp::RunToBreakpointOwned(runTo, 0x1234U, runToName)) {
+        std::cerr << "run-to ownership policy failed\n";
+        return 7;
+    }
+    runTo.singleshoot = false;
+    if (mcp::RunToBreakpointOwned(runTo, 0x1234U, runToName)) {
+        std::cerr << "run-to single-shot policy failed\n";
+        return 7;
+    }
+    runTo.singleshoot = true;
+    if (mcp::RunToBreakpointOwned(runTo, 0x1235U, runToName) ||
+        mcp::RunToBreakpointOwned(runTo, 0x1234U, runToName + "-changed")) {
+        std::cerr << "run-to exact identity policy failed\n";
+        return 7;
     }
     return 0;
 }

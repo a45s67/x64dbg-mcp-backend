@@ -98,6 +98,13 @@ contains required integer `after_generation` and optional integer `timeout_ms`
 `process_created`, `system_breakpoint`, `breakpoint`, `exception`, `step`,
 `user_pause`, or `unknown`.
 
+`debugger.run_to_address` is a mutation whose payload contains one closed
+address reference and optional integer `timeout_ms` (default 9,000; range
+100-20,000). Its successful result explicitly distinguishes target completion,
+intervening pause, process exit, and caller timeout. The native operation owns
+one operation-derived single-shot breakpoint and reports success only after the
+record is absent or exact cleanup is callback/postcondition confirmed.
+
 Every successful state-sensitive read includes `state_generation` inside its
 `result` (the outer IPC field is transport metadata and is not forwarded as MCP
 structured content). A callback during collection returns `BUSY` with

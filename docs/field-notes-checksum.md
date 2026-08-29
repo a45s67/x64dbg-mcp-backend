@@ -1051,3 +1051,50 @@ and memory breakpoints, stopped the sample, and closed the debugger-owned
 sidecar. The backend now publishes 45 tools and the managed skill requires
 0.11.0. The archive SHA-256 is
 `0f27c54fe50e6a994040745d83dad367139be5ce3b46e8f2151c7724b7d82fb0`.
+
+## 2026-08-30 owned bounded run-to qualification
+
+ADR 0032 admits `debugger.run_to_address` as the only Stage 5 controlled
+mutation. It resolves a structured address in the paused generation, installs a
+uniquely named single-shot software breakpoint derived from the operation UUID,
+requires exact typed read-back behind a command-queue fence, and then waits on
+callbacks. Intervening pauses and bounded timeout are explicit incomplete
+results. Cleanup removes only the exact owned record; ambiguous cleanup is an
+unknown outcome and is never retried.
+
+The first real integration attempt revealed a test-fixture defect rather than a
+backend defect: release-link identical-code folding assigned the two identical
+exported interrupter/target functions the same address. The fixture now emits
+distinct machine code, preventing a pre-existing caller breakpoint from also
+being the target. A focused native policy test separately fixes the generated
+breakpoint name, command text, address, single-shot flag, and exact-name
+ownership rules.
+
+Fresh isolated x64 instance `8aaf514a-295f-40ed-a800-290bf39c0189` and x32
+instance `86366882-9289-4da3-927b-8c45c0441520` both preserved an intervening
+caller breakpoint while cleaning the temporary target, reached the target on a
+second run, replayed the recorded result exactly, rejected changed arguments
+under the same operation ID, and paused plus cleaned an unreachable target at a
+250 ms timeout. Both completed the full prior tool workflow and shut down their
+owned sidecars. The remaining conditional/exception, thread-control, and trace
+candidates remain unadmitted for the reasons recorded in the development
+roadmap.
+
+The installed 0.12.0 qualification used instance
+`ceefd6fd-8dc0-416d-8ae5-9f828113c445`. It resolved
+`CHECKSUM.EXE+0xa78a0` to `0x8578a0` from relocated base `0x7b0000`, retained
+generation 27 across the paused snapshot, returned three native stack frames,
+verified the known function through `0x85806b`, and completed the reversible
+register, patch, hardware-breakpoint, and memory-breakpoint checks. From the
+memory-breakpoint pause it then ran to the next decoded instruction at
+`0x8578b2`, replayed the recorded result exactly, and confirmed its temporary
+software breakpoint was cleaned. The debuggee stopped and the debugger-owned
+sidecar exited.
+
+The definitive 0.12.0 release gate repeated the complete packaged x32/x64
+workflows, confirmed all owned sidecars exited and both loopback ports closed,
+then repeated the installed checksum workflow as instance
+`67460aff-e14f-4369-be87-9dee119208f0`. Run-to again completed at `0x8578b2`
+with exact replay and confirmed cleanup. The offline-verified archive SHA-256 is
+`142131cc4bee339c5f660cbce5d3582e4071b6b06383c67ee836afb4cb185935`.
+Publisher signing and pristine-VM qualification remain intentionally not run.

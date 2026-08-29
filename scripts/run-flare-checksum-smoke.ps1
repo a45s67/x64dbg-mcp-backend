@@ -372,8 +372,10 @@ try {
 
     $hardwareInstruction = @($disassemblySnapshot.items)[1]
     $memoryInstruction = @($disassemblySnapshot.items)[2]
-    if (!$hardwareInstruction -or !$memoryInstruction -or
-        $hardwareInstruction.size -lt 1 -or $memoryInstruction.size -lt 1) {
+    $runToInstruction = @($disassemblySnapshot.items)[3]
+    if (!$hardwareInstruction -or !$memoryInstruction -or !$runToInstruction -or
+        $hardwareInstruction.size -lt 1 -or $memoryInstruction.size -lt 1 -or
+        $runToInstruction.size -lt 1) {
         throw 'Main disassembly has no deterministic instructions for typed breakpoint qualification.'
     }
     $hardwareArguments = @{
@@ -444,6 +446,26 @@ try {
         throw 'Installed memory breakpoint removal was not replay-safe.'
     }
 
+    $runToArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = @{ absolute = $runToInstruction.address }
+        timeout_ms = 2000
+    }
+    $runTo = Invoke-Tool 'debugger.run_to_address' $runToArguments 112
+    $runToReplay = Invoke-Tool 'debugger.run_to_address' $runToArguments 113
+    $runToShapeValid = $runTo.resumed -and
+        $runTo.temporary_breakpoint_cleaned -and
+        $runTo.debuggee_state -eq 'paused' -and
+        (($runTo.completed -and $null -eq $runTo.interruption -and
+            $runTo.instruction_pointer -eq $runToInstruction.address) -or
+         (!$runTo.completed -and $runTo.interruption -in @(
+            'breakpoint', 'exception', 'step', 'user_pause', 'timeout', 'unknown')))
+    if (!$runToShapeValid -or
+        ($runTo | ConvertTo-Json -Compress -Depth 12) -ne
+        ($runToReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw "Installed owned run-to did not return a cleaned replay-safe result: $($runTo | ConvertTo-Json -Compress -Depth 12)"
+    }
+
     $stopSubmitted = $true
     $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 40
     [ordered]@{
@@ -503,6 +525,12 @@ try {
         memory_breakpoint_address = $memoryPause.instruction_pointer
         memory_breakpoint_size = $memorySet.size
         memory_breakpoint_replay_equal = $true
+        run_to_target = $runToInstruction.address
+        run_to_completed = $runTo.completed
+        run_to_interruption = $runTo.interruption
+        run_to_final_address = $runTo.instruction_pointer
+        run_to_replay_equal = $true
+        run_to_temporary_breakpoint_cleaned = $true
         stopped = $stop.debuggee_state -eq 'absent'
     } | ConvertTo-Json -Depth 5
 } finally {

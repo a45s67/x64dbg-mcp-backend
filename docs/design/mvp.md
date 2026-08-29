@@ -105,7 +105,7 @@ Otherwise HTTP 503. Response is bounded and contains no target path or token:
   "diagnostic_code":null,
   "next_actions":[],
   "protocol_version":"2025-06-18",
-  "version":"0.11.0"
+  "version":"0.12.0"
 }
 ```
 
@@ -169,6 +169,7 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `debugger.step_into` | mutate | paused | One instruction, then bounded wait for pause |
 | `debugger.step_over` | mutate | paused | One instruction, then bounded wait for pause |
 | `debugger.step_out` | mutate | paused | Fixed `rtr`; newer pause plus return/CSP confirmation; interruptions return `completed: false` |
+| `debugger.run_to_address` | mutate | paused | Owned named single-shot target; 100-20,000 ms; interruption reporting and exact cleanup |
 | `debugger.stop` | mutate | starting/running/paused | Stop current debug session |
 | `debuggee.launch` | destructive mutation | absent | Canonicalize and load an existing executable, accept only bounded structured arguments, then commit the quoted command line at an actionable initial pause |
 | `debuggee.attach` | destructive mutation | absent | Attach to one explicit PID; no enumeration; PID plus paused-callback confirmation |
@@ -181,6 +182,9 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `memory.write` | mutate | paused | Write at most 4 KiB; explicit hex bytes and operation ID |
 | `memory.map` | read | paused | Paginated regions, at most 256 per page; optional module/committed/executable/compact filters |
 | `modules.list` | read | paused | Paginated loaded modules, at most 256 per page |
+| `sections.list` | read | paused | One loaded module's SDK section spans; at most 256/page and 4,096 native records |
+| `imports.list` | read | paused | One module's IAT records and current targets; at most 256/page and 65,536 native records |
+| `exports.list` | read | paused | One module's exports, ordinals, and forwarders; at most 256/page and 65,536 native records |
 | `threads.list` | read | paused | Paginated threads, at most 256 per page |
 | `callstack.read` | read | paused | Current or exact thread; at most 50 native frames; explicit completeness |
 | `breakpoints.list` | read | paused/running | Paginated snapshot with typed hardware/memory fields |
@@ -202,6 +206,7 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `functions.at` | read | paused | Return one already-known containing function without triggering analysis |
 | `strings.search` | read | paused | Scan at most 1 MiB per request for bounded ASCII/UTF-8 or UTF-16LE strings with configurable match context |
 | `references.to` | read | paused | Paginate up to 65,536 retained inbound xrefs for an address |
+| `events.list` | read | any | Closed-type callback history; 256-record ring with sequence continuation and overflow |
 
 Every mutating tool requires both the current backend `instance_id` and a fresh
 `operation_id`, each a canonical lowercase UUID. The sidecar rejects a stale

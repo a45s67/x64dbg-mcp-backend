@@ -576,9 +576,17 @@ try {
     $markerSymbol = @($symbols.items | Where-Object {
         $_.name -ieq 'mcp_fixture_marker'
     })[0]
+    $runToInterrupterSymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_run_to_interrupter'
+    })[0]
+    $runToTargetSymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_run_to_target'
+    })[0]
     if (!$analysisSymbol -or !$analysisSymbol.location.rva -or
-        !$markerSymbol -or !$markerSymbol.location.rva) {
-        throw 'Fixture analysis and marker exports were not available as structured symbols.'
+        !$markerSymbol -or !$markerSymbol.location.rva -or
+        !$runToInterrupterSymbol -or !$runToInterrupterSymbol.location.rva -or
+        !$runToTargetSymbol -or !$runToTargetSymbol.location.rva) {
+        throw 'Fixture analysis, marker, and run-to exports were not available as structured symbols.'
     }
     $analysisRuntimeAddress = [Convert]::ToUInt64(
         $analysisSymbol.location.address.Substring(2), 16)
@@ -613,6 +621,14 @@ try {
     $markerRef = @{
         module = $fixtureModule.name.ToUpperInvariant()
         rva = $markerSymbol.location.rva
+    }
+    $runToInterrupterRef = @{
+        module = $fixtureModule.name.ToUpperInvariant()
+        rva = $runToInterrupterSymbol.location.rva
+    }
+    $runToTargetRef = @{
+        module = $fixtureModule.name.ToUpperInvariant()
+        rva = $runToTargetSymbol.location.rva
     }
     $analysisOperation = [Guid]::NewGuid().ToString()
     $analysis = Invoke-Tool 'analysis.function' @{
@@ -1081,6 +1097,68 @@ try {
         ($memoryRemoveReplay | ConvertTo-Json -Compress -Depth 10)) {
         throw 'Typed memory breakpoint removal was not exactly replay-safe.'
     }
+    $runToInterrupterSet = Invoke-Tool 'breakpoints.set' @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $runToInterrupterRef
+    } 221
+    $runToInterrupted = Invoke-Tool 'debugger.run_to_address' @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $runToTargetRef
+        timeout_ms = 9000
+    } 222
+    if ($runToInterrupted.completed -or $runToInterrupted.interruption -ne 'breakpoint' -or
+        !$runToInterrupted.temporary_breakpoint_cleaned -or
+        $runToInterrupted.instruction_pointer -ne $runToInterrupterSymbol.location.address) {
+        throw 'Owned run-to did not report and clean an intervening caller breakpoint.'
+    }
+    $runToBreakpoints = Invoke-Tool 'breakpoints.list' @{ limit = 256 } 223
+    if (@($runToBreakpoints.items | Where-Object {
+            $_.address -eq $runToInterrupterSymbol.location.address -and $_.type -eq 'software'
+        }).Count -ne 1 -or
+        @($runToBreakpoints.items | Where-Object {
+            $_.address -eq $runToTargetSymbol.location.address -and $_.type -eq 'software'
+        }).Count -ne 0) {
+        throw 'Owned run-to cleanup removed caller state or retained its temporary target.'
+    }
+    $null = Invoke-Tool 'breakpoints.remove' @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $runToInterrupterRef
+    } 224
+    $runToOperation = [Guid]::NewGuid().ToString()
+    $runToArguments = @{
+        operation_id = $runToOperation; address = $runToTargetRef; timeout_ms = 9000
+    }
+    $runToCompleted = Invoke-Tool 'debugger.run_to_address' $runToArguments 225
+    $runToReplay = Invoke-Tool 'debugger.run_to_address' $runToArguments 226
+    if (!$runToCompleted.completed -or !$runToCompleted.resumed -or
+        $null -ne $runToCompleted.interruption -or
+        !$runToCompleted.temporary_breakpoint_cleaned -or
+        $runToCompleted.instruction_pointer -ne $runToTargetSymbol.location.address -or
+        ($runToCompleted | ConvertTo-Json -Compress -Depth 12) -ne
+        ($runToReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Owned run-to did not reach, clean, and exactly replay its target result.'
+    }
+    $runToConflict = Invoke-Mcp 'tools/call' @{
+        name = 'debugger.run_to_address'; arguments = @{
+            operation_id = $runToOperation; address = $moduleEntryRef; timeout_ms = 9000
+        }
+    } 227
+    if (!$runToConflict.isError -or
+        $runToConflict.structuredContent.error.code -ne 'OPERATION_ID_CONFLICT') {
+        throw 'Owned run-to accepted changed arguments under a reused operation ID.'
+    }
+    $runToTimeout = Invoke-Tool 'debugger.run_to_address' @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $moduleEntryRef
+        timeout_ms = 250
+    } 228
+    if ($runToTimeout.completed -or $runToTimeout.interruption -ne 'timeout' -or
+        !$runToTimeout.temporary_breakpoint_cleaned -or
+        $runToTimeout.debuggee_state -ne 'paused') {
+        throw 'Owned run-to timeout did not pause and clean its unreachable target.'
+    }
+    $afterRunToBreakpoints = Invoke-Tool 'breakpoints.list' @{ limit = 256 } 229
+    if (@($afterRunToBreakpoints.items | Where-Object {
+            $_.address -eq $resolvedEntry.address -and $_.type -eq 'software'
+        }).Count -ne 0) {
+        throw 'Owned run-to timeout retained its entry-point temporary breakpoint.'
+    }
     $resume = $null
     $startupPause = $null
     $stableRunning = $false
@@ -1286,6 +1364,11 @@ try {
         memory_breakpoint_size = $memoryBreakpoint.size
         memory_breakpoint_replay_equal = $true
         memory_breakpoint_mismatch_rejected = $true
+        run_to_interruption_preserved_caller_breakpoint = $runToInterrupterSet.present
+        run_to_target = $runToCompleted.instruction_pointer
+        run_to_replay_equal = $true
+        run_to_conflict_rejected = $true
+        run_to_timeout_cleaned = $true
         resume_state = $resume.debuggee_state
         resume_generation = $resume.state_generation
         startup_pause_reason = if ($startupPause) { $startupPause.pause_reason.kind } else { $null }

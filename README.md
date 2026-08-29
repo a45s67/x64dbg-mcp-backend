@@ -38,6 +38,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0029-bounded-module-imports-and-exports.md`](docs/adr/0029-bounded-module-imports-and-exports.md)
 - [`docs/adr/0030-bounded-debugger-event-history.md`](docs/adr/0030-bounded-debugger-event-history.md)
 - [`docs/adr/0031-bounded-loaded-section-metadata.md`](docs/adr/0031-bounded-loaded-section-metadata.md)
+- [`docs/adr/0032-owned-bounded-run-to-address.md`](docs/adr/0032-owned-bounded-run-to-address.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/development-roadmap.md`](docs/development-roadmap.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
@@ -101,6 +102,10 @@ metadata replace polling without creating a streaming or unbounded log API.
 `sections.list` exposes the SDK's named loaded-image spans with ASLR-correct
 locations. It deliberately omits characteristics and raw-file metadata that the
 native API does not provide; correlate with `memory.map` for current protection.
+`debugger.run_to_address` is an owned bounded mutation: it installs a uniquely
+named single-shot breakpoint, reports intervening pauses, and removes only its
+own exact temporary record. Its replay identity prevents an ambiguous execution
+request from being run again under a new operation ID.
 
 Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
 It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer

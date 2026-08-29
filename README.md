@@ -25,6 +25,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0016-explicit-function-analysis.md`](docs/adr/0016-explicit-function-analysis.md)
 - [`docs/adr/0017-attach-and-detach-lifecycle.md`](docs/adr/0017-attach-and-detach-lifecycle.md)
 - [`docs/adr/0018-register-write-and-step-out.md`](docs/adr/0018-register-write-and-step-out.md)
+- [`docs/adr/0019-typed-hardware-and-memory-breakpoints.md`](docs/adr/0019-typed-hardware-and-memory-breakpoints.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
 - [`docs/reference-implementation-review.md`](docs/reference-implementation-review.md)

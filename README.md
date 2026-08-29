@@ -37,6 +37,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0028-structured-launch-arguments.md`](docs/adr/0028-structured-launch-arguments.md)
 - [`docs/adr/0029-bounded-module-imports-and-exports.md`](docs/adr/0029-bounded-module-imports-and-exports.md)
 - [`docs/adr/0030-bounded-debugger-event-history.md`](docs/adr/0030-bounded-debugger-event-history.md)
+- [`docs/adr/0031-bounded-loaded-section-metadata.md`](docs/adr/0031-bounded-loaded-section-metadata.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/development-roadmap.md`](docs/development-roadmap.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)
@@ -97,6 +98,9 @@ caller already knows a name or address; both remain bounded known-only reads.
 `events.list` exposes a callback-derived 256-record history in every debugger
 state. Sequence continuation, closed type filters, and explicit overflow
 metadata replace polling without creating a streaming or unbounded log API.
+`sections.list` exposes the SDK's named loaded-image spans with ASLR-correct
+locations. It deliberately omits characteristics and raw-file metadata that the
+native API does not provide; correlate with `memory.map` for current protection.
 
 Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
 It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer

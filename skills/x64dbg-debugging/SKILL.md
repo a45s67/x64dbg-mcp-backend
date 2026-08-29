@@ -82,6 +82,12 @@ type filter, and treat `overflowed: true` as a required resynchronization signal
 re-read current state before interpreting retained events. Event text and native
 callback pointers are intentionally unavailable.
 
+Use `sections.list` when named loaded-image boundaries matter. Its start, size,
+and exclusive end are ASLR-correct SDK observations; it does not claim section
+characteristics, permissions, or raw-file offsets. Use `memory.map` separately
+for current page protection, and static PE analysis when on-disk metadata is
+required.
+
 For state-specific sequences, breakpoint loops, compact inspection, and Go triage, read
 [references/recipes.md](references/recipes.md). For connection, authentication, stale cursor,
 timeout, and recovery decisions, read

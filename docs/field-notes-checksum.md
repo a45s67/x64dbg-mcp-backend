@@ -1017,3 +1017,23 @@ startup matches, verified structured breakpoint plus pause and step events,
 completed the existing analysis/mutation workflow, and exposed callback-confirmed
 `debug_stopped` at sequence 46 after debuggee teardown. Both debugger-owned
 sidecars then exited cleanly.
+
+## 2026-08-30 bounded loaded-section qualification
+
+ADR 0031 admits `sections.list` because loaded PE section names and spans are not
+equivalent to module image bounds or virtual-memory regions. The tool resolves
+one exact loaded module, revalidates its base/size/count, owns and releases the
+SDK section list on the serialized executor, rejects more than 4,096 records,
+validates every fixed UTF-8 name and in-module span, pages at 256, and binds the
+module, literal name filter, and debugger generation into its cursor. It reports
+only native index, nullable name, structured start, size, and exclusive end; the
+SDK supplies no characteristics or raw-file fields, so none are inferred.
+
+Rust passes 52 unit/contract tests and seven supervised-shutdown tests; both
+native architectures pass all 12 tests. Fresh isolated x64 instance
+`dcd0918b-c707-494f-98c2-dedd1c3ed270` returned 7 fixture sections, while x32
+instance `e411c07b-7a74-4f4b-95ae-c669adbca9d1` returned 6. Both followed a
+one-item cursor, rejected reuse with a changed `.text` filter, preserved the
+paused generation, and proved that the relocated fixture entry and exported
+analysis target were inside the SDK-reported `.text` span. Both then completed
+the complete existing event/analysis/mutation workflow and clean shutdown.

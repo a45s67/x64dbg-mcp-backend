@@ -373,7 +373,7 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             optional_query(object)?;
             discovery_page(object)
         }
-        "imports.list" | "exports.list" => {
+        "imports.list" | "exports.list" | "sections.list" => {
             exact_keys(object, &["module"], &["query", "limit", "cursor"])?;
             validate_module_name(object, "module")?;
             optional_query_with_limit(object, 128)?;
@@ -1201,6 +1201,11 @@ fn build_catalog() -> Vec<Value> {
             linkage_schema(),
         ),
         read_tool(
+            "sections.list",
+            "List bounded named section spans from one loaded module without inferring characteristics or raw-file metadata.",
+            linkage_schema(),
+        ),
+        read_tool(
             "strings.search",
             "Incrementally scan at most 1 MiB of one loaded module for bounded string candidates. Queried results default to compact UTF-8-safe match context. Results are known-only and do not trigger analysis.",
             object(
@@ -1505,7 +1510,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 44);
+        assert_eq!(catalog().len(), 45);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -1797,6 +1802,13 @@ mod tests {
             validate_arguments(
                 "imports.list",
                 &json!({"module":"fixture.exe","query":"CreateFile","limit":1})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "sections.list",
+                &json!({"module":"fixture.exe","query":".text","limit":1})
             )
             .is_ok()
         );

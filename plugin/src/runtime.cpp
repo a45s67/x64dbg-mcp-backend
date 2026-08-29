@@ -210,7 +210,8 @@ bool IsPageMethod(const std::string_view method) {
 bool IsDiscoveryMethod(const std::string_view method) {
     return method == "symbols.search" || method == "functions.list" ||
            method == "strings.search" || method == "references.to" ||
-           method == "imports.list" || method == "exports.list";
+           method == "imports.list" || method == "exports.list" ||
+           method == "sections.list";
 }
 
 std::uint64_t DiscoveryFingerprint(const std::string_view method,
@@ -864,7 +865,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         }
         if (queryValue != nullptr) {
             const std::size_t maxQueryBytes =
-                (methodValue == "imports.list" || methodValue == "exports.list") ? 128U : 256U;
+                (methodValue == "imports.list" || methodValue == "exports.list" ||
+                 methodValue == "sections.list") ? 128U : 256U;
             if (!json_is_string(queryValue) || json_string_length(queryValue) == 0U ||
                 json_string_length(queryValue) > maxQueryBytes) return std::nullopt;
             const std::string_view text(json_string_value(queryValue),
@@ -3752,7 +3754,8 @@ void Runtime::Worker() noexcept {
                 }
                 if (parsed->method == "symbols.search" ||
                     parsed->method == "functions.list" ||
-                    parsed->method == "imports.list" || parsed->method == "exports.list") {
+                    parsed->method == "imports.list" || parsed->method == "exports.list" ||
+                    parsed->method == "sections.list") {
                     const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
                     if (!snapshot || !DbgIsDebugging()) {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
@@ -3772,6 +3775,126 @@ void Runtime::Worker() noexcept {
                         return ErrorResponse(*parsed, "INVALID_ARGUMENT",
                                              "module is missing or ambiguous", false, false);
                     }
+                    const auto fixedString = [](const char* value,
+                                                const std::size_t capacity)
+                        -> std::optional<std::string_view> {
+                        const std::size_t length = strnlen_s(value, capacity);
+                        if (length == capacity) return std::nullopt;
+                        const std::string_view text(value, length);
+                        return IsValidUtf8(text) ? std::optional<std::string_view>(text)
+                                                 : std::nullopt;
+                    };
+                    if (parsed->method == "sections.list") {
+                        Script::Module::ModuleInfo nativeModule{};
+                        if (!Script::Module::InfoFromAddr(module->base, &nativeModule) ||
+                            nativeModule.base != module->base || nativeModule.size != module->size) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "module changed during section read", true,
+                                                 false);
+                        }
+                        if (nativeModule.sectionCount < 0 || nativeModule.sectionCount > 4096 ||
+                            module->size == 0U ||
+                            module->base > (std::numeric_limits<duint>::max)() - module->size) {
+                            return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                                 "module section metadata exceeds native bounds",
+                                                 false, false);
+                        }
+                        ListInfo list{};
+                        if (!Script::Module::SectionListFromAddr(module->base, &list)) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "module sections are unavailable", true, false);
+                        }
+                        struct SectionGuard {
+                            void* p;
+                            ~SectionGuard() { if (p) BridgeFree(p); }
+                        } guard{list.data};
+                        if (list.count < 0 || list.count > 4096 ||
+                            list.count != nativeModule.sectionCount ||
+                            (list.count > 0 && list.data == nullptr) ||
+                            list.size != static_cast<std::size_t>(list.count) *
+                                             sizeof(Script::Module::ModuleSectionInfo)) {
+                            return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                                 "module section list exceeds native bounds",
+                                                 false, false);
+                        }
+                        const auto* values =
+                            static_cast<const Script::Module::ModuleSectionInfo*>(list.data);
+                        const std::size_t count = static_cast<std::size_t>(list.count);
+                        if (parsed->cursorIndex > count) {
+                            return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                                 "cursor is invalid", false, false);
+                        }
+                        std::size_t matched = 0U;
+                        for (std::size_t index = 0U; index < count; ++index) {
+                            if ((index & 0xffU) == 0U &&
+                                std::chrono::steady_clock::now() >= requestDeadline) {
+                                return ErrorResponse(*parsed, "TIMEOUT",
+                                                     "section filtering exceeded its deadline",
+                                                     true, false);
+                            }
+                            const auto& section = values[index];
+                            const auto name = fixedString(section.name, sizeof(section.name));
+                            if (!name || section.addr < module->base) {
+                                return ErrorResponse(*parsed, "INTERNAL",
+                                                     "module section record is invalid", false,
+                                                     false);
+                            }
+                            const duint offset = section.addr - module->base;
+                            if (offset >= module->size || section.size > module->size - offset) {
+                                return ErrorResponse(*parsed, "INTERNAL",
+                                                     "module section range is invalid", false,
+                                                     false);
+                            }
+                            if (parsed->query.empty() ||
+                                Utf8OrdinalContainsIgnoreCase(*name, parsed->query)) {
+                                ++matched;
+                            }
+                        }
+                        std::string items = "[";
+                        std::size_t index = parsed->cursorIndex;
+                        std::size_t emitted = 0U;
+                        for (; index < count && emitted < parsed->pageLimit; ++index) {
+                            const auto& section = values[index];
+                            const auto name = fixedString(section.name, sizeof(section.name));
+                            if (!name) {
+                                return ErrorResponse(*parsed, "INTERNAL",
+                                                     "module section text is invalid", false,
+                                                     false);
+                            }
+                            if (!parsed->query.empty() &&
+                                !Utf8OrdinalContainsIgnoreCase(*name, parsed->query)) {
+                                continue;
+                            }
+                            if (emitted++ != 0U) items.push_back(',');
+                            items += "{\"index\":" + std::to_string(index) +
+                                     ",\"name\":" +
+                                     (name->empty() ? "null" : JsonString(*name)) +
+                                     ",\"start\":" +
+                                     LocationJson(LocationFromModules(section.addr, *modules),
+                                                  *snapshot) +
+                                     ",\"size\":" + JsonString(HexValue(section.size)) +
+                                     ",\"end_exclusive\":" +
+                                     JsonString(HexValue(section.addr + section.size)) + "}";
+                        }
+                        items += "]";
+                        const std::string next =
+                            index < count ? JsonString(DiscoveryCursor(*parsed, *snapshot, index))
+                                          : "null";
+                        if (!PausedSnapshotCurrent(*snapshot)) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "debugger changed during section read", true,
+                                                 false);
+                        }
+                        return "{\"request_id\":" + JsonString(parsed->requestId) +
+                               ",\"state_generation\":" + std::to_string(*snapshot) +
+                               ",\"status\":\"ok\",\"result\":{\"module\":" +
+                               JsonString(module->name) + ",\"native_count\":" +
+                               std::to_string(count) + ",\"matched_count\":" +
+                               std::to_string(matched) + ",\"items\":" + items +
+                               ",\"next_cursor\":" + next +
+                               ",\"completeness\":\"loaded_image_sections\",\"state_generation\":" +
+                               std::to_string(*snapshot) + "}}";
+                    }
                     if (parsed->method == "imports.list" ||
                         parsed->method == "exports.list") {
                         Script::Module::ModuleInfo nativeModule{};
@@ -3781,15 +3904,6 @@ void Runtime::Worker() noexcept {
                                                  "module changed during linkage read", true,
                                                  false);
                         }
-                        const auto fixedString = [](const char* value,
-                                                    const std::size_t capacity)
-                            -> std::optional<std::string_view> {
-                            const std::size_t length = strnlen_s(value, capacity);
-                            if (length == capacity) return std::nullopt;
-                            const std::string_view text(value, length);
-                            return IsValidUtf8(text) ? std::optional<std::string_view>(text)
-                                                     : std::nullopt;
-                        };
                         if (parsed->method == "imports.list") {
                             ListInfo list{};
                             if (!Script::Module::GetImports(&nativeModule, &list)) {

@@ -288,6 +288,47 @@ try {
         $actualModuleNames = @($modules.items | ForEach-Object { $_.name }) -join ', '
         throw "The launched fixture '$fixtureName' was not present in modules.list; actual: $actualModuleNames"
     }
+    $moduleBase = [Convert]::ToUInt64($fixtureModule.base.Substring(2), 16)
+    $moduleEntry = [Convert]::ToUInt64($fixtureModule.entry.Substring(2), 16)
+    $sectionPageOne = Invoke-Tool 'sections.list' @{
+        module = $fixtureModule.name; limit = 1
+    } 217
+    if ($sectionPageOne.native_count -lt 2 -or
+        $sectionPageOne.matched_count -ne $sectionPageOne.native_count -or
+        @($sectionPageOne.items).Count -ne 1 -or !$sectionPageOne.next_cursor -or
+        $sectionPageOne.state_generation -ne $state.state_generation) {
+        throw 'Bounded loaded-section pagination did not return one generation-consistent item.'
+    }
+    $sectionPageTwo = Invoke-Tool 'sections.list' @{
+        module = $fixtureModule.name; limit = 1; cursor = $sectionPageOne.next_cursor
+    } 218
+    if (@($sectionPageTwo.items).Count -ne 1 -or
+        $sectionPageTwo.native_count -ne $sectionPageOne.native_count) {
+        throw 'Loaded-section cursor did not preserve native list shape.'
+    }
+    $sectionCursorMismatch = Invoke-Mcp 'tools/call' @{
+        name = 'sections.list'; arguments = @{
+            module = $fixtureModule.name; query = '.text'; limit = 1
+            cursor = $sectionPageOne.next_cursor
+        }
+    } 219
+    if (!$sectionCursorMismatch.isError -or
+        $sectionCursorMismatch.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Loaded-section cursor was not bound to its literal filter.'
+    }
+    $textSections = Invoke-Tool 'sections.list' @{
+        module = $fixtureModule.name; query = '.text'; limit = 16
+    } 220
+    $textSection = @($textSections.items | Where-Object { $_.name -ieq '.text' })[0]
+    if (!$textSection -or $textSections.completeness -ne 'loaded_image_sections' -or
+        $textSection.start.state_generation -ne $state.state_generation) {
+        throw 'Loaded fixture .text metadata was unavailable or generation-inconsistent.'
+    }
+    $textStart = [Convert]::ToUInt64($textSection.start.address.Substring(2), 16)
+    $textEnd = [Convert]::ToUInt64($textSection.end_exclusive.Substring(2), 16)
+    if ($textEnd -le $textStart -or $moduleEntry -lt $textStart -or $moduleEntry -ge $textEnd) {
+        throw 'The loaded .text section did not contain the fixture entry point.'
+    }
     $importPageOne = Invoke-Tool 'imports.list' @{
         module = $fixtureModule.name; limit = 1
     } 206
@@ -343,8 +384,6 @@ try {
     if (!$forwardedExport) {
         throw 'Forwarded export metadata was not preserved by exports.list.'
     }
-    $moduleBase = [Convert]::ToUInt64($fixtureModule.base.Substring(2), 16)
-    $moduleEntry = [Convert]::ToUInt64($fixtureModule.entry.Substring(2), 16)
     $entryRva = '0x{0:x}' -f ($moduleEntry - $moduleBase)
     $moduleEntryRef = @{
         module = $fixtureModule.name.ToUpperInvariant()
@@ -540,6 +579,11 @@ try {
     if (!$analysisSymbol -or !$analysisSymbol.location.rva -or
         !$markerSymbol -or !$markerSymbol.location.rva) {
         throw 'Fixture analysis and marker exports were not available as structured symbols.'
+    }
+    $analysisRuntimeAddress = [Convert]::ToUInt64(
+        $analysisSymbol.location.address.Substring(2), 16)
+    if ($analysisRuntimeAddress -lt $textStart -or $analysisRuntimeAddress -ge $textEnd) {
+        throw 'The exported fixture analysis target was outside loaded .text metadata.'
     }
     $resolvedSymbolByName = Invoke-Tool 'symbols.resolve' @{
         module = $fixtureModule.name.ToUpperInvariant(); name = $analysisSymbol.name
@@ -1168,6 +1212,11 @@ try {
         sleep_import_resolution = $sleepImport.resolution
         fixture_exports = $fixtureExports.matched_count
         forwarded_export = $forwardedExport.forward_name
+        sections = $sectionPageOne.native_count
+        section_pagination_verified = $true
+        section_cursor_filter_bound = $true
+        text_section = $textSection.start.address
+        analysis_target_in_text = $true
         event_history_initially_empty = $true
         startup_event_first_type = $startupEventPageOne.items[0].type
         startup_event_continuation_count = @($startupEventPageTwo.items).Count

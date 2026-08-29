@@ -305,11 +305,13 @@ Evaluate, in order of demonstrated workflow value:
 Do not add a tool when existing bounded tools already return the same information
 with comparable precision.
 
-Progress: ADR 0029 admits `imports.list` and `exports.list`; ADR 0030 admits
-`events.list`. All three are implemented and isolated x32/x64-qualified. Event
-history has a directly tested 256-record overwrite boundary plus real callback,
-filter, continuation, and stop visibility. Section-metadata evaluation remains
-before this stage can close or ship.
+Completed for 0.11.0. ADR 0029 admits `imports.list` and `exports.list`; ADR 0030
+admits `events.list`; ADR 0031 admits `sections.list`. All four are implemented
+and isolated x32/x64-qualified. Event history has a directly tested 256-record
+overwrite boundary plus real callback, filter, continuation, and stop visibility.
+Loaded sections preserve SDK names and exact runtime spans without inventing
+characteristics or raw-file fields. No other read-only candidate currently adds
+demonstrated nonduplicate value, so further catalog growth returns to evaluation.
 
 ### Stage 5: controlled mutation candidates
 

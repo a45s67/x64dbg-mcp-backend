@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.14.0"
-  minimum-backend-version: "0.14.0"
+  version: "0.15.0"
+  minimum-backend-version: "0.15.0"
   mcp-protocol: "2025-06-18"
 ---
 
@@ -32,6 +32,14 @@ Use `registers.write` for one full-width core register at a time. Preserve the o
 when the workflow requires restoration, use a fresh operation ID only for that distinct restore,
 and verify the returned read-back. `debugger.step_out` stops at the current frame's return
 instruction; inspect `completed` and the returned pause reason before continuing.
+
+For cross-thread inspection, copy an exact `thread_id` from `threads.list` into
+`registers.read` or `debugger.snapshot`. These are read-only context captures:
+they do not switch x64dbg's selected thread. The snapshot's register map,
+instruction pointer, and disassembly describe the requested thread, while
+`active_thread_id` continues to identify the selected debugger thread. Compare
+their state generations and retry only a retryable `BUSY` read after observing
+the current pause again.
 
 Use `debugger.run_to_address` instead of composing a temporary breakpoint,
 resume, wait, and cleanup yourself. Supply a stable module/RVA when possible and

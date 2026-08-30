@@ -102,6 +102,14 @@ it is not part of the default compact snapshot.
 All related results should retain the same `state_generation`. If a call returns `BUSY`, discard
 the partial logical snapshot and collect a new one after confirming the current pause.
 
+For a multithreaded pause, call `threads.list`, retain its current TID, and pass
+one exact listed non-current `thread_id` to `registers.read` or
+`debugger.snapshot`. Require the result's `thread_id` to match and `current` to
+be false. In a compact snapshot, `active_thread_id` remains the selected TID,
+but registers, instruction pointer, and disassembly belong to the requested
+thread. Re-list threads if the operation reports `BUSY`; never switch or
+suspend a thread merely to inspect this bounded context.
+
 ## Discovery
 
 Use module-scoped literal filters and modest page limits:

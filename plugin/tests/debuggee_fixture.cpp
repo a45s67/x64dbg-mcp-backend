@@ -10,6 +10,7 @@
 
 extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_marker{0x1234abcdU};
 extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_exception_trigger{0U};
+extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_worker_ready{0U};
 extern "C" __declspec(dllexport) char mcp_fixture_discovery_ascii[] =
     "MCP_DISCOVERY_ASCII_SENTINEL";
 extern "C" __declspec(dllexport) wchar_t mcp_fixture_discovery_utf16[] =
@@ -104,10 +105,19 @@ bool WriteObservedArguments() {
     return success;
 }
 
+DWORD WINAPI FixtureWorker(void*) {
+    mcp_fixture_worker_ready.store(1U);
+    while (mcp_fixture_marker.load() != 0U) Sleep(10U);
+    return 0U;
+}
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (!WriteObservedArguments()) return 2;
+    const HANDLE worker = CreateThread(nullptr, 0U, FixtureWorker, nullptr, 0U, nullptr);
+    if (worker == nullptr) return 3;
+    CloseHandle(worker);
     mcp_fixture_marker.store(mcp_fixture_analysis_target(mcp_fixture_marker.load()));
     std::uint32_t value = mcp_fixture_marker.load();
     while (value != 0U) {

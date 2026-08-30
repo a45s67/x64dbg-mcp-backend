@@ -1,6 +1,6 @@
 # ADR 0036: Thread-scoped context reads without global selection
 
-Status: Accepted before implementation on 2026-08-31.
+Status: Implemented and qualified in 0.15.0 on 2026-08-31.
 
 ## Context
 
@@ -76,3 +76,12 @@ Common multithreaded inspection remains read-only and composable. A future
 explicit thread addressing; this ADR does not admit it. Thread suspend/resume
 also remains deferred because reading a context proves neither suspend ownership
 nor safe recovery.
+
+## Qualification result
+
+The deterministic fixture now creates a worker thread. Fresh isolated x32dbg
+and x64dbg runs read that non-current worker through both tools, match its CIP
+to the same `threads.list` record, compare omitted and explicit selected-thread
+registers, prove the selected TID is unchanged, reject a missing TID without
+losing the connection, and close every owned sidecar/listener. The installed
+Flare-On checksum workflow also reads and disassembles its exact paused thread.

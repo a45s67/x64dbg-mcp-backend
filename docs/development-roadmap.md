@@ -446,8 +446,14 @@ ADR 0036 admits optional exact `thread_id` inputs on `registers.read` and
 `debugger.snapshot`. The implementation must use the debugger-owned handle from
 one bounded thread-list snapshot, capture only Windows control/integer context,
 cross-check `ThreadCip`, preserve the selected-thread identity separately, and
-perform no switch or suspend mutation. Implementation and qualification remain
-in progress.
+perform no switch or suspend mutation.
+
+Completed in 0.15.0. Native x32/x64 tests cover Windows context conversion;
+server tests enforce canonical nonzero TIDs and unchanged bounded defaults.
+Fresh isolated dual-architecture workflows read a deterministic non-current
+worker, match its CIP, preserve selected-thread identity, reject a missing TID,
+and prove sidecar shutdown. The installed Flare-On checksum workflow qualifies
+an exact paused-thread register and compact snapshot read.
 
 ### Stage 9: typed DLL launch evaluation
 

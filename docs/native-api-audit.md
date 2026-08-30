@@ -52,9 +52,9 @@ not mutated anything.
 | Tool | Native API | Required state | Completion and ownership |
 |---|---|---|---|
 | `debugger.state` | `DbgGetRegDumpEx` | paused for CIP; any otherwise | atomic callback snapshot; copied register dump |
-| `debugger.snapshot` | `DbgGetRegDumpEx`, `DbgGetThreadId`, `Script::Module::GetList`, `DbgDisasmAt` | paused | one generation recheck; max 16 registers and 64 instructions; module list released with `BridgeFree` |
+| `debugger.snapshot` | `DbgGetRegDumpEx` or bounded `DbgGetThreadList` plus Windows `GetThreadContext`, `DbgGetThreadId`, `Script::Module::GetList`, `DbgDisasmAt` | paused | selected or one exact TID; only integer/control context; debugger-owned handle never closed; thread list and module list released with `BridgeFree`; CIP/list and selected-thread invariants; max 16 registers and 64 instructions |
 | `debugger.wait_for_pause` | callback snapshot, `DbgGetRegDumpEx`, `DbgGetThreadId` | active debuggee; returns paused | condition-variable wait, max 9 s; copied latest reason; generation rechecked after register capture |
-| `registers.read` | `DbgGetRegDumpEx` | paused | copied fixed-size dump; register-name allowlist |
+| `registers.read` | `DbgGetRegDumpEx` or bounded `DbgGetThreadList` plus Windows `GetThreadContext`, `DbgGetThreadId` | paused | selected or one exact TID; only integer/control context; debugger-owned handle never closed; thread list released with `BridgeFree`; CIP/list and selected-thread invariants; register-name allowlist |
 | `address.resolve` | `Script::Module::GetList` | paused | unique module/RVA or absolute lookup; `BridgeFree(list.data)` |
 | `memory.read` | `DbgMemRead` | paused | caller-owned buffer, max 64 KiB |
 | `memory.search` | `DbgMemRead`, `Script::Module::GetList` | paused | exact module up to 128 MiB or explicit range up to 16 MiB; at most 1 MiB candidate positions plus 63 overlap bytes/request; page-aligned reads, 64-byte pattern, 256 matches, deadline/generation checks, unreadable-byte accounting, and filter-bound cursor; module list released with `BridgeFree` |

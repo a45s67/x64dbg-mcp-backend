@@ -172,12 +172,19 @@ try {
         throw 'Main pause snapshot is missing generation-consistent breakpoint metadata.'
     }
     $registerSnapshot = Invoke-Tool 'registers.read' @{ names = @('rip', 'rsp') } 36
+    $explicitThreadRegisters = Invoke-Tool 'registers.read' @{
+        names = @('rip', 'rsp'); thread_id = $mainPause.active_thread_id
+    } 137
     $callstackSnapshot = Invoke-Tool 'callstack.read' @{
         thread_id = $mainPause.active_thread_id; limit = 32
     } 35
     $memorySnapshot = Invoke-Tool 'memory.read' @{ address = $moduleRef; length = 16 } 37
     $disassemblySnapshot = Invoke-Tool 'disassembly.read' @{ address = $moduleRef; count = 4 } 38
     $compactSnapshot = Invoke-Tool 'debugger.snapshot' @{} 39
+    $explicitThreadSnapshot = Invoke-Tool 'debugger.snapshot' @{
+        registers = @('rip', 'rsp'); disassembly_count = 2
+        thread_id = $mainPause.active_thread_id
+    } 138
     $filteredMap = Invoke-Tool 'memory.map' @{
         module = [System.IO.Path]::GetFileName($sample).ToUpperInvariant()
         committed_only = $true; executable_only = $true; compact = $true; limit = 32
@@ -186,6 +193,15 @@ try {
         $memorySnapshot.state_generation -ne $mainPause.state_generation -or
         $disassemblySnapshot.state_generation -ne $mainPause.state_generation -or
         $compactSnapshot.state_generation -ne $mainPause.state_generation -or
+        $explicitThreadRegisters.state_generation -ne $mainPause.state_generation -or
+        $explicitThreadSnapshot.state_generation -ne $mainPause.state_generation -or
+        !$explicitThreadRegisters.current -or !$explicitThreadSnapshot.current -or
+        $explicitThreadRegisters.thread_id -ne $mainPause.active_thread_id -or
+        $explicitThreadSnapshot.thread_id -ne $mainPause.active_thread_id -or
+        $explicitThreadSnapshot.active_thread_id -ne $mainPause.active_thread_id -or
+        $explicitThreadRegisters.registers.rip -ne $resolved.address -or
+        $explicitThreadSnapshot.instruction_pointer.address -ne $resolved.address -or
+        @($explicitThreadSnapshot.disassembly).Count -ne 2 -or
         $compactSnapshot.instruction_pointer.address -ne $resolved.address -or
         @($compactSnapshot.registers.PSObject.Properties).Count -ne 4 -or
         @($compactSnapshot.disassembly).Count -ne 8 -or
@@ -553,6 +569,8 @@ try {
         disassembly_generation = $disassemblySnapshot.state_generation
         snapshot_generations_equal = $true
         compact_snapshot_instructions = @($compactSnapshot.disassembly).Count
+        explicit_thread_context_read = $explicitThreadRegisters.thread_id
+        explicit_thread_snapshot_instructions = @($explicitThreadSnapshot.disassembly).Count
         filtered_executable_regions = @($filteredMap.items).Count
         main_symbols = @($mainSymbols.items).Count
         main_functions = @($mainFunctions.items).Count

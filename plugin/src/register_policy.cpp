@@ -54,4 +54,39 @@ bool IsReturnInstruction(const std::string_view instruction) noexcept {
     return normalized == "ret" || normalized == "retn" || normalized == "retf";
 }
 
+REGISTERCONTEXT_AVX512 CoreRegisterContext(const CONTEXT& context) noexcept {
+    REGISTERCONTEXT_AVX512 result{};
+#ifdef _WIN64
+    result.cax = context.Rax;
+    result.ccx = context.Rcx;
+    result.cdx = context.Rdx;
+    result.cbx = context.Rbx;
+    result.csp = context.Rsp;
+    result.cbp = context.Rbp;
+    result.csi = context.Rsi;
+    result.cdi = context.Rdi;
+    result.r8 = context.R8;
+    result.r9 = context.R9;
+    result.r10 = context.R10;
+    result.r11 = context.R11;
+    result.r12 = context.R12;
+    result.r13 = context.R13;
+    result.r14 = context.R14;
+    result.r15 = context.R15;
+    result.cip = context.Rip;
+#else
+    result.cax = context.Eax;
+    result.ccx = context.Ecx;
+    result.cdx = context.Edx;
+    result.cbx = context.Ebx;
+    result.csp = context.Esp;
+    result.cbp = context.Ebp;
+    result.csi = context.Esi;
+    result.cdi = context.Edi;
+    result.cip = context.Eip;
+#endif
+    result.eflags = context.EFlags;
+    return result;
+}
+
 } // namespace mcp

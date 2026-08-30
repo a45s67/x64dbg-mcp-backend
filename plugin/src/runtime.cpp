@@ -579,7 +579,9 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     } else if (methodValue == "debugger.snapshot") {
         json_t* registers = json_object_get(payload, "registers");
         json_t* count = json_object_get(payload, "disassembly_count");
-        const std::size_t expectedFields = (registers ? 1U : 0U) + (count ? 1U : 0U);
+        json_t* thread = json_object_get(payload, "thread_id");
+        const std::size_t expectedFields = (registers ? 1U : 0U) + (count ? 1U : 0U) +
+                                           (thread ? 1U : 0U);
         if (json_object_size(payload) != expectedFields) return std::nullopt;
         instructionCount = 8U;
         if (registers != nullptr) {
@@ -599,6 +601,12 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             if (!json_is_integer(count) || json_integer_value(count) < 0 ||
                 json_integer_value(count) > 64) return std::nullopt;
             instructionCount = static_cast<std::size_t>(json_integer_value(count));
+        }
+        if (thread != nullptr) {
+            std::uint64_t parsedThread = 0U;
+            if (!ParseCanonicalHex64(thread, parsedThread) || parsedThread == 0U ||
+                parsedThread > 0xffffffffULL) return std::nullopt;
+            targetThreadId = static_cast<std::uint32_t>(parsedThread);
         }
     } else if (methodValue == "debugger.wait_for_pause") {
         json_t* after = json_object_get(payload, "after_generation");
@@ -731,10 +739,10 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         }
         lengthValue = static_cast<std::size_t>(json_integer_value(length));
     } else if (methodValue == "registers.read") {
-        if (json_object_size(payload) > 1U) {
-            return std::nullopt;
-        }
         json_t* names = json_object_get(payload, "names");
+        json_t* thread = json_object_get(payload, "thread_id");
+        const std::size_t expectedFields = (names ? 1U : 0U) + (thread ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields) return std::nullopt;
         if (names != nullptr) {
             if (!json_is_array(names) || json_array_size(names) > 64U) {
                 return std::nullopt;
@@ -752,6 +760,12 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                 }
                 registerNames.push_back(std::move(value));
             }
+        }
+        if (thread != nullptr) {
+            std::uint64_t parsedThread = 0U;
+            if (!ParseCanonicalHex64(thread, parsedThread) || parsedThread == 0U ||
+                parsedThread > 0xffffffffULL) return std::nullopt;
+            targetThreadId = static_cast<std::uint32_t>(parsedThread);
         }
     } else if (methodValue == "registers.write") {
         json_t* name = json_object_get(payload, "name");
@@ -886,7 +900,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         pageLimit = 32U;
         if (thread != nullptr) {
             std::uint64_t parsedThread = 0U;
-            if (!ParseCanonicalHex64(thread, parsedThread) || parsedThread > 0xffffffffULL) {
+            if (!ParseCanonicalHex64(thread, parsedThread) || parsedThread == 0U ||
+                parsedThread > 0xffffffffULL) {
                 return std::nullopt;
             }
             targetThreadId = static_cast<std::uint32_t>(parsedThread);
@@ -1728,6 +1743,95 @@ std::optional<duint> RegisterValue(const REGISTERCONTEXT_AVX512& context,
 #endif
     return std::nullopt;
 }
+
+enum class ThreadContextStatus : std::uint8_t {
+    ok,
+    invalidList,
+    missing,
+    unavailable,
+    changed
+};
+
+struct CapturedThreadContext {
+    REGISTERCONTEXT_AVX512 registers{};
+    std::uint32_t threadId{0U};
+    std::uint32_t activeThreadId{0U};
+    bool current{false};
+};
+
+struct ThreadContextCapture {
+    ThreadContextStatus status{ThreadContextStatus::unavailable};
+    CapturedThreadContext value;
+};
+
+ThreadContextCapture CaptureThreadContext(
+    const std::optional<std::uint32_t> requestedThreadId) {
+    const std::uint32_t activeBefore = DbgGetThreadId();
+    const std::uint32_t requested = requestedThreadId.value_or(activeBefore);
+    if (activeBefore == 0U || requested == 0U) {
+        return {ThreadContextStatus::missing, {}};
+    }
+    if (!requestedThreadId) {
+        REGDUMP_AVX512 dump{};
+        if (!DbgGetRegDumpEx(&dump, sizeof(dump))) {
+            return {ThreadContextStatus::unavailable, {}};
+        }
+        if (DbgGetThreadId() != activeBefore) {
+            return {ThreadContextStatus::changed, {}};
+        }
+        return {ThreadContextStatus::ok,
+                {dump.regcontext, requested, activeBefore, true}};
+    }
+
+    THREADLIST list{};
+    DbgGetThreadList(&list);
+    struct ThreadListGuard {
+        THREADALLINFO* value;
+        ~ThreadListGuard() { if (value != nullptr) BridgeFree(value); }
+    } guard{list.list};
+    if (list.count < 0 || list.count > 65536 ||
+        (list.count > 0 && list.list == nullptr)) {
+        return {ThreadContextStatus::invalidList, {}};
+    }
+    const THREADALLINFO* match = nullptr;
+    int matchIndex = -1;
+    for (int index = 0; index < list.count; ++index) {
+        if (list.list[index].BasicInfo.ThreadId == requested) {
+            if (match != nullptr) return {ThreadContextStatus::invalidList, {}};
+            match = &list.list[index];
+            matchIndex = index;
+        }
+    }
+    if (match == nullptr || match->BasicInfo.Handle == nullptr ||
+        match->BasicInfo.Handle == INVALID_HANDLE_VALUE) {
+        return {ThreadContextStatus::missing, {}};
+    }
+    const bool current = requested == activeBefore;
+    if ((matchIndex == list.CurrentThread) != current) {
+        return {ThreadContextStatus::changed, {}};
+    }
+
+    REGISTERCONTEXT_AVX512 registers{};
+    if (current) {
+        REGDUMP_AVX512 dump{};
+        if (!DbgGetRegDumpEx(&dump, sizeof(dump))) {
+            return {ThreadContextStatus::unavailable, {}};
+        }
+        registers = dump.regcontext;
+    } else {
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if (GetThreadContext(match->BasicInfo.Handle, &context) == FALSE) {
+            return {ThreadContextStatus::unavailable, {}};
+        }
+        registers = CoreRegisterContext(context);
+    }
+    if (registers.cip != match->ThreadCip || DbgGetThreadId() != activeBefore) {
+        return {ThreadContextStatus::changed, {}};
+    }
+    return {ThreadContextStatus::ok,
+            {registers, requested, activeBefore, current}};
+}
 #endif
 
 std::chrono::steady_clock::time_point SteadyDeadline(const std::uint64_t unixMs) {
@@ -1755,6 +1859,30 @@ std::string ErrorResponse(const Request& request, const std::string_view code,
                           const bool unknown) {
     return ErrorResponseForId(request.requestId, code, message, retryable, unknown);
 }
+
+#ifndef MCP_LIFECYCLE_HARNESS
+std::string ThreadContextErrorResponse(const Request& request,
+                                       const ThreadContextStatus status) {
+    switch (status) {
+    case ThreadContextStatus::invalidList:
+        return ErrorResponse(request, "INTERNAL", "thread snapshot is invalid", false, false);
+    case ThreadContextStatus::missing:
+        return request.targetThreadId
+                   ? ErrorResponse(request, "INVALID_ARGUMENT",
+                                   "thread_id is not present in this debuggee", false, false)
+                   : ErrorResponse(request, "INVALID_DEBUGGER_STATE",
+                                   "no current debugger thread is available", false, false);
+    case ThreadContextStatus::unavailable:
+        return ErrorResponse(request, "ACCESS_DENIED", "thread context is unavailable", false,
+                             false);
+    case ThreadContextStatus::changed:
+        return ErrorResponse(request, "BUSY", "thread selection or context changed during capture",
+                             true, false);
+    case ThreadContextStatus::ok: break;
+    }
+    return ErrorResponse(request, "INTERNAL", "thread context status is invalid", false, false);
+}
+#endif
 
 std::string ErrorResponseWithDetails(const Request& request, const std::string_view code,
                                      const std::string_view message, const bool retryable,
@@ -2230,16 +2358,16 @@ void Runtime::Worker() noexcept {
                         }
                         pause = latestPause_;
                     }
-                    REGDUMP_AVX512 dump{};
-                    if (!DbgGetRegDumpEx(&dump, sizeof(dump))) {
-                        return ErrorResponse(*parsed, "INTERNAL",
-                                             "register snapshot is unavailable", true, false);
+                    const ThreadContextCapture captured =
+                        CaptureThreadContext(parsed->targetThreadId);
+                    if (captured.status != ThreadContextStatus::ok) {
+                        return ThreadContextErrorResponse(*parsed, captured.status);
                     }
                     std::vector<std::string> names = parsed->registerNames;
                     if (names.empty()) names = {"cip", "csp", "cbp", "eflags"};
                     std::string registers = "{";
                     for (std::size_t index = 0; index < names.size(); ++index) {
-                        const auto value = RegisterValue(dump.regcontext, names[index]);
+                        const auto value = RegisterValue(captured.value.registers, names[index]);
                         if (!value) {
                             return ErrorResponse(*parsed, "INVALID_ARGUMENT",
                                                  "unknown register name", false, false);
@@ -2254,7 +2382,7 @@ void Runtime::Worker() noexcept {
                         return ErrorResponse(*parsed, "INTERNAL",
                                              "module snapshot is invalid", true, false);
                     }
-                    const duint instructionPointer = dump.regcontext.cip;
+                    const duint instructionPointer = captured.value.registers.cip;
                     const auto location = LocationFromModules(instructionPointer, *modules);
                     std::string disassembly = "[";
                     duint address = instructionPointer;
@@ -2288,7 +2416,6 @@ void Runtime::Worker() noexcept {
                         address += size;
                     }
                     disassembly += "]";
-                    const std::uint32_t threadId = DbgGetThreadId();
                     if (!PausedSnapshotCurrent(*snapshot)) {
                         return ErrorResponse(*parsed, "BUSY",
                                              "debugger changed during compact snapshot", true,
@@ -2300,7 +2427,11 @@ void Runtime::Worker() noexcept {
                            std::string(",\"state_generation\":") +
                            std::to_string(*snapshot) + ",\"pause_reason\":" +
                            PauseReasonJson(pause) + ",\"active_thread_id\":" +
-                           (threadId == 0U ? "null" : JsonString(HexValue(threadId))) +
+                           JsonString(HexValue(captured.value.activeThreadId)) +
+                           ",\"thread_id\":" +
+                           JsonString(HexValue(captured.value.threadId)) +
+                           ",\"current\":" +
+                           (captured.value.current ? "true" : "false") +
                            ",\"instruction_pointer\":" + LocationJson(location, *snapshot) +
                            ",\"registers\":" + registers +
                            ",\"disassembly\":" + disassembly + "}}";
@@ -4157,10 +4288,10 @@ void Runtime::Worker() noexcept {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
                                              "operation requires a paused debuggee", false, false);
                     }
-                    REGDUMP_AVX512 dump{};
-                    if (!DbgGetRegDumpEx(&dump, sizeof(dump))) {
-                        return ErrorResponse(*parsed, "INTERNAL",
-                                             "register snapshot is unavailable", true, false);
+                    const ThreadContextCapture captured =
+                        CaptureThreadContext(parsed->targetThreadId);
+                    if (captured.status != ThreadContextStatus::ok) {
+                        return ThreadContextErrorResponse(*parsed, captured.status);
                     }
                     std::vector<std::string> names = parsed->registerNames;
                     if (names.empty()) {
@@ -4172,7 +4303,8 @@ void Runtime::Worker() noexcept {
                     }
                     std::string registers = "{";
                     for (std::size_t index = 0; index < names.size(); ++index) {
-                        const std::optional<duint> value = RegisterValue(dump.regcontext, names[index]);
+                        const std::optional<duint> value =
+                            RegisterValue(captured.value.registers, names[index]);
                         if (!value) {
                             return ErrorResponse(*parsed, "INVALID_ARGUMENT",
                                                  "unknown register name", false, false);
@@ -4190,7 +4322,11 @@ void Runtime::Worker() noexcept {
                     }
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
                            ",\"state_generation\":" + std::to_string(*snapshot) +
-                           ",\"status\":\"ok\",\"result\":{\"registers\":" + registers +
+                           ",\"status\":\"ok\",\"result\":{\"thread_id\":" +
+                           JsonString(HexValue(captured.value.threadId)) +
+                           ",\"current\":" +
+                           (captured.value.current ? "true" : "false") +
+                           ",\"registers\":" + registers +
                            ",\"state_generation\":" + std::to_string(*snapshot) + "}}";
                 }
                 if (parsed->method == "strings.search") {

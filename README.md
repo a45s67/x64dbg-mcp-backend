@@ -107,6 +107,10 @@ patch metadata.
 `patches.list` exposes those tracked bytes as verified adjacent ranges with
 snapshot-bound pagination. `callstack.read` uses x64dbg's native unwind for the
 current or one exact thread and labels an empty result inconclusive. Exact
+`registers.read` and `debugger.snapshot` accept an optional exact thread ID and
+capture a non-current thread's bounded integer/control context without changing
+x64dbg's selected thread. The compact snapshot's registers, IP location, and
+disassembly all come from that same requested context.
 `symbols.resolve` and `functions.at` queries avoid scanning pages when the
 caller already knows a name or address; both remain bounded known-only reads.
 `events.list` exposes a callback-derived 256-record history in every debugger

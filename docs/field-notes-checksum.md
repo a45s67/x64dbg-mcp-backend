@@ -1135,3 +1135,24 @@ shutdown checks also passed. The offline-verified archive SHA-256 is
 `de7e8aed6be7839391d1d5f28c51d4094611cbf01c020a0248e76ce2b9596eb8`.
 Both global Codex endpoints remain enabled with static Authorization headers,
 and the managed workflow skill is version 0.14.0.
+
+## 0.15.0 thread-scoped context qualification
+
+ADR 0036 extends `registers.read` and `debugger.snapshot` with an optional exact
+TID while preserving selected-thread defaults. A deterministic fixture worker
+made the non-current path repeatable. Fresh isolated x32dbg and x64dbg runs
+matched that worker's register CIP and compact-snapshot IP to `threads.list`,
+kept the selected TID unchanged, returned `INVALID_ARGUMENT` for an absent TID,
+completed every prior workflow, and closed both owned listeners.
+
+The 0.15.0 package gate passed 52 Rust unit/contract tests, seven supervised
+shutdown tests, 13 native x32 tests, 13 native x64 tests, installer, Codex
+registration, skill, and offline-verifier contracts. Installed checksum.exe
+instance `b86c5801-d9d8-4ee1-94c8-3370accbe100` paused at
+`CHECKSUM.EXE+0xa78a0` (`0x6678a0`, ASLR base `0x5c0000`) and captured the exact
+active thread `0x269c` through both new inputs. The two-instruction explicit
+snapshot used the same generation and IP; the complete prior reversible
+mutation and shutdown workflow also passed. The offline-verified archive
+SHA-256 is
+`9c59a9d539209f2290b1fcde8f575b56d8fc93b037946c8059c7b07f7dfabfed`.
+Both Codex endpoints and the managed skill were then updated to 0.15.0.

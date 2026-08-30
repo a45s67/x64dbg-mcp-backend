@@ -83,7 +83,14 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             Ok(())
         }
         "debugger.snapshot" => {
-            exact_keys(object, &[], &["registers", "disassembly_count"])?;
+            exact_keys(
+                object,
+                &[],
+                &["registers", "disassembly_count", "thread_id"],
+            )?;
+            if object.contains_key("thread_id") {
+                validate_thread_id(object)?;
+            }
             if let Some(registers) = object.get("registers") {
                 let registers = registers
                     .as_array()
@@ -170,7 +177,10 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             integer(object, "process_id", 1, 4_294_967_295)
         }
         "registers.read" => {
-            exact_keys(object, &[], &["names"])?;
+            exact_keys(object, &[], &["names", "thread_id"])?;
+            if object.contains_key("thread_id") {
+                validate_thread_id(object)?;
+            }
             if let Some(names) = object.get("names") {
                 let names = names
                     .as_array()
@@ -843,6 +853,9 @@ fn validate_thread_id(object: &serde_json::Map<String, Value>) -> Result<(), Val
         || !value[2..]
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || u32::from_str_radix(&value[2..], 16)
+            .ok()
+            .is_none_or(|value| value == 0)
     {
         return Err(invalid(
             "thread_id",
@@ -926,7 +939,7 @@ fn build_catalog() -> Vec<Value> {
         ),
         read_tool(
             "debugger.snapshot",
-            "Capture one compact generation-consistent paused snapshot containing selected registers, pause metadata, the instruction-pointer location, and bounded disassembly.",
+            "Capture one compact generation-consistent paused snapshot for one thread, containing selected registers, pause metadata, the instruction-pointer location, and bounded disassembly. Omit thread_id for the selected thread; explicit reads never change thread selection.",
             object(
                 vec![
                     (
@@ -936,6 +949,10 @@ fn build_catalog() -> Vec<Value> {
                     (
                         "disassembly_count",
                         json!({"type":"integer","minimum":0,"maximum":64,"default":8}),
+                    ),
+                    (
+                        "thread_id",
+                        json!({"type":"string","pattern":"^0x[0-9a-f]{1,8}$","minLength":3,"maxLength":10}),
                     ),
                 ],
                 vec![],
@@ -1048,12 +1065,18 @@ fn build_catalog() -> Vec<Value> {
         ),
         read_tool(
             "registers.read",
-            "Read selected registers, or the bounded core register set when names is omitted. Requires a paused debuggee.",
+            "Read one thread's selected registers, or the bounded core register set when names is omitted. Omit thread_id for the selected thread. Requires a paused debuggee and never changes thread selection.",
             object(
-                vec![(
-                    "names",
-                    json!({"type":"array","items":{"type":"string","minLength":1,"maxLength":32},"maxItems":64,"uniqueItems":true}),
-                )],
+                vec![
+                    (
+                        "names",
+                        json!({"type":"array","items":{"type":"string","minLength":1,"maxLength":32},"maxItems":64,"uniqueItems":true}),
+                    ),
+                    (
+                        "thread_id",
+                        json!({"type":"string","pattern":"^0x[0-9a-f]{1,8}$","minLength":3,"maxLength":10}),
+                    ),
+                ],
                 vec![],
             ),
         ),
@@ -1856,12 +1879,15 @@ mod tests {
         assert!(
             validate_arguments(
                 "debugger.snapshot",
-                &json!({"registers":["cip","csp"],"disassembly_count":64})
+                &json!({"registers":["cip","csp"],"disassembly_count":64,"thread_id":"0xffffffff"})
             )
             .is_ok()
         );
         assert!(validate_arguments("debugger.snapshot", &json!({"registers":[]})).is_err());
         assert!(validate_arguments("debugger.snapshot", &json!({"disassembly_count":65})).is_err());
+        assert!(validate_arguments("debugger.snapshot", &json!({"thread_id":"0x0"})).is_err());
+        assert!(validate_arguments("registers.read", &json!({"thread_id":"0x1"})).is_ok());
+        assert!(validate_arguments("registers.read", &json!({"thread_id":"0X1"})).is_err());
         assert!(
             validate_arguments(
                 "debugger.wait_for_pause",
@@ -2345,6 +2371,7 @@ mod tests {
             .is_ok()
         );
         assert!(validate_arguments("callstack.read", &json!({"thread_id":"0X1"})).is_err());
+        assert!(validate_arguments("callstack.read", &json!({"thread_id":"0x0"})).is_err());
         assert!(validate_arguments("callstack.read", &json!({"limit":51})).is_err());
         assert!(
             validate_arguments(

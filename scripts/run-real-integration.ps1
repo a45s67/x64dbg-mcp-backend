@@ -1351,6 +1351,64 @@ try {
         }).Count -ne 0) {
         throw 'Owned run-to timeout retained its entry-point temporary breakpoint.'
     }
+
+    # The fixture creates a deterministic worker after startup. Qualify exact-thread
+    # context reads while preserving x64dbg's selected thread.
+    $threadsBeforeContextRead = Invoke-Tool 'threads.list' @{ limit = 256 } 230
+    $selectedThread = @($threadsBeforeContextRead.items | Where-Object { $_.current })[0]
+    $workerThread = @($threadsBeforeContextRead.items | Where-Object { !$_.current })[0]
+    if (!$selectedThread -or !$workerThread -or !$workerThread.instruction_pointer) {
+        throw 'Fixture did not expose distinct selected and worker threads for context qualification.'
+    }
+    $defaultSelectedRegisters = Invoke-Tool 'registers.read' @{
+        names = @('cip', 'csp', 'cbp', 'eflags')
+    } 231
+    $explicitSelectedRegisters = Invoke-Tool 'registers.read' @{
+        names = @('cip', 'csp', 'cbp', 'eflags'); thread_id = $selectedThread.thread_id
+    } 232
+    $workerRegisters = Invoke-Tool 'registers.read' @{
+        names = @('cip', 'csp', 'cbp', 'eflags'); thread_id = $workerThread.thread_id
+    } 233
+    $workerSnapshot = Invoke-Tool 'debugger.snapshot' @{
+        registers = @('cip', 'csp', 'cbp', 'eflags')
+        disassembly_count = 4
+        thread_id = $workerThread.thread_id
+    } 234
+    $threadsAfterContextRead = Invoke-Tool 'threads.list' @{ limit = 256 } 235
+    $selectedThreadAfter = @($threadsAfterContextRead.items | Where-Object { $_.current })[0]
+    $selectedMapsEqual =
+        ($defaultSelectedRegisters.registers | ConvertTo-Json -Compress) -eq
+        ($explicitSelectedRegisters.registers | ConvertTo-Json -Compress)
+    if (!$defaultSelectedRegisters.current -or !$explicitSelectedRegisters.current -or
+        $defaultSelectedRegisters.thread_id -ne $selectedThread.thread_id -or
+        $explicitSelectedRegisters.thread_id -ne $selectedThread.thread_id -or
+        !$selectedMapsEqual -or $workerRegisters.current -or $workerSnapshot.current -or
+        $workerRegisters.thread_id -ne $workerThread.thread_id -or
+        $workerSnapshot.thread_id -ne $workerThread.thread_id -or
+        $workerRegisters.registers.cip -ne $workerThread.instruction_pointer -or
+        $workerSnapshot.instruction_pointer.address -ne $workerThread.instruction_pointer -or
+        $workerSnapshot.active_thread_id -ne $selectedThread.thread_id -or
+        @($workerSnapshot.disassembly).Count -ne 4 -or
+        !$selectedThreadAfter -or $selectedThreadAfter.thread_id -ne $selectedThread.thread_id) {
+        throw 'Exact-thread register/snapshot reads were inconsistent or changed thread selection.'
+    }
+    [uint64]$missingThreadCandidate = [Convert]::ToUInt64('ffffffff', 16)
+    $knownThreadIds = @($threadsAfterContextRead.items | ForEach-Object { $_.thread_id })
+    while (('0x{0:x}' -f $missingThreadCandidate) -in $knownThreadIds) {
+        $missingThreadCandidate--
+    }
+    $missingThreadId = '0x{0:x}' -f $missingThreadCandidate
+    $missingThreadRead = Invoke-Mcp 'tools/call' @{
+        name = 'registers.read'; arguments = @{ thread_id = $missingThreadId }
+    } 236
+    if (!$missingThreadRead.isError -or
+        $missingThreadRead.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Missing exact thread was not rejected with INVALID_ARGUMENT.'
+    }
+    $afterMissingThreadRead = Invoke-Tool 'debugger.state' @{} 237
+    if ($afterMissingThreadRead.plugin_state -ne 'ready') {
+        throw 'A missing exact-thread read damaged the plugin connection.'
+    }
     $resume = $null
     $startupPause = $null
     $stableRunning = $false
@@ -1586,6 +1644,11 @@ try {
         exception_breakpoint_replay_equal = $true
         exception_breakpoint_foreign_remove_rejected = $true
         exception_breakpoint_removed = !$exceptionRemove.present
+        selected_thread_context_equal = $selectedMapsEqual
+        noncurrent_thread_context_read = $workerThread.thread_id
+        noncurrent_snapshot_instructions = @($workerSnapshot.disassembly).Count
+        thread_selection_preserved = $selectedThreadAfter.thread_id -eq $selectedThread.thread_id
+        missing_thread_rejected = $true
         run_to_interruption_preserved_caller_breakpoint = $runToInterrupterSet.present
         run_to_target = $runToCompleted.instruction_pointer
         run_to_replay_equal = $true

@@ -442,6 +442,13 @@ up only suspend state created by the same backend operation. A global debugger
 pause is not equivalent: after continue, an explicitly suspended thread remains
 stopped while eligible peer threads run.
 
+ADR 0036 admits optional exact `thread_id` inputs on `registers.read` and
+`debugger.snapshot`. The implementation must use the debugger-owned handle from
+one bounded thread-list snapshot, capture only Windows control/integer context,
+cross-check `ThreadCip`, preserve the selected-thread identity separately, and
+perform no switch or suspend mutation. Implementation and qualification remain
+in progress.
+
 ### Stage 9: typed DLL launch evaluation
 
 Evaluate an architecture-matched `debuggee.launch_dll` contract using the

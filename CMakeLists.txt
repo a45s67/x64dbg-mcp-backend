@@ -23,6 +23,7 @@ if(BUILD_TESTING)
     plugin/src/patch_policy.cpp
     plugin/src/memory_search.cpp
     plugin/src/pe_policy.cpp
+    plugin/src/trace_policy.cpp
     plugin/src/runtime.cpp
     plugin/src/utf8.cpp
   )
@@ -127,6 +128,17 @@ if(BUILD_TESTING)
   target_compile_options(x64dbg_mcp_pe_policy_test PRIVATE
     /W4 /WX /permissive- /EHsc /utf-8)
 
+  add_executable(x64dbg_mcp_trace_policy_test
+    plugin/tests/trace_policy_test.cpp
+    plugin/src/trace_policy.cpp
+  )
+  target_compile_features(x64dbg_mcp_trace_policy_test PRIVATE cxx_std_20)
+  target_include_directories(x64dbg_mcp_trace_policy_test PRIVATE plugin/src)
+  target_compile_definitions(x64dbg_mcp_trace_policy_test PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(x64dbg_mcp_trace_policy_test PRIVATE
+    /W4 /WX /permissive- /EHsc /utf-8)
+
   add_executable(x64dbg_mcp_breakpoint_policy_test
     plugin/tests/breakpoint_policy_test.cpp
     plugin/src/breakpoint_policy.cpp
@@ -171,6 +183,7 @@ if(BUILD_TESTING)
       x64dbg_mcp_memory_search_test
       x64dbg_mcp_register_policy_test
       x64dbg_mcp_pe_policy_test
+      x64dbg_mcp_trace_policy_test
       x64dbg_mcp_breakpoint_policy_test
       x64dbg_mcp_patch_policy_test)
     target_compile_options(${MCP_ASSERT_TEST} PRIVATE /UNDEBUG)
@@ -187,6 +200,7 @@ add_library(x64dbg_mcp_plugin SHARED
   plugin/src/launch_arguments.cpp
   plugin/src/patch_policy.cpp
   plugin/src/pe_policy.cpp
+  plugin/src/trace_policy.cpp
   plugin/src/plugin.cpp
   plugin/src/register_policy.cpp
   plugin/src/runtime.cpp
@@ -243,6 +257,7 @@ if(BUILD_TESTING)
   add_test(NAME memory-search-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_memory_search_test)
   add_test(NAME register-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_register_policy_test)
   add_test(NAME pe-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_pe_policy_test)
+  add_test(NAME trace-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_trace_policy_test)
   add_test(NAME breakpoint-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_breakpoint_policy_test)
   add_test(NAME patch-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_patch_policy_test)
   add_test(NAME launch-arguments-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_launch_arguments_test)
@@ -264,6 +279,11 @@ if(BUILD_TESTING)
     COMMAND x64dbg_mcp_lifecycle_test
       "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe"
       "${MCP_ACTIVE_WAIT_TEST_PORT}" active-wait-shutdown)
+  math(EXPR MCP_ACTIVE_TRACE_TEST_PORT "${MCP_TEST_PORT} + 4")
+  add_test(NAME active-trace-shutdown-${MCP_TEST_ARCH}
+    COMMAND x64dbg_mcp_lifecycle_test
+      "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe"
+      "${MCP_ACTIVE_TRACE_TEST_PORT}" active-trace-shutdown)
   set_tests_properties(executor-${MCP_TEST_ARCH} command-fence-${MCP_TEST_ARCH}
     utf8-${MCP_TEST_ARCH}
     memory-filters-${MCP_TEST_ARCH} memory-search-${MCP_TEST_ARCH}
@@ -274,6 +294,6 @@ if(BUILD_TESTING)
     launch-arguments-${MCP_TEST_ARCH}
     lifecycle-${MCP_TEST_ARCH}
     sidecar-crash-${MCP_TEST_ARCH} installed-config-${MCP_TEST_ARCH}
-    active-wait-shutdown-${MCP_TEST_ARCH}
+    active-wait-shutdown-${MCP_TEST_ARCH} active-trace-shutdown-${MCP_TEST_ARCH}
     PROPERTIES TIMEOUT 15)
 endif()

@@ -1411,6 +1411,134 @@ try {
     if ($afterMissingThreadRead.plugin_state -ne 'ready') {
         throw 'A missing exact-thread read damaged the plugin connection.'
     }
+
+    # Owned bounded trace sessions retain only address paths. Qualify native
+    # max-step completion, immutable pagination, one-active ownership,
+    # cancellation, hard timeout, and breakpoint interruption before the
+    # existing resume/pause sequence changes this deterministic fixture state.
+    $traceOperation = [Guid]::NewGuid().ToString()
+    $traceArguments = @{
+        operation_id = $traceOperation; mode = 'over'; max_steps = 8; timeout_ms = 3000
+    }
+    $traceBefore = Invoke-Tool 'debugger.state' @{} 400
+    $traceStart = Invoke-Tool 'trace.start' $traceArguments 401
+    $traceReplay = Invoke-Tool 'trace.start' $traceArguments 402
+    if (($traceStart | ConvertTo-Json -Compress -Depth 12) -ne
+        ($traceReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Bounded trace start was not exactly replay-safe.'
+    }
+    $traceConflict = Invoke-Mcp 'tools/call' @{
+        name = 'trace.start'; arguments = @{
+            operation_id = $traceOperation; mode = 'over'; max_steps = 9; timeout_ms = 3000
+        }
+    } 403
+    if (!$traceConflict.isError -or
+        $traceConflict.structuredContent.error.code -ne 'OPERATION_ID_CONFLICT') {
+        throw 'Bounded trace start accepted changed arguments under a reused operation ID.'
+    }
+    if ($traceStart.state -in @('starting', 'running')) {
+        $null = Invoke-Tool 'debugger.wait_for_pause' @{
+            after_generation = $traceBefore.state_generation; timeout_ms = 5000
+        } 404
+    }
+    $traceStatus = Invoke-Tool 'trace.status' @{ trace_id = $traceStart.trace_id } 405
+    if ($traceStatus.state -ne 'completed' -or $traceStatus.reason -ne 'max_steps' -or
+        $traceStatus.steps_executed -ne 8 -or $traceStatus.points_retained -ne 9) {
+        throw "Bounded trace did not terminate exactly at its step cap: $($traceStatus | ConvertTo-Json -Compress)"
+    }
+    $traceItems = @()
+    $traceCursor = $null
+    for ($page = 0; $page -lt 4; $page++) {
+        $resultArguments = @{ trace_id = $traceStart.trace_id; limit = 3 }
+        if ($traceCursor) { $resultArguments.cursor = $traceCursor }
+        $tracePage = Invoke-Tool 'trace.results' $resultArguments (406 + $page)
+        $traceItems += @($tracePage.items)
+        $traceCursor = $tracePage.next_cursor
+        if (!$traceCursor) { break }
+    }
+    $traceSequences = ($traceItems | Select-Object -ExpandProperty sequence) -join ','
+    if ($traceCursor -or $traceItems.Count -ne 9 -or
+        $traceSequences -ne '0,1,2,3,4,5,6,7,8' -or
+        @($traceItems | Where-Object { !$_.address }).Count -ne 0) {
+        throw 'Bounded trace result pagination was incomplete or unordered.'
+    }
+    $staleTraceCursor = Invoke-Mcp 'tools/call' @{
+        name = 'trace.results'; arguments = @{
+            trace_id = $traceStart.trace_id; limit = 3
+            cursor = "v4:$($traceStart.trace_id):0:0"
+        }
+    } 410
+    if (!$staleTraceCursor.isError -or
+        $staleTraceCursor.structuredContent.error.code -ne 'STALE_CURSOR') {
+        throw 'Bounded trace accepted a cursor with a foreign result fingerprint.'
+    }
+
+    $cancelBefore = Invoke-Tool 'debugger.state' @{} 411
+    $cancelTrace = Invoke-Tool 'trace.start' @{
+        operation_id = [Guid]::NewGuid().ToString(); mode = 'over'
+        max_steps = 4096; timeout_ms = 30000
+    } 412
+    $secondActive = Invoke-Mcp 'tools/call' @{
+        name = 'trace.start'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString(); mode = 'into'
+            max_steps = 4; timeout_ms = 3000
+        }
+    } 413
+    if (!$secondActive.isError -or $secondActive.structuredContent.error.code -ne 'BUSY') {
+        throw "Bounded trace admitted a second active session: first=$($cancelTrace | ConvertTo-Json -Compress -Depth 8), second=$($secondActive | ConvertTo-Json -Compress -Depth 8)"
+    }
+    $cancelledTrace = Invoke-Tool 'trace.cancel' @{
+        operation_id = [Guid]::NewGuid().ToString(); trace_id = $cancelTrace.trace_id
+    } 414
+    if ($cancelledTrace.state -ne 'cancelled' -or $cancelledTrace.reason -ne 'cancelled') {
+        throw 'Bounded trace cancellation did not reach a callback-confirmed terminal state.'
+    }
+    $cancelResults = Invoke-Tool 'trace.results' @{
+        trace_id = $cancelTrace.trace_id; limit = 256
+    } 415
+    if (@($cancelResults.items).Count -lt 2) {
+        throw 'Cancelled trace did not retain its admitted address path.'
+    }
+
+    $timeoutBefore = Invoke-Tool 'debugger.state' @{} 416
+    $timeoutTrace = Invoke-Tool 'trace.start' @{
+        operation_id = [Guid]::NewGuid().ToString(); mode = 'over'
+        max_steps = 4096; timeout_ms = 100
+    } 417
+    if ($timeoutTrace.state -in @('starting', 'running')) {
+        $null = Invoke-Tool 'debugger.wait_for_pause' @{
+            after_generation = $timeoutBefore.state_generation; timeout_ms = 3000
+        } 418
+    }
+    $timeoutStatus = Invoke-Tool 'trace.status' @{ trace_id = $timeoutTrace.trace_id } 419
+    if ($timeoutStatus.state -ne 'timed_out' -or $timeoutStatus.reason -ne 'timeout') {
+        throw "Bounded trace did not enforce its wall-clock timeout: $($timeoutStatus | ConvertTo-Json -Compress)"
+    }
+
+    $interruptBreakpoint = Invoke-Tool 'breakpoints.set' @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $runToTargetRef
+    } 420
+    $interruptBefore = Invoke-Tool 'debugger.state' @{} 421
+    $interruptedTrace = Invoke-Tool 'trace.start' @{
+        operation_id = [Guid]::NewGuid().ToString(); mode = 'over'
+        max_steps = 4096; timeout_ms = 5000
+    } 422
+    if ($interruptedTrace.state -in @('starting', 'running')) {
+        $null = Invoke-Tool 'debugger.wait_for_pause' @{
+            after_generation = $interruptBefore.state_generation; timeout_ms = 5000
+        } 423
+    }
+    $interruptedStatus = Invoke-Tool 'trace.status' @{
+        trace_id = $interruptedTrace.trace_id
+    } 424
+    if ($interruptedStatus.state -ne 'interrupted' -or
+        $interruptedStatus.reason -ne 'breakpoint') {
+        throw "Bounded trace did not preserve breakpoint interruption: $($interruptedStatus | ConvertTo-Json -Compress)"
+    }
+    $null = Invoke-Tool 'breakpoints.remove' @{
+        operation_id = [Guid]::NewGuid().ToString(); address = $runToTargetRef
+    } 425
+
     $resume = $null
     $startupPause = $null
     $stableRunning = $false
@@ -1720,6 +1848,12 @@ try {
         selected_thread_context_equal = $selectedMapsEqual
         noncurrent_thread_context_read = $workerThread.thread_id
         noncurrent_snapshot_instructions = @($workerSnapshot.disassembly).Count
+        trace_max_steps = $traceStatus.steps_executed
+        trace_points = $traceStatus.points_retained
+        trace_replay_equal = $true
+        trace_cancelled = $cancelledTrace.state -eq 'cancelled'
+        trace_timed_out = $timeoutStatus.state -eq 'timed_out'
+        trace_breakpoint_interrupted = $interruptedStatus.reason -eq 'breakpoint'
         thread_selection_preserved = $selectedThreadAfter.thread_id -eq $selectedThread.thread_id
         missing_thread_rejected = $true
         run_to_interruption_preserved_caller_breakpoint = $runToInterrupterSet.present

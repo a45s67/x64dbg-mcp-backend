@@ -15,6 +15,7 @@
 
 #include "command_fence.h"
 #include "debugger_executor.h"
+#include "trace_policy.h"
 
 namespace mcp {
 
@@ -95,12 +96,15 @@ public:
     [[nodiscard]] bool PausedSnapshotCurrentForTesting(std::uint64_t generation) noexcept;
     [[nodiscard]] SessionOrigin SessionOriginForTesting() const noexcept;
     [[nodiscard]] std::vector<EventRecord> EventsForTesting() noexcept;
+    [[nodiscard]] bool StartTraceForTesting() noexcept;
+    [[nodiscard]] TraceReason TraceReasonForTesting() noexcept;
 #endif
 
 private:
     bool CreateEndpoint();
     bool LaunchSidecar();
     void Worker() noexcept;
+    void TraceSupervisor() noexcept;
     void CloseHandleValue(HANDLE& handle) noexcept;
     std::string StateResponse(const std::string& requestId);
     bool WaitForState(DebuggeeState expected, std::uint64_t afterGeneration,
@@ -141,10 +145,16 @@ private:
     HANDLE sidecarProcess_{nullptr};
     HANDLE sidecarJob_{nullptr};
     std::thread worker_;
+    std::thread traceSupervisor_;
     DebuggerExecutor executor_;
     CommandFence commandFence_;
     std::mutex stateMutex_;
     std::condition_variable stateChanged_;
+    std::mutex traceMutex_;
+    std::condition_variable traceChanged_;
+    TracePolicy trace_;
+    bool traceSupervisorStopping_{false};
+    bool tracePauseSubmitted_{false};
     PauseObservation latestPause_;
     PendingExceptionObservation pendingException_;
     static constexpr std::size_t kEventCapacity = 256U;

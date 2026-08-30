@@ -36,6 +36,7 @@
 #include "patch_policy.h"
 #include "pe_policy.h"
 #include "register_policy.h"
+#include "trace_policy.h"
 
 namespace mcp {
 namespace {
@@ -195,6 +196,11 @@ struct Request {
     ConditionalSpec conditionalSpec;
     std::string conditionalExpression;
     bool conditionalInvalid{false};
+    std::string traceId;
+    std::string traceMode;
+    std::size_t traceMaxSteps{0U};
+    std::size_t traceTimeoutMs{0U};
+    bool traceCursorInvalid{false};
 };
 
 bool IsMutation(const std::string_view method) {
@@ -215,7 +221,8 @@ bool IsMutation(const std::string_view method) {
            method == "assembly.patch" || method == "patches.restore" ||
            method == "debuggee.launch" || method == "debuggee.launch_dll" ||
            method == "debuggee.attach" ||
-           method == "debuggee.detach" || method == "analysis.function";
+           method == "debuggee.detach" || method == "analysis.function" ||
+           method == "trace.start" || method == "trace.cancel";
 }
 
 const char* EventKindName(EventKind kind) noexcept;
@@ -320,6 +327,27 @@ bool ParseCursor(const std::string_view cursor, std::uint64_t& generation, std::
     const auto indexResult =
         std::from_chars(cursor.data() + separator + 1, cursor.data() + cursor.size(), index, 10);
     return generationResult.ec == std::errc{} && generationResult.ptr == cursor.data() + separator &&
+           indexResult.ec == std::errc{} && indexResult.ptr == cursor.data() + cursor.size();
+}
+
+bool IsUuid(std::string_view value);
+
+bool ParseTraceCursor(const std::string_view cursor, std::string& traceId,
+                      std::uint64_t& fingerprint, std::size_t& index) {
+    if (!cursor.starts_with("v4:") || cursor.size() > 160U) return false;
+    const auto first = cursor.find(':', 3U);
+    const auto second = first == std::string_view::npos
+                            ? std::string_view::npos
+                            : cursor.find(':', first + 1U);
+    if (first == std::string_view::npos || second == std::string_view::npos) return false;
+    traceId.assign(cursor.substr(3U, first - 3U));
+    const auto fingerprintResult = std::from_chars(cursor.data() + first + 1U,
+                                                   cursor.data() + second,
+                                                   fingerprint, 16);
+    const auto indexResult = std::from_chars(cursor.data() + second + 1U,
+                                             cursor.data() + cursor.size(), index, 10);
+    return IsUuid(traceId) && fingerprintResult.ec == std::errc{} &&
+           fingerprintResult.ptr == cursor.data() + second &&
            indexResult.ec == std::errc{} && indexResult.ptr == cursor.data() + cursor.size();
 }
 
@@ -545,6 +573,11 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     ConditionalSpec conditionalSpec;
     std::string conditionalExpression;
     bool conditionalInvalid = false;
+    std::string traceId;
+    std::string traceMode;
+    std::size_t traceMaxSteps = 0U;
+    std::size_t traceTimeoutMs = 0U;
+    bool traceCursorInvalid = false;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
@@ -692,6 +725,59 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         if (json_object_size(payload) != 1U ||
             !json_is_string(json_object_get(payload, "operation_id"))) {
             return std::nullopt;
+        }
+    } else if (methodValue == "trace.start") {
+        json_t* mode = json_object_get(payload, "mode");
+        json_t* maxSteps = json_object_get(payload, "max_steps");
+        json_t* timeout = json_object_get(payload, "timeout_ms");
+        if (json_object_size(payload) != 4U ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !json_is_string(mode) || !json_is_integer(maxSteps) ||
+            json_integer_value(maxSteps) < 1 || json_integer_value(maxSteps) > 4096 ||
+            !json_is_integer(timeout) || json_integer_value(timeout) < 100 ||
+            json_integer_value(timeout) > 30000) return std::nullopt;
+        traceMode.assign(json_string_value(mode), json_string_length(mode));
+        if (traceMode != "into" && traceMode != "over") return std::nullopt;
+        traceMaxSteps = static_cast<std::size_t>(json_integer_value(maxSteps));
+        traceTimeoutMs = static_cast<std::size_t>(json_integer_value(timeout));
+    } else if (methodValue == "trace.status") {
+        json_t* id = json_object_get(payload, "trace_id");
+        if (json_object_size(payload) != 1U || !json_is_string(id)) return std::nullopt;
+        traceId.assign(json_string_value(id), json_string_length(id));
+        if (!IsUuid(traceId)) return std::nullopt;
+    } else if (methodValue == "trace.cancel") {
+        json_t* id = json_object_get(payload, "trace_id");
+        if (json_object_size(payload) != 2U ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !json_is_string(id)) return std::nullopt;
+        traceId.assign(json_string_value(id), json_string_length(id));
+        if (!IsUuid(traceId)) return std::nullopt;
+    } else if (methodValue == "trace.results") {
+        json_t* id = json_object_get(payload, "trace_id");
+        json_t* limit = json_object_get(payload, "limit");
+        json_t* cursor = json_object_get(payload, "cursor");
+        const std::size_t expectedFields = 1U + (limit ? 1U : 0U) + (cursor ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields || !json_is_string(id)) {
+            return std::nullopt;
+        }
+        traceId.assign(json_string_value(id), json_string_length(id));
+        if (!IsUuid(traceId)) return std::nullopt;
+        if (limit != nullptr) {
+            if (!json_is_integer(limit) || json_integer_value(limit) < 1 ||
+                json_integer_value(limit) > 256) return std::nullopt;
+            pageLimit = static_cast<std::size_t>(json_integer_value(limit));
+        }
+        if (cursor != nullptr) {
+            if (!json_is_string(cursor)) return std::nullopt;
+            std::string cursorTraceId;
+            std::uint64_t fingerprint = 0U;
+            const std::string_view text(json_string_value(cursor), json_string_length(cursor));
+            if (!ParseTraceCursor(text, cursorTraceId, fingerprint, cursorIndex) ||
+                cursorTraceId != traceId) {
+                traceCursorInvalid = true;
+            } else {
+                cursorSnapshotFingerprint = fingerprint;
+            }
         }
     } else if (methodValue == "expression.evaluate") {
         json_t* value = json_object_get(payload, "expression");
@@ -1338,7 +1424,9 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    runToTimeoutMs, memorySearchModuleScope, std::move(memoryPattern),
                    exceptionCode, std::move(exceptionChance),
                    std::move(managedBreakpointId), std::move(conditionalSpec),
-                   std::move(conditionalExpression), conditionalInvalid};
+                   std::move(conditionalExpression), conditionalInvalid,
+                   std::move(traceId), std::move(traceMode), traceMaxSteps,
+                   traceTimeoutMs, traceCursorInvalid};
 }
 
 bool IsCanonicalUuid(const std::string_view value) {
@@ -1378,6 +1466,59 @@ std::string HexValue(const std::uint64_t value) {
     std::ostringstream formatted;
     formatted << "0x" << std::hex << std::nouppercase << value;
     return formatted.str();
+}
+
+std::optional<std::string> RandomUuid() {
+    std::array<unsigned char, 16> bytes{};
+    if (BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) return std::nullopt;
+    bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0fU) | 0x40U);
+    bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3fU) | 0x80U);
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(36U);
+    for (std::size_t index = 0U; index < bytes.size(); ++index) {
+        if (index == 4U || index == 6U || index == 8U || index == 10U) result.push_back('-');
+        result.push_back(digits[bytes[index] >> 4U]);
+        result.push_back(digits[bytes[index] & 0x0fU]);
+    }
+    return result;
+}
+
+std::uint64_t TraceFingerprint(const TracePolicy& trace) noexcept {
+    std::uint64_t hash = 14695981039346656037ULL;
+    const auto addByte = [&hash](const unsigned char byte) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    };
+    for (const unsigned char byte : trace.Id()) addByte(byte);
+    addByte(static_cast<unsigned char>(trace.Mode()));
+    for (const TracePoint point : trace.Points()) {
+        for (unsigned int shift = 0U; shift < 64U; shift += 8U) {
+            addByte(static_cast<unsigned char>((point.address >> shift) & 0xffU));
+        }
+    }
+    return hash;
+}
+
+std::string TraceCursor(const TracePolicy& trace, const std::uint64_t fingerprint,
+                        const std::size_t index) {
+    std::ostringstream cursor;
+    cursor << "v4:" << trace.Id() << ':' << std::hex << std::nouppercase << fingerprint
+           << ':' << std::dec << index;
+    return cursor.str();
+}
+
+std::string TraceStatusJson(const TracePolicy& trace, const std::uint64_t generation) {
+    return "{\"trace_id\":" + JsonString(trace.Id()) +
+           ",\"mode\":" + JsonString(TraceModeName(trace.Mode())) +
+           ",\"state\":" + JsonString(TraceStateName(trace.State())) +
+           ",\"reason\":" +
+           (trace.Active() ? std::string("null") : JsonString(TraceReasonName(trace.Reason()))) +
+           ",\"max_steps\":" + std::to_string(trace.MaxSteps()) +
+           ",\"steps_executed\":" + std::to_string(trace.StepsExecuted()) +
+           ",\"points_retained\":" + std::to_string(trace.Points().size()) +
+           ",\"state_generation\":" + std::to_string(generation) + "}";
 }
 
 const char* ConditionalOperatorName(const ConditionalOperator operation) noexcept {
@@ -1964,6 +2105,24 @@ std::vector<EventRecord> Runtime::EventsForTesting() noexcept {
     }
     return events;
 }
+
+bool Runtime::StartTraceForTesting() noexcept {
+    std::lock_guard lock(traceMutex_);
+    const bool started = trace_.Start(
+        "00000000-0000-4000-8000-000000000001", TraceMode::over,
+        TracePolicy::kMaxSteps, std::chrono::steady_clock::now() + std::chrono::seconds(30),
+        0x401000U, {});
+    if (started) {
+        tracePauseSubmitted_ = false;
+        traceChanged_.notify_all();
+    }
+    return started;
+}
+
+TraceReason Runtime::TraceReasonForTesting() noexcept {
+    std::lock_guard lock(traceMutex_);
+    return trace_.Reason();
+}
 #endif
 
 bool Runtime::Start() {
@@ -1984,6 +2143,12 @@ bool Runtime::Start() {
         return false;
     }
     try {
+        {
+            std::lock_guard lock(traceMutex_);
+            traceSupervisorStopping_ = false;
+            tracePauseSubmitted_ = false;
+        }
+        traceSupervisor_ = std::thread(&Runtime::TraceSupervisor, this);
         worker_ = std::thread(&Runtime::Worker, this);
     } catch (...) {
         Stop();
@@ -2283,6 +2448,85 @@ void Runtime::Worker() noexcept {
                            (hasMore ? "true" : "false") + ",\"next_after_sequence\":" +
                            next + ",\"items\":" + items + "}}";
                 }
+                if (parsed->method == "trace.status") {
+                    TracePolicy copied;
+                    {
+                        std::lock_guard lock(traceMutex_);
+                        if (!trace_.Matches(parsed->traceId)) {
+                            return ErrorResponse(*parsed, "NOT_FOUND",
+                                                 "trace_id is not retained", false, false);
+                        }
+                        copied = trace_;
+                    }
+                    const std::uint64_t generation = generation_.load();
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(generation) +
+                           ",\"status\":\"ok\",\"result\":" +
+                           TraceStatusJson(copied, generation) + "}";
+                }
+                if (parsed->method == "trace.results") {
+                    TracePolicy copied;
+                    {
+                        std::lock_guard lock(traceMutex_);
+                        if (!trace_.Matches(parsed->traceId)) {
+                            return ErrorResponse(*parsed, "NOT_FOUND",
+                                                 "trace_id is not retained", false, false);
+                        }
+                        if (!trace_.Terminal()) {
+                            return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                                 "trace results require a terminal session",
+                                                 false, false);
+                        }
+                        copied = trace_;
+                    }
+                    const std::uint64_t fingerprint = TraceFingerprint(copied);
+                    if (parsed->traceCursorInvalid ||
+                        (parsed->cursorSnapshotFingerprint &&
+                         *parsed->cursorSnapshotFingerprint != fingerprint)) {
+                        return ErrorResponse(*parsed, "STALE_CURSOR",
+                                             "trace result cursor does not match this snapshot",
+                                             false, false);
+                    }
+                    if (parsed->cursorIndex > copied.Points().size()) {
+                        return ErrorResponse(*parsed, "STALE_CURSOR",
+                                             "trace result cursor is outside this snapshot",
+                                             false, false);
+                    }
+                    const std::size_t end = (std::min)(
+                        copied.Points().size(), parsed->cursorIndex + parsed->pageLimit);
+                    std::string items = "[";
+                    for (std::size_t index = parsed->cursorIndex; index < end; ++index) {
+                        if (index != parsed->cursorIndex) items.push_back(',');
+                        const std::uint64_t address = copied.Points()[index].address;
+                        const TraceModule* match = nullptr;
+                        for (const TraceModule& module : copied.Modules()) {
+                            if (address >= module.base && address - module.base < module.size) {
+                                if (match != nullptr) {
+                                    match = nullptr;
+                                    break;
+                                }
+                                match = &module;
+                            }
+                        }
+                        items += "{\"sequence\":" + std::to_string(index) +
+                                 ",\"address\":" + JsonString(HexValue(address)) +
+                                 ",\"module\":" +
+                                 (match ? JsonString(match->name) : std::string("null")) +
+                                 ",\"rva\":" +
+                                 (match ? JsonString(HexValue(address - match->base))
+                                        : std::string("null")) + "}";
+                    }
+                    items += "]";
+                    const std::string next = end < copied.Points().size()
+                        ? JsonString(TraceCursor(copied, fingerprint, end))
+                        : "null";
+                    const std::uint64_t generation = generation_.load();
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(generation) +
+                           ",\"status\":\"ok\",\"result\":{\"trace\":" +
+                           TraceStatusJson(copied, generation) + ",\"items\":" + items +
+                           ",\"next_cursor\":" + next + "}}";
+                }
                 if (parsed->method == "debugger.wait_for_pause") {
                     if (debuggeeState_.load() == DebuggeeState::absent ||
                         debuggeeState_.load() == DebuggeeState::exited) {
@@ -2358,6 +2602,161 @@ void Runtime::Worker() noexcept {
                            ",\"pause_reason\":" + PauseReasonJson(pause) + "}}";
                 }
 #ifndef MCP_LIFECYCLE_HARNESS
+                if (parsed->method == "trace.start") {
+                    {
+                        std::lock_guard lock(traceMutex_);
+                        if (trace_.Active()) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "another trace session is active", true, false);
+                        }
+                    }
+                    const auto snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "trace start requires a paused debuggee", false,
+                                             false);
+                    }
+                    REGDUMP_AVX512 registers{};
+                    const auto modules = CaptureModuleRecords();
+                    if (!DbgGetRegDumpEx(&registers, sizeof(registers)) || !modules ||
+                        registers.regcontext.cip == 0U) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "trace start snapshot is unavailable", true, false);
+                    }
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed before trace admission", true,
+                                             false);
+                    }
+                    const auto id = RandomUuid();
+                    if (!id) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "trace identity generation failed", false, false);
+                    }
+                    std::vector<TraceModule> traceModules;
+                    try {
+                        traceModules.reserve(modules->size());
+                        for (const ModuleRecord& module : *modules) {
+                            traceModules.push_back({static_cast<std::uint64_t>(module.base),
+                                                    static_cast<std::uint64_t>(module.size),
+                                                    module.name});
+                        }
+                    } catch (...) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "trace module snapshot allocation failed", false,
+                                             false);
+                    }
+                    const TraceMode mode = parsed->traceMode == "into"
+                                               ? TraceMode::into
+                                               : TraceMode::over;
+                    const auto traceDeadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(parsed->traceTimeoutMs);
+                    {
+                        std::lock_guard lock(traceMutex_);
+                        if (!trace_.Start(*id, mode, parsed->traceMaxSteps, traceDeadline,
+                                          registers.regcontext.cip,
+                                          std::move(traceModules))) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "trace session could not be admitted", true,
+                                                 false);
+                        }
+                        tracePauseSubmitted_ = false;
+                    }
+                    traceChanged_.notify_all();
+                    const std::string command =
+                        std::string(mode == TraceMode::into ? "TraceIntoConditional 0, ."
+                                                           : "TraceOverConditional 0, .") +
+                        std::to_string(parsed->traceMaxSteps);
+                    if (!DbgCmdExec(command.c_str())) {
+                        {
+                            std::lock_guard lock(traceMutex_);
+                            (void)trace_.Finalize(TraceReason::interrupted);
+                        }
+                        traceChanged_.notify_all();
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected trace start", true,
+                                             false);
+                    }
+                    TracePolicy copied;
+                    {
+                        std::unique_lock lock(traceMutex_);
+                        const auto admissionDeadline = (std::min)(
+                            requestDeadline,
+                            (std::min)(traceDeadline,
+                                       std::chrono::steady_clock::now() +
+                                           std::chrono::milliseconds(2000)));
+                        const bool observed = traceChanged_.wait_until(
+                            lock, admissionDeadline, [this, &id] {
+                                return pluginState_.load() != PluginState::ready ||
+                                       !trace_.Matches(*id) ||
+                                       trace_.State() != TraceState::starting;
+                            });
+                        if (!observed || !trace_.Matches(*id) ||
+                            trace_.State() == TraceState::starting) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "trace admission outcome is unknown", false,
+                                                 true);
+                        }
+                        copied = trace_;
+                    }
+                    const std::uint64_t generation = generation_.load();
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(generation) +
+                           ",\"status\":\"ok\",\"result\":" +
+                           TraceStatusJson(copied, generation) + "}";
+                }
+                if (parsed->method == "trace.cancel") {
+                    bool submitPause = false;
+                    {
+                        std::lock_guard lock(traceMutex_);
+                        if (!trace_.Matches(parsed->traceId)) {
+                            return ErrorResponse(*parsed, "NOT_FOUND",
+                                                 "trace_id is not retained", false, false);
+                        }
+                        if (trace_.Terminal()) {
+                            const TracePolicy copied = trace_;
+                            const std::uint64_t generation = generation_.load();
+                            return "{\"request_id\":" + JsonString(parsed->requestId) +
+                                   ",\"state_generation\":" +
+                                   std::to_string(generation) +
+                                   ",\"status\":\"ok\",\"result\":" +
+                                   TraceStatusJson(copied, generation) + "}";
+                        }
+                        (void)trace_.RequestStop(TraceReason::cancelled);
+                        submitPause = !tracePauseSubmitted_;
+                        tracePauseSubmitted_ = true;
+                    }
+                    traceChanged_.notify_all();
+                    if (submitPause) {
+                        std::lock_guard lock(traceMutex_);
+                        if (trace_.Active() && trace_.Matches(parsed->traceId) &&
+                            !DbgCmdExec("pause")) {
+                            return ErrorResponse(*parsed, "OUTCOME_UNKNOWN",
+                                                 "trace cancellation pause was rejected", false,
+                                                 true);
+                        }
+                    }
+                    TracePolicy copied;
+                    {
+                        std::unique_lock lock(traceMutex_);
+                        const bool terminal = traceChanged_.wait_until(
+                            lock, requestDeadline, [this, parsed] {
+                                return pluginState_.load() != PluginState::ready ||
+                                       !trace_.Matches(parsed->traceId) || trace_.Terminal();
+                            });
+                        if (!terminal || !trace_.Matches(parsed->traceId) || !trace_.Terminal()) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "trace cancellation outcome is unknown", false,
+                                                 true);
+                        }
+                        copied = trace_;
+                    }
+                    const std::uint64_t generation = generation_.load();
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(generation) +
+                           ",\"status\":\"ok\",\"result\":" +
+                           TraceStatusJson(copied, generation) + "}";
+                }
                 if (parsed->method == "debugger.snapshot") {
                     const auto snapshot = BeginPausedSnapshot();
                     if (!snapshot || !DbgIsDebugging()) {
@@ -6387,6 +6786,20 @@ void Runtime::RecordEventLocked(EventRecord event) noexcept {
 }
 
 void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) noexcept {
+    if (callbackType == CB_TRACEEXECUTE) {
+        auto* info = static_cast<PLUG_CB_TRACEEXECUTE*>(callbackInfo);
+        if (info == nullptr) return;
+        {
+            std::lock_guard lock(traceMutex_);
+            if (trace_.Active()) {
+                info->stop = trace_.OnStep(static_cast<std::uint64_t>(info->cip), info->stop,
+                                           std::chrono::steady_clock::now()) ||
+                             info->stop;
+            }
+        }
+        traceChanged_.notify_all();
+        return;
+    }
     DebuggeeState next = debuggeeState_.load();
     PauseObservation pause;
     std::optional<std::uint32_t> callbackProcessId;
@@ -6601,6 +7014,25 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     }
     default: return;
     }
+    TraceReason traceFallback = TraceReason::none;
+    switch (callbackType) {
+    case CB_BREAKPOINT: traceFallback = TraceReason::breakpoint; break;
+    case CB_EXCEPTION: traceFallback = TraceReason::exception; break;
+    case CB_PAUSEDEBUG: traceFallback = TraceReason::userPause; break;
+    case CB_EXITPROCESS:
+    case CB_STOPDEBUG:
+    case CB_STOPPINGDEBUG: traceFallback = TraceReason::processExit; break;
+    case CB_STEPPED:
+    case CB_SYSTEMBREAKPOINT: traceFallback = TraceReason::interrupted; break;
+    default: break;
+    }
+    if (traceFallback != TraceReason::none) {
+        {
+            std::lock_guard traceLock(traceMutex_);
+            if (trace_.Finalize(traceFallback)) tracePauseSubmitted_ = false;
+        }
+        traceChanged_.notify_all();
+    }
     std::lock_guard lock(stateMutex_);
     if (exceptionBreakpointCallback && pendingException_.valid && pause.hasAddress &&
         pendingException_.code == pause.address &&
@@ -6691,12 +7123,75 @@ bool Runtime::OnCommandFence(const std::uint64_t token) noexcept {
     return commandFence_.Signal(token);
 }
 
+void Runtime::TraceSupervisor() noexcept {
+    std::unique_lock lock(traceMutex_);
+    while (!traceSupervisorStopping_) {
+        traceChanged_.wait(lock, [this] {
+            return traceSupervisorStopping_ || (trace_.Active() && !tracePauseSubmitted_);
+        });
+        if (traceSupervisorStopping_) break;
+        const std::string id = trace_.Id();
+        const auto deadline = trace_.Deadline();
+        if (traceChanged_.wait_until(lock, deadline, [this, &id] {
+                return traceSupervisorStopping_ || !trace_.Active() ||
+                       !trace_.Matches(id) || tracePauseSubmitted_;
+            })) {
+            continue;
+        }
+        if (!trace_.Active() || !trace_.Matches(id) || tracePauseSubmitted_) continue;
+        (void)trace_.RequestStop(TraceReason::timeout);
+        tracePauseSubmitted_ = true;
+        traceChanged_.notify_all();
+        lock.unlock();
+#ifndef MCP_LIFECYCLE_HARNESS
+        const auto pauseDeadline = std::chrono::steady_clock::now() +
+                                   std::chrono::milliseconds(2000);
+        (void)executor_.Execute([this, id] {
+            std::lock_guard traceLock(traceMutex_);
+            if (!trace_.Active() || !trace_.Matches(id)) return std::string{};
+            (void)DbgCmdExec("pause");
+            return std::string{};
+        }, pauseDeadline);
+#endif
+        lock.lock();
+    }
+}
+
 void Runtime::Stop() noexcept {
     const PluginState previous = pluginState_.exchange(PluginState::draining);
     if (previous == PluginState::stopped) {
         pluginState_.store(PluginState::stopped);
         return;
     }
+    bool pauseTrace = false;
+    {
+        std::lock_guard lock(traceMutex_);
+        if (trace_.Active()) {
+            (void)trace_.RequestStop(TraceReason::backendShutdown);
+            pauseTrace = !tracePauseSubmitted_;
+            tracePauseSubmitted_ = true;
+        }
+        traceSupervisorStopping_ = true;
+    }
+    traceChanged_.notify_all();
+#ifndef MCP_LIFECYCLE_HARNESS
+    if (pauseTrace) {
+        const auto pauseDeadline = std::chrono::steady_clock::now() +
+                                   std::chrono::milliseconds(1000);
+        (void)executor_.Execute([] {
+            (void)DbgCmdExec("pause");
+            return std::string{};
+        }, pauseDeadline);
+    }
+#else
+    (void)pauseTrace;
+#endif
+    if (traceSupervisor_.joinable()) traceSupervisor_.join();
+    {
+        std::lock_guard lock(traceMutex_);
+        if (trace_.Active()) (void)trace_.Finalize(TraceReason::backendShutdown);
+    }
+    traceChanged_.notify_all();
     commandFence_.Stop();
     stateChanged_.notify_all();
     CloseHandleValue(nonceWriter_); // stdin EOF asks the child to shut down gracefully.

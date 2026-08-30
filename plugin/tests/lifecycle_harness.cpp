@@ -102,6 +102,14 @@ bool ExerciseActiveWaitShutdown(mcp::Runtime& runtime, const unsigned short port
            std::chrono::steady_clock::now() - start < std::chrono::seconds(3);
 }
 
+bool ExerciseActiveTraceShutdown(mcp::Runtime& runtime) {
+    if (!runtime.StartTraceForTesting()) return false;
+    const auto start = std::chrono::steady_clock::now();
+    runtime.Stop();
+    return runtime.TraceReasonForTesting() == mcp::TraceReason::backendShutdown &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(3);
+}
+
 bool ExercisePauseCallbacks(mcp::Runtime& runtime) {
     runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
     BRIDGEBP breakpoint{};
@@ -224,7 +232,7 @@ bool ExerciseEventRingBoundary(mcp::Runtime& runtime, const unsigned short port)
 int wmain(const int argc, wchar_t** argv) {
     if (argc < 3 || argc > 4) {
         std::cerr << "usage: lifecycle_harness <server-exe> <unused-port> "
-                     "[sidecar-crash|installed-config|active-wait-shutdown]\n";
+                     "[sidecar-crash|installed-config|active-wait-shutdown|active-trace-shutdown]\n";
         return 2;
     }
     const bool installedConfig = argc == 4 && std::wstring_view(argv[3]) == L"installed-config";
@@ -312,6 +320,13 @@ int wmain(const int argc, wchar_t** argv) {
         if (!ExerciseActiveWaitShutdown(runtime, static_cast<unsigned short>(parsedPort))) {
             std::cerr << "active callback wait delayed runtime shutdown\n";
             return 10;
+        }
+        return 0;
+    }
+    if (argc == 4 && std::wstring_view(argv[3]) == L"active-trace-shutdown") {
+        if (!ExerciseActiveTraceShutdown(runtime)) {
+            std::cerr << "active trace delayed runtime shutdown or lost its terminal reason\n";
+            return 13;
         }
         return 0;
     }

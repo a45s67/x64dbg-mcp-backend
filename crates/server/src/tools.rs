@@ -190,6 +190,25 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             operation(object, &["process_id"])?;
             integer(object, "process_id", 1, 4_294_967_295)
         }
+        "trace.start" => {
+            operation(object, &["mode", "max_steps", "timeout_ms"])?;
+            one_of(object, "mode", &["into", "over"])?;
+            integer(object, "max_steps", 1, 4096)?;
+            integer(object, "timeout_ms", 100, 30_000)
+        }
+        "trace.status" => {
+            exact_keys(object, &["trace_id"], &[])?;
+            validate_uuid_field(object, "trace_id")
+        }
+        "trace.cancel" => {
+            operation(object, &["trace_id"])?;
+            validate_uuid_field(object, "trace_id")
+        }
+        "trace.results" => {
+            exact_keys(object, &["trace_id"], &["limit", "cursor"])?;
+            validate_uuid_field(object, "trace_id")?;
+            discovery_page(object)
+        }
         "registers.read" => {
             exact_keys(object, &[], &["names", "thread_id"])?;
             if object.contains_key("thread_id") {
@@ -1038,6 +1057,51 @@ fn build_catalog() -> Vec<Value> {
             true,
         ),
         mutation_tool(
+            "trace.start",
+            "Start one owned bounded x64dbg address trace from an actionable pause. Captures only the initial IP and observed into/over step IPs; no expressions, commands, files, registers, or memory history.",
+            operation_schema(vec![
+                ("mode", json!({"type":"string","enum":["into","over"]})),
+                (
+                    "max_steps",
+                    json!({"type":"integer","minimum":1,"maximum":4096}),
+                ),
+                (
+                    "timeout_ms",
+                    json!({"type":"integer","minimum":100,"maximum":30000}),
+                ),
+            ]),
+            false,
+        ),
+        read_tool(
+            "trace.status",
+            "Read copied status and counters for the exact retained trace UUID without changing debugger state.",
+            object(vec![("trace_id", uuid_schema())], vec!["trace_id"]),
+        ),
+        mutation_tool(
+            "trace.cancel",
+            "Cancel the exact active trace UUID through a fixed pause and wait for callback-confirmed terminal state. Never starts or retries a trace.",
+            operation_schema(vec![("trace_id", uuid_schema())]),
+            false,
+        ),
+        read_tool(
+            "trace.results",
+            "Page immutable terminal address-path records for one retained trace UUID. Results contain absolute addresses and start-time module/RVA mappings only.",
+            object(
+                vec![
+                    ("trace_id", uuid_schema()),
+                    (
+                        "limit",
+                        json!({"type":"integer","minimum":1,"maximum":256,"default":100}),
+                    ),
+                    (
+                        "cursor",
+                        json!({"type":"string","minLength":1,"maxLength":512}),
+                    ),
+                ],
+                vec!["trace_id"],
+            ),
+        ),
+        mutation_tool(
             "debuggee.launch",
             "Load an existing executable into this debugger instance and wait for a callback-confirmed initial pause. Requires no current debuggee and never accepts arbitrary debugger commands.",
             operation_schema_with_optional(
@@ -1874,7 +1938,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 52);
+        assert_eq!(catalog().len(), 56);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())

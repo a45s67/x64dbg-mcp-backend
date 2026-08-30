@@ -1185,3 +1185,36 @@ Installed instance `aa53ed03-1973-416e-acf7-58aaa437f1d2` then qualified the
 Flare-On `checksum.exe` workflow at ASLR-resolved `CHECKSUM.EXE+0xa78a0`
 (`0x6678a0`): exact-thread context, function analysis, reversible patching,
 typed breakpoints, and owned run-to-address all passed before clean stop.
+
+## 0.17.0 bounded trace-session qualification
+
+ADR 0038 added `trace.start`, `trace.status`, `trace.cancel`, and
+`trace.results` as one owned address-path facility rather than an executor-held
+step loop or x64dbg file trace. The public contract accepts only into/over mode,
+1-4,096 steps, and a 100-30,000 ms deadline. One joinable supervisor owns the
+deadline, the callback writes only to a preallocated 4,097-point buffer, and
+plugin stop converts an active trace to `backend_shutdown` before joining it.
+
+Fresh isolated x32dbg instance `6782380c-30f7-44aa-a01d-0241d300330f` and x64dbg
+instance `767a74c7-3aaa-47d1-a653-f66da638c6b4` completed the entire prior
+workflow plus exact eight-step completion with nine ordered points, immutable
+three-item pagination, replay/conflict behavior, one-active rejection,
+caller cancellation, 100 ms timeout, and interruption by an existing software
+breakpoint. Both preserved selected-thread identity and closed their owned
+sidecars. Separate native lifecycle cases started a 30-second active trace and
+stopped in under three seconds with the retained `backend_shutdown` reason.
+
+The 0.17.0 package gate passed 52 Rust unit/contract tests, seven supervised
+sidecar shutdown tests, Clippy with warnings denied, 16 native tests per
+architecture, installer/Codex/skill contracts, the offline verifier, SBOM, and
+checksums. The 60-file verified archive SHA-256 is
+`721e760c8f0d99139be8c2007049ceb2a5743648fc2283e43204d25ee51f44c5`.
+
+The verified x32 plugin, x64 plugin, and sidecar were installed into
+`C:\tools\x64dbg` and matched their packaged hashes; Codex retained both static
+Authorization-header endpoints and installed skill 0.17.0. Installed Flare-On
+`checksum.exe` instance `1d5d551b-c7c5-44e3-9d56-f6dff191a910` again resolved
+`CHECKSUM.EXE+0xa78a0` to `0x6678a0` from base `0x5c0000`, completed the prior
+reversible workflow, then recorded trace `5eedb021-9de2-4127-bc7a-5cb33e823404`
+at exactly eight steps and nine points with exact start replay. Debugger stop,
+host exit, and both backend listener checks were clean.

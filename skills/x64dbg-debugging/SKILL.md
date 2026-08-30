@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.12.0"
-  minimum-backend-version: "0.12.0"
+  version: "0.13.0"
+  minimum-backend-version: "0.13.0"
   mcp-protocol: "2025-06-18"
 ---
 
@@ -94,6 +94,14 @@ and exclusive end are ASLR-correct SDK observations; it does not claim section
 characteristics, permissions, or raw-file offsets. Use `memory.map` separately
 for current page protection, and static PE analysis when on-disk metadata is
 required.
+
+Use `memory.search` for an exact loaded module or one explicit bounded runtime
+range when the address is not yet known. Supply 1-64 concrete bytes as lowercase
+`pattern_hex` and one `x` or `?` mask character per byte. Retain its filter- and
+generation-bound cursor, allow overlapping results, and treat
+`partial_unreadable` as evidence that the declared scope was not fully
+observable. Do not replace this bounded search with an unrestricted process
+scan or memory dump.
 
 For state-specific sequences, breakpoint loops, compact inspection, and Go triage, read
 [references/recipes.md](references/recipes.md). For connection, authentication, stale cursor,

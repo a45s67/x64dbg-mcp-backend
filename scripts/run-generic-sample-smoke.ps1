@@ -7,7 +7,9 @@ param(
     [string]$IntegrationRoot,
     [Parameter(Mandatory)]
     [string]$SamplePath,
-    [string]$ServerPath
+    [string]$ServerPath,
+    [ValidateLength(1, 64)]
+    [string]$ExpectedAsciiPattern
 )
 
 $ErrorActionPreference = 'Stop'
@@ -161,6 +163,35 @@ try {
     }
     $sections = Invoke-Tool 'sections.list' @{ module = $sampleLeaf; limit = 64 }
     $imports = Invoke-Tool 'imports.list' @{ module = $sampleLeaf; limit = 64 }
+    $mzSearch = Invoke-Tool 'memory.search' @{
+        scope = @{ start = @{ absolute = $module[0].base }; length = 4096 }
+        pattern_hex = '4d5a'; mask = 'xx'; limit = 4
+    }
+    if (@($mzSearch.items).Count -lt 1 -or
+        $mzSearch.items[0].location.address -ne $module[0].base -or
+        $mzSearch.state_generation -ne $state.state_generation) {
+        throw 'Runtime PE signature search was incomplete or generation-inconsistent.'
+    }
+    $expectedPatternMatches = $null
+    if (![string]::IsNullOrEmpty($ExpectedAsciiPattern)) {
+        if ($ExpectedAsciiPattern.ToCharArray() | Where-Object {
+            [int]$_ -lt 0x20 -or [int]$_ -gt 0x7e
+        }) {
+            throw 'ExpectedAsciiPattern must contain printable ASCII only.'
+        }
+        $patternBytes = [Text.Encoding]::ASCII.GetBytes($ExpectedAsciiPattern)
+        $patternHex = -join @($patternBytes | ForEach-Object { $_.ToString('x2') })
+        $patternMask = [string]::new([char]'x', $patternBytes.Length)
+        $expectedSearch = Invoke-Tool 'memory.search' @{
+            scope = @{ module = $sampleLeaf }
+            pattern_hex = $patternHex; mask = $patternMask; limit = 32
+        }
+        $expectedPatternMatches = @($expectedSearch.items).Count
+        if ($expectedPatternMatches -lt 1 -or
+            $expectedSearch.state_generation -ne $state.state_generation) {
+            throw 'Expected runtime ASCII pattern was not found in the sample module.'
+        }
+    }
     $events = Invoke-Tool 'events.list' @{
         types = @('process_created', 'system_breakpoint', 'dll_loaded'); limit = 64
     }
@@ -188,6 +219,11 @@ try {
         module_base = $module[0].base
         section_count = @($sections.items).Count
         import_page_count = @($imports.items).Count
+        pe_signature_matches = @($mzSearch.items).Count
+        expected_ascii_pattern = if ([string]::IsNullOrEmpty($ExpectedAsciiPattern)) {
+            $null
+        } else { $ExpectedAsciiPattern }
+        expected_ascii_pattern_matches = $expectedPatternMatches
         startup_event_count = @($events.items).Count
         stopped = $stop.debuggee_state -eq 'absent'
     }

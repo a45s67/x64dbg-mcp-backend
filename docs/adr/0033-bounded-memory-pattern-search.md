@@ -1,6 +1,6 @@
 # ADR 0033: Bounded runtime memory-pattern search
 
-Status: Accepted before implementation on 2026-08-31.
+Status: Implemented and qualified in 0.13.0 on 2026-08-31.
 
 ## Context
 

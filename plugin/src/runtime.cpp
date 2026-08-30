@@ -31,6 +31,7 @@
 #include "jansson/jansson.h"
 #include "launch_arguments.h"
 #include "memory_filters.h"
+#include "memory_search.h"
 #include "patch_policy.h"
 #include "register_policy.h"
 
@@ -184,6 +185,8 @@ struct Request {
     std::vector<EventKind> eventTypes;
     std::string operationId;
     std::size_t runToTimeoutMs{9000U};
+    bool memorySearchModuleScope{false};
+    MemoryPattern memoryPattern;
 };
 
 bool IsMutation(const std::string_view method) {
@@ -521,6 +524,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::uint64_t afterEventSequence = 0U;
     std::vector<EventKind> eventTypes;
     std::size_t runToTimeoutMs = 9000U;
+    bool memorySearchModuleScope = false;
+    MemoryPattern memoryPattern;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
@@ -778,6 +783,77 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             std::uint64_t cursorGenerationValue = 0U;
             std::uint64_t fingerprintValue = 0U;
             const std::string_view cursorText(json_string_value(cursor), json_string_length(cursor));
+            if (!ParseDiscoveryCursor(cursorText, cursorGenerationValue, fingerprintValue,
+                                      cursorIndex)) {
+                discoveryCursorInvalid = true;
+            } else {
+                cursorGeneration = cursorGenerationValue;
+                discoveryCursorInvalid = fingerprintValue != expectedFingerprint;
+            }
+        }
+    } else if (methodValue == "memory.search") {
+        json_t* scope = json_object_get(payload, "scope");
+        json_t* patternValue = json_object_get(payload, "pattern_hex");
+        json_t* maskValue = json_object_get(payload, "mask");
+        json_t* limit = json_object_get(payload, "limit");
+        json_t* cursor = json_object_get(payload, "cursor");
+        const std::size_t expectedFields = 3U + (limit ? 1U : 0U) + (cursor ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields || !json_is_object(scope) ||
+            !json_is_string(patternValue) || !json_is_string(maskValue)) {
+            return std::nullopt;
+        }
+        json_t* module = json_object_get(scope, "module");
+        json_t* start = json_object_get(scope, "start");
+        json_t* length = json_object_get(scope, "length");
+        if (module != nullptr) {
+            if (json_object_size(scope) != 1U || !IsBoundedModuleName(module)) {
+                return std::nullopt;
+            }
+            memorySearchModuleScope = true;
+            moduleFilter.assign(json_string_value(module), json_string_length(module));
+        } else {
+            if (json_object_size(scope) != 2U || !ParseAddressReference(start, addressValue) ||
+                !json_is_integer(length) || json_integer_value(length) < 1 ||
+                json_integer_value(length) > 16 * 1024 * 1024) {
+                return std::nullopt;
+            }
+            lengthValue = static_cast<std::size_t>(json_integer_value(length));
+        }
+        const std::string_view patternText(json_string_value(patternValue),
+                                           json_string_length(patternValue));
+        const std::string_view maskText(json_string_value(maskValue),
+                                        json_string_length(maskValue));
+        const auto parsedPattern = ParseMemoryPattern(patternText, maskText);
+        if (!parsedPattern) return std::nullopt;
+        memoryPattern = *parsedPattern;
+        if (limit != nullptr) {
+            if (!json_is_integer(limit) || json_integer_value(limit) < 1 ||
+                json_integer_value(limit) > 256) {
+                return std::nullopt;
+            }
+            pageLimit = static_cast<std::size_t>(json_integer_value(limit));
+        }
+        std::string scopeKey;
+        if (memorySearchModuleScope) {
+            scopeKey = "module:" + moduleFilter;
+        } else if (addressValue.kind == AddressReferenceKind::absolute) {
+            scopeKey = "absolute:" + std::to_string(static_cast<std::uint64_t>(
+                                         addressValue.absolute)) +
+                       ':' + std::to_string(lengthValue);
+        } else {
+            scopeKey = "module_rva:" + addressValue.module + ':' +
+                       std::to_string(static_cast<std::uint64_t>(addressValue.rva)) + ':' +
+                       std::to_string(lengthValue);
+        }
+        const std::uint64_t expectedFingerprint = DiscoveryFingerprint(
+            methodValue, scopeKey, patternText, maskText, pageLimit);
+        cursorFingerprint = expectedFingerprint;
+        if (cursor != nullptr) {
+            if (!json_is_string(cursor)) return std::nullopt;
+            std::uint64_t cursorGenerationValue = 0U;
+            std::uint64_t fingerprintValue = 0U;
+            const std::string_view cursorText(json_string_value(cursor),
+                                              json_string_length(cursor));
             if (!ParseDiscoveryCursor(cursorText, cursorGenerationValue, fingerprintValue,
                                       cursorIndex)) {
                 discoveryCursorInvalid = true;
@@ -1089,7 +1165,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(expectedOriginalBytes), fillNop, addressProvided,
                    targetThreadId, std::move(symbolName), cursorSnapshotFingerprint,
                    afterEventSequence, std::move(eventTypes), std::move(operationIdValue),
-                   runToTimeoutMs};
+                   runToTimeoutMs, memorySearchModuleScope, std::move(memoryPattern)};
 }
 
 bool IsCanonicalUuid(const std::string_view value) {
@@ -2064,6 +2140,165 @@ void Runtime::Worker() noexcept {
                     return ErrorResponse(*parsed, "INVALID_ARGUMENT",
                                          "cursor does not match the discovery filters", false,
                                          false);
+                }
+                if (parsed->method == "memory.search") {
+                    const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false,
+                                             false);
+                    }
+                    if (parsed->cursorGeneration && *parsed->cursorGeneration != *snapshot) {
+                        return ErrorResponse(*parsed, "STALE_CURSOR", "cursor generation is stale",
+                                             false, false);
+                    }
+                    const auto modules = CaptureModuleRecords();
+                    if (!modules) {
+                        return ErrorResponse(*parsed, "INTERNAL", "module snapshot is invalid",
+                                             true, false);
+                    }
+
+                    duint scopeStart = 0U;
+                    std::size_t scopeLength = 0U;
+                    if (parsed->memorySearchModuleScope) {
+                        const auto module = UniqueModule(*modules, parsed->module);
+                        if (!module) {
+                            return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                                 "module is missing or ambiguous", false, false);
+                        }
+                        constexpr duint kMaxModuleBytes = 128U * 1024U * 1024U;
+                        if (module->size == 0U || module->size > kMaxModuleBytes ||
+                            module->size > (std::numeric_limits<std::size_t>::max)()) {
+                            return ErrorResponse(*parsed, "OUTPUT_LIMIT_EXCEEDED",
+                                                 "module exceeds the 128 MiB search scope", false,
+                                                 false);
+                        }
+                        scopeStart = module->base;
+                        scopeLength = static_cast<std::size_t>(module->size);
+                    } else {
+                        AddressResolution resolution = ResolveAddress(parsed->address);
+                        if (!resolution.location) {
+                            return ErrorResponse(*parsed, resolution.code, resolution.message,
+                                                 resolution.retryable, false);
+                        }
+                        scopeStart = resolution.location->address;
+                        scopeLength = parsed->length;
+                    }
+                    if (scopeLength == 0U ||
+                        scopeStart > (std::numeric_limits<duint>::max)() -
+                                         static_cast<duint>(scopeLength - 1U)) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "memory search scope overflows pointer width", false,
+                                             false);
+                    }
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during search scope resolution",
+                                             true, false);
+                    }
+
+                    const std::size_t patternLength = parsed->memoryPattern.bytes.size();
+                    const std::size_t totalCandidates =
+                        patternLength <= scopeLength ? scopeLength - patternLength + 1U : 0U;
+                    if (parsed->cursorIndex > totalCandidates) {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT", "cursor is invalid",
+                                             false, false);
+                    }
+                    constexpr std::size_t kCandidateWindow = 1024U * 1024U;
+                    constexpr std::size_t kPageBytes = 4096U;
+                    const std::size_t remainingCandidates = totalCandidates - parsed->cursorIndex;
+                    const std::size_t candidateCount =
+                        (std::min)(remainingCandidates, kCandidateWindow);
+                    const std::size_t readLength = candidateCount == 0U
+                                                       ? 0U
+                                                       : candidateCount + patternLength - 1U;
+                    std::vector<std::uint8_t> bytes(readLength);
+                    std::vector<std::uint8_t> readable(readLength, 0U);
+                    const duint readStart =
+                        scopeStart + static_cast<duint>(parsed->cursorIndex);
+                    for (std::size_t offset = 0U; offset < readLength;) {
+                        if (std::chrono::steady_clock::now() >= requestDeadline) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "memory search exceeded its deadline", true,
+                                                 false);
+                        }
+                        const duint address = readStart + static_cast<duint>(offset);
+                        const std::size_t pageRemaining =
+                            kPageBytes - static_cast<std::size_t>(address & (kPageBytes - 1U));
+                        const std::size_t chunk =
+                            (std::min)(pageRemaining, readLength - offset);
+                        if (DbgMemRead(address, bytes.data() + offset,
+                                       static_cast<duint>(chunk))) {
+                            std::fill(readable.begin() + static_cast<std::ptrdiff_t>(offset),
+                                      readable.begin() +
+                                          static_cast<std::ptrdiff_t>(offset + chunk),
+                                      1U);
+                        }
+                        offset += chunk;
+                        if (!PausedSnapshotCurrent(*snapshot)) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "debugger changed during memory search", true,
+                                                 false);
+                        }
+                    }
+                    if (std::chrono::steady_clock::now() >= requestDeadline) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "memory search exceeded its deadline", true, false);
+                    }
+                    const MemorySearchMatches matches = FindMemoryPattern(
+                        bytes, readable, parsed->memoryPattern, candidateCount,
+                        parsed->pageLimit);
+                    const std::size_t nextOffset = parsed->cursorIndex + matches.nextCandidate;
+                    const bool scanComplete = nextOffset >= totalCandidates;
+                    const std::size_t consideredReadLength = matches.nextCandidate == 0U
+                                                                 ? 0U
+                                                                 : (std::min)(
+                                                                       readLength,
+                                                                       matches.nextCandidate +
+                                                                           patternLength - 1U);
+                    const std::size_t unreadableBytes = static_cast<std::size_t>(std::count(
+                        readable.begin(),
+                        readable.begin() + static_cast<std::ptrdiff_t>(consideredReadLength),
+                        std::uint8_t{0U}));
+                    std::string items = "[";
+                    for (std::size_t index = 0U; index < matches.offsets.size(); ++index) {
+                        if (index != 0U) items.push_back(',');
+                        const duint address = readStart + static_cast<duint>(matches.offsets[index]);
+                        items += "{\"location\":" +
+                                 LocationJson(LocationFromModules(address, *modules), *snapshot) +
+                                 "}";
+                    }
+                    items += "]";
+                    std::string mask;
+                    mask.reserve(parsed->memoryPattern.exact.size());
+                    for (const std::uint8_t exact : parsed->memoryPattern.exact) {
+                        mask.push_back(exact != 0U ? 'x' : '?');
+                    }
+                    const std::string next =
+                        scanComplete
+                            ? "null"
+                            : JsonString(DiscoveryCursor(*parsed, *snapshot, nextOffset));
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during memory search", true,
+                                             false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"scope\":{\"start\":" +
+                           LocationJson(LocationFromModules(scopeStart, *modules), *snapshot) +
+                           ",\"length\":" + std::to_string(scopeLength) +
+                           "},\"pattern_hex\":" + JsonString(Hex(parsed->memoryPattern.bytes)) +
+                           ",\"mask\":" + JsonString(mask) + ",\"items\":" + items +
+                           ",\"next_cursor\":" + next +
+                           ",\"scan_complete\":" + (scanComplete ? "true" : "false") +
+                           ",\"completeness\":" +
+                           JsonString(unreadableBytes == 0U ? "complete"
+                                                            : "partial_unreadable") +
+                           ",\"bytes_scanned\":" +
+                           std::to_string(matches.nextCandidate) +
+                           ",\"unreadable_bytes\":" + std::to_string(unreadableBytes) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) + "}}";
                 }
                 if (parsed->method == "address.resolve") {
                     return "{\"request_id\":" + JsonString(parsed->requestId) +

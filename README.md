@@ -77,6 +77,10 @@ the read tools never silently trigger debugger analysis.
 Queried `strings.search` results default to compact UTF-8-safe context and expose
 reconstructable `before`, `match`, and `after` fields; use `context_bytes` to tune
 each side without returning an entire compiler/runtime string pool.
+`memory.search` locates bounded masked byte patterns in one loaded module or
+explicit runtime range. Each request evaluates at most 1 MiB of candidate
+addresses, preserves overlapping matches, reports unreadable bytes, and binds
+continuation to the paused generation and exact search filters.
 `analysis.function` is a separate, explicit mutation for one concrete address;
 it uses a private command-queue fence and never depends on the user's GUI selection.
 Existing processes can be attached only by an explicit numeric PID. State exposes

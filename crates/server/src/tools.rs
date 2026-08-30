@@ -250,6 +250,47 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             validate_address_ref(object, "address")?;
             integer(object, "length", 1, 65_536)
         }
+        "memory.search" => {
+            exact_keys(
+                object,
+                &["scope", "pattern_hex", "mask"],
+                &["limit", "cursor"],
+            )?;
+            let scope = object
+                .get("scope")
+                .and_then(Value::as_object)
+                .ok_or(invalid("scope", "must be a module or bounded range object"))?;
+            if scope.contains_key("module") {
+                exact_keys(scope, &["module"], &[])?;
+                validate_module_name(scope, "module")?;
+            } else {
+                exact_keys(scope, &["start", "length"], &[])?;
+                validate_address_ref(scope, "start")?;
+                integer(scope, "length", 1, 16 * 1024 * 1024)?;
+            }
+            let pattern = string(object, "pattern_hex", 2, 128)?;
+            if pattern.len() % 2 != 0
+                || !pattern
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(invalid(
+                    "pattern_hex",
+                    "must contain 1 to 64 lowercase hexadecimal bytes",
+                ));
+            }
+            let mask = string(object, "mask", 1, 64)?;
+            if mask.len() != pattern.len() / 2
+                || !mask.bytes().all(|byte| matches!(byte, b'x' | b'?'))
+                || mask.bytes().all(|byte| byte == b'?')
+            {
+                return Err(invalid(
+                    "mask",
+                    "must contain one x or ? per byte and at least one x",
+                ));
+            }
+            discovery_page(object)
+        }
         "memory.write" => {
             operation(object, &["address", "data_hex"])?;
             validate_address_ref(object, "address")?;
@@ -959,6 +1000,53 @@ fn build_catalog() -> Vec<Value> {
                 vec!["address", "length"],
             ),
         ),
+        read_tool(
+            "memory.search",
+            "Search at most 1 MiB of candidate runtime addresses per request for one explicit 1-64 byte pattern and byte mask. Scope is one loaded module up to 128 MiB or one explicit range up to 16 MiB; results are generation-consistent and paginated.",
+            object(
+                vec![
+                    (
+                        "scope",
+                        json!({
+                            "oneOf":[
+                                {
+                                    "type":"object",
+                                    "properties":{"module":module_name_schema()},
+                                    "required":["module"],
+                                    "additionalProperties":false
+                                },
+                                {
+                                    "type":"object",
+                                    "properties":{
+                                        "start":address_ref(),
+                                        "length":{"type":"integer","minimum":1,"maximum":16_777_216}
+                                    },
+                                    "required":["start","length"],
+                                    "additionalProperties":false
+                                }
+                            ]
+                        }),
+                    ),
+                    (
+                        "pattern_hex",
+                        json!({"type":"string","pattern":"^(?:[0-9a-f]{2}){1,64}$","minLength":2,"maxLength":128}),
+                    ),
+                    (
+                        "mask",
+                        json!({"type":"string","pattern":"^[x?]*x[x?]*$","minLength":1,"maxLength":64}),
+                    ),
+                    (
+                        "limit",
+                        json!({"type":"integer","minimum":1,"maximum":256,"default":100}),
+                    ),
+                    (
+                        "cursor",
+                        json!({"type":"string","minLength":1,"maxLength":512}),
+                    ),
+                ],
+                vec!["scope", "pattern_hex", "mask"],
+            ),
+        ),
         mutation_tool(
             "memory.write",
             "Write at most 4096 bytes to a paused debuggee. Read original bytes first when verification or rollback matters.",
@@ -1533,7 +1621,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 46);
+        assert_eq!(catalog().len(), 47);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -1644,6 +1732,43 @@ mod tests {
             )
             .is_ok()
         );
+        assert!(
+            validate_arguments(
+                "memory.search",
+                &json!({
+                    "scope":{"module":"sample.exe"},
+                    "pattern_hex":"488b000089",
+                    "mask":"xx??x",
+                    "limit":256
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "memory.search",
+                &json!({
+                    "scope":{
+                        "start":{"module":"sample.exe","rva":"0x1000"},
+                        "length":16_777_216
+                    },
+                    "pattern_hex":"4d5a",
+                    "mask":"xx",
+                    "cursor":"v2:1:abcd:0"
+                })
+            )
+            .is_ok()
+        );
+        for invalid_search in [
+            json!({"scope":{"module":"sample.exe"},"pattern_hex":"4D5A","mask":"xx"}),
+            json!({"scope":{"module":"sample.exe"},"pattern_hex":"4d5","mask":"xx"}),
+            json!({"scope":{"module":"sample.exe"},"pattern_hex":"4d5a","mask":"x"}),
+            json!({"scope":{"module":"sample.exe"},"pattern_hex":"4d5a","mask":"??"}),
+            json!({"scope":{"start":"0x1000","length":16_777_217},"pattern_hex":"4d5a","mask":"xx"}),
+            json!({"scope":{"module":"sample.exe","length":1},"pattern_hex":"4d5a","mask":"xx"}),
+        ] {
+            assert!(validate_arguments("memory.search", &invalid_search).is_err());
+        }
         assert!(
             validate_arguments(
                 "address.resolve",

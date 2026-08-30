@@ -390,10 +390,12 @@ Exit: deterministic pattern/mask tests, unreadable/partial-region behavior,
 x32/x64 integration, shutdown, and a real-sample search all pass without adding
 a mutation surface.
 
-ADR 0033 admits this tool with a 64-byte pattern, explicit byte mask, 1 MiB
-candidate window per request, 256-result page, 16 MiB explicit-range cap,
-128 MiB module cap, filter-bound continuation, and explicit unreadable-memory
-accounting. Implementation and qualification remain in progress.
+Completed in 0.13.0 under ADR 0033. The shipped tool uses a 64-byte pattern,
+explicit byte mask, 1 MiB candidate window per request, 256-result page,
+16 MiB explicit-range cap, 128 MiB module cap, filter-bound continuation, and
+explicit unreadable-memory accounting. Deterministic native tests, both
+architecture integrations, shutdown gates, architecture-matched Flare-On
+smokes, packaging, and installed x64 qualification passed.
 
 ### Stage 7: conditional and exception breakpoints
 

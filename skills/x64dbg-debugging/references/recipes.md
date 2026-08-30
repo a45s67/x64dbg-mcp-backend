@@ -100,6 +100,10 @@ Use module-scoped literal filters and modest page limits:
 - `strings.search` for bounded ASCII/UTF-8 or UTF-16LE candidates. Supply a literal `query` and
   usually `context_bytes=32` to keep `before`/`match`/`after` compact; follow `next_cursor` with
   the exact same context setting when necessary;
+- `memory.search` for machine-code signatures, binary constants, magic bytes,
+  or runtime-decrypted markers. Use one module or an exact start/length scope,
+  lowercase `pattern_hex`, and one `x` or `?` per byte in `mask`; follow its
+  cursor only with identical filters;
 - `references.to` for inbound references already in the analysis database.
 - `symbols.resolve` for an exact case-sensitive name in one module or an exact runtime address;
 - `functions.at` for the already-known containing function at one address.

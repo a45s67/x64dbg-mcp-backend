@@ -49,3 +49,22 @@ resumed.
 Together with the x32 Frog run, this independently exercises the same smoke
 contract on both architecture builds while retaining the backend's one-instance
 ownership rule.
+
+## 2026-08-31 bounded memory-search qualification
+
+The 0.13.0 qualification added `memory.search` without resuming either Flare-On
+sample's challenge logic. An isolated x32 Frog run (instance
+`499e3269-0ce3-48de-909a-862642aa4293`) found the relocated module's `MZ`
+signature at base `0x580000`, then stopped the debuggee and closed the listener.
+An isolated x64 Checksum run (instance
+`decd4089-e4ee-472c-90d3-19e7f95f4c87`) found `MZ` at base `0xbb0000` and one
+exact `FlareOn2024` byte-pattern match before the same clean shutdown.
+
+The architecture-matched fixture integrations separately proved exact-range
+and wildcard matches, overlapping scan mechanics, unreadable-memory accounting,
+filter-bound cursors, and stale-generation rejection. The deployed 0.13.0 x64
+package then passed the full installed Checksum qualification as instance
+`5e3d7fdc-eb16-471b-a6b2-753f47903013`: it reached the owned main breakpoint at
+`0x6678a0`, completed the existing typed read/mutation and replay checks,
+restored modified state, stopped the debuggee, and let the debugger-owned
+sidecar exit.

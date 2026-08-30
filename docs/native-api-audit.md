@@ -57,6 +57,7 @@ not mutated anything.
 | `registers.read` | `DbgGetRegDumpEx` | paused | copied fixed-size dump; register-name allowlist |
 | `address.resolve` | `Script::Module::GetList` | paused | unique module/RVA or absolute lookup; `BridgeFree(list.data)` |
 | `memory.read` | `DbgMemRead` | paused | caller-owned buffer, max 64 KiB |
+| `memory.search` | `DbgMemRead`, `Script::Module::GetList` | paused | exact module up to 128 MiB or explicit range up to 16 MiB; at most 1 MiB candidate positions plus 63 overlap bytes/request; page-aligned reads, 64-byte pattern, 256 matches, deadline/generation checks, unreadable-byte accounting, and filter-bound cursor; module list released with `BridgeFree` |
 | `memory.map` | `DbgMemMap`, optional `Script::Module::GetList` | paused | reject native count above 65,536; max 256 filtered items; filter-bound cursor; all Bridge lists released |
 | `modules.list` | `Script::Module::GetList` | paused | validates `ListInfo`; `BridgeFree(list.data)` |
 | `threads.list` | `DbgGetThreadList` | paused | max 256 returned items; `BridgeFree(list.list)` |

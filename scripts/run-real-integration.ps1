@@ -434,6 +434,64 @@ try {
         throw 'A pointer-width validation error damaged the plugin connection.'
     }
     $moduleMemory = Invoke-Tool 'memory.read' @{ address = $moduleEntryRef; length = 16 } 42
+    $entryPattern = $moduleMemory.data_hex.Substring(0, 8)
+    $entrySearchArguments = @{
+        scope = @{ start = $moduleEntryRef; length = 16 }
+        pattern_hex = $entryPattern; mask = 'xxxx'; limit = 1
+    }
+    $entrySearch = Invoke-Tool 'memory.search' $entrySearchArguments 227
+    if (@($entrySearch.items).Count -ne 1 -or
+        $entrySearch.items[0].location.address -ne $fixtureModule.entry -or
+        !$entrySearch.next_cursor -or $entrySearch.scan_complete -or
+        $entrySearch.bytes_scanned -ne 1 -or
+        $entrySearch.state_generation -ne $state.state_generation) {
+        throw 'Explicit-range memory search did not return the entry match and continuation.'
+    }
+    $memorySearchCursorMismatch = Invoke-Mcp 'tools/call' @{
+        name = 'memory.search'; arguments = @{
+            scope = @{ start = $moduleEntryRef; length = 16 }
+            pattern_hex = $entryPattern; mask = 'xxx?'; limit = 1
+            cursor = $entrySearch.next_cursor
+        }
+    } 228
+    if (!$memorySearchCursorMismatch.isError -or
+        $memorySearchCursorMismatch.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Memory-search cursor was not bound to its exact pattern mask.'
+    }
+    $wildcardEntrySearch = Invoke-Tool 'memory.search' @{
+        scope = @{ start = $moduleEntryRef; length = 16 }
+        pattern_hex = $entryPattern; mask = 'xxx?'; limit = 8
+    } 231
+    if (@($wildcardEntrySearch.items | Where-Object {
+        $_.location.address -eq $fixtureModule.entry
+    }).Count -ne 1) {
+        throw 'Live wildcard memory search did not retain the entry match.'
+    }
+    $unreadableSearch = Invoke-Tool 'memory.search' @{
+        scope = @{ start = '0x1'; length = 4096 }
+        pattern_hex = '4d5a'; mask = 'xx'; limit = 8
+    } 232
+    if ($unreadableSearch.completeness -ne 'partial_unreadable' -or
+        $unreadableSearch.unreadable_bytes -lt 1 -or
+        @($unreadableSearch.items).Count -ne 0 -or !$unreadableSearch.scan_complete) {
+        throw 'Unreadable memory search did not report a bounded partial result.'
+    }
+    $sentinelText = 'MCP_DISCOVERY_ASCII_SENTINEL'
+    $sentinelBytes = [Text.Encoding]::ASCII.GetBytes($sentinelText)
+    $sentinelHex = -join @($sentinelBytes | ForEach-Object { $_.ToString('x2') })
+    $sentinelMask = [string]::new([char]'x', $sentinelBytes.Length)
+    $modulePatternSearch = Invoke-Tool 'memory.search' @{
+        scope = @{ module = $fixtureModule.name.ToUpperInvariant() }
+        pattern_hex = $sentinelHex; mask = $sentinelMask; limit = 8
+    } 229
+    if (@($modulePatternSearch.items).Count -lt 1 -or
+        @($modulePatternSearch.items | Where-Object {
+            $_.location.module -ieq $fixtureModule.name
+        }).Count -lt 1 -or $modulePatternSearch.pattern_hex -ne $sentinelHex -or
+        $modulePatternSearch.mask -ne $sentinelMask -or
+        $modulePatternSearch.state_generation -ne $state.state_generation) {
+        throw 'Module-scoped memory search did not find the fixture byte sentinel.'
+    }
     $moduleDisassembly = Invoke-Tool 'disassembly.read' @{ address = $moduleEntryRef; count = 4 } 43
     $patchInstructionSize = [int]$moduleDisassembly.items[0].size
     if ($patchInstructionSize -lt 1 -or $patchInstructionSize -gt 16) {
@@ -1232,6 +1290,17 @@ try {
         $staleDiscoveryCursor.structuredContent.error.code -ne 'STALE_CURSOR') {
         throw "A discovery cursor from an older debugger generation was not rejected: $($staleDiscoveryCursor | ConvertTo-Json -Compress -Depth 8)"
     }
+    $staleMemorySearchCursor = Invoke-Mcp 'tools/call' @{
+        name = 'memory.search'; arguments = @{
+            scope = @{ start = $moduleEntryRef; length = 16 }
+            pattern_hex = $entryPattern; mask = 'xxxx'; limit = 1
+            cursor = $entrySearch.next_cursor
+        }
+    } 230
+    if (!$staleMemorySearchCursor.isError -or
+        $staleMemorySearchCursor.structuredContent.error.code -ne 'STALE_CURSOR') {
+        throw 'A memory-search cursor from an older debugger generation was not rejected.'
+    }
     $stepOver = Invoke-Tool 'debugger.step_over' @{ operation_id = [Guid]::NewGuid().ToString() } 18
     $stepOverObservation = Invoke-Tool 'debugger.wait_for_pause' @{
         after_generation = $stepInto.state_generation; timeout_ms = 1500
@@ -1320,6 +1389,12 @@ try {
         pointer_width_rejected = $true
         connection_survived_width_error = $true
         module_memory_bytes = $moduleMemory.bytes_read
+        memory_search_entry_match = $entrySearch.items[0].location.address
+        memory_search_module_matches = @($modulePatternSearch.items).Count
+        memory_search_wildcard_match = $true
+        memory_search_unreadable_bytes = $unreadableSearch.unreadable_bytes
+        memory_search_cursor_filter_bound = $true
+        stale_memory_search_cursor_rejected = $true
         module_instructions = $moduleDisassembly.items.Count
         symbols = $symbols.items.Count
         functions = $functions.items.Count

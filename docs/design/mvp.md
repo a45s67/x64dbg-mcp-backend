@@ -105,7 +105,7 @@ Otherwise HTTP 503. Response is bounded and contains no target path or token:
   "diagnostic_code":null,
   "next_actions":[],
   "protocol_version":"2025-06-18",
-  "version":"0.12.0"
+  "version":"0.13.0"
 }
 ```
 
@@ -179,6 +179,7 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `address.resolve` | read | paused | Resolve absolute or module/RVA input and return canonical location metadata |
 | `analysis.function` | mutate | paused | Explicitly analyze one addressed function in a module up to 128 MiB; private queue-fence and marker confirmation |
 | `memory.read` | read | paused | Read at most 64 KiB per call; report partial/unreadable ranges |
+| `memory.search` | read | paused | Exact module or bounded range; 1-64 byte masked pattern; at most 1 MiB candidates and 256 matches per page |
 | `memory.write` | mutate | paused | Write at most 4 KiB; explicit hex bytes and operation ID |
 | `memory.map` | read | paused | Paginated regions, at most 256 per page; optional module/committed/executable/compact filters |
 | `modules.list` | read | paused | Paginated loaded modules, at most 256 per page |

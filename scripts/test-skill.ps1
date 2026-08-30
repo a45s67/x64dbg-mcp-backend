@@ -45,7 +45,7 @@ $published = @(
     'debugger.stop', 'debuggee.launch',
     'debuggee.attach', 'debuggee.detach',
     'registers.read', 'registers.write', 'address.resolve', 'analysis.function',
-    'memory.read', 'memory.write', 'memory.map',
+    'memory.read', 'memory.write', 'memory.map', 'memory.search',
     'modules.list', 'threads.list', 'breakpoints.list', 'breakpoints.set',
     'breakpoints.remove', 'breakpoints.hardware.set', 'breakpoints.hardware.remove',
     'breakpoints.memory.set', 'breakpoints.memory.remove',

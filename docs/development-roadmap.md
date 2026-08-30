@@ -411,6 +411,13 @@ escape hatch:
 Each family requires its own ADR and may ship without the other. Completion
 cannot be inferred solely from debugger command admission.
 
+ADRs 0034 and 0035 admit the families independently. Both use recoverable
+managed identities, typed native read-back, exact removal, and the mutation
+ledger. Exception breakpoints are limited to an exact 32-bit code and closed
+chance policy. Conditional software breakpoints compile one to four closed
+register, thread-ID, or hit-count predicates; callers never submit an x64dbg
+expression or command. Implementation and qualification remain in progress.
+
 ### Stage 8: multithreaded read ergonomics before thread control
 
 Prefer explicit `thread_id` on read operations over changing x64dbg's global GUI

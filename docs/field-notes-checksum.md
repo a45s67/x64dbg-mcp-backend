@@ -1171,3 +1171,17 @@ initial loader/target separation, one explicitly authorized resume, the loaded
 fixture module, and a breakpoint pause exactly at its entry. Debugger stop
 removed the generated `DLLLoader*` helper. Both owned sidecars exited and both
 loopback listeners closed after their debugger hosts ended.
+
+The complete 0.16.0 package gate then passed 52 Rust unit/contract tests, seven
+supervised shutdown tests, Clippy with warnings denied, 14 native tests per
+architecture, installer/Codex/skill contracts, offline package verification,
+SBOM generation, and checksums. The archive SHA-256 is
+`d50994d1a18202f555bc77559092a5b5e76a2dbbce1d6409e5e51aa73fb9b3e8`.
+
+The verified package was installed into `C:\tools\x64dbg`; installed x32/x64
+plugins and the sidecar matched their packaged hashes, both Codex endpoints
+retained static Authorization headers, and the managed skill reported 0.16.0.
+Installed instance `aa53ed03-1973-416e-acf7-58aaa437f1d2` then qualified the
+Flare-On `checksum.exe` workflow at ASLR-resolved `CHECKSUM.EXE+0xa78a0`
+(`0x6678a0`): exact-thread context, function analysis, reversible patching,
+typed breakpoints, and owned run-to-address all passed before clean stop.

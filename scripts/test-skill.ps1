@@ -42,7 +42,8 @@ foreach ($reference in @('references\recipes.md', 'references\troubleshooting.md
 $published = @(
     'debugger.state', 'debugger.snapshot', 'debugger.wait_for_pause', 'debugger.pause', 'debugger.resume',
     'debugger.step_into', 'debugger.step_over', 'debugger.step_out', 'debugger.run_to_address',
-    'debugger.stop', 'debuggee.launch', 'debuggee.launch_dll',
+    'debugger.stop', 'trace.start', 'trace.status', 'trace.cancel', 'trace.results',
+    'debuggee.launch', 'debuggee.launch_dll',
     'debuggee.attach', 'debuggee.detach',
     'registers.read', 'registers.write', 'address.resolve', 'analysis.function',
     'memory.read', 'memory.write', 'memory.map', 'memory.search',
@@ -58,7 +59,7 @@ $published = @(
 )
 $mentioned = [regex]::Matches(
     $combined,
-    '(?<![a-z_])(?:debugger|debuggee|registers|address|memory|modules|sections|threads|callstack|breakpoints|assembly|patches|disassembly|expression|symbols|functions|imports|exports|events|strings|references|analysis)(?:\.[a-z_]+)+'
+    '(?<![a-z_])(?:debugger|debuggee|trace|registers|address|memory|modules|sections|threads|callstack|breakpoints|assembly|patches|disassembly|expression|symbols|functions|imports|exports|events|strings|references|analysis)(?:\.[a-z_]+)+'
 ) | ForEach-Object Value | Sort-Object -Unique
 foreach ($tool in $mentioned) {
     Assert-Skill ($tool -in $published) "skill references unpublished tool $tool"

@@ -492,6 +492,13 @@ identity, callback-driven interruption, fixed-command cancellation, and one
 joinable deadline supervisor. Full register/memory trace recording, expressions,
 trace files, and caller commands remain outside the contract.
 
+Completed in 0.17.0. The four typed tools passed closed-schema and replay
+contracts, pure policy tests, explicit active-trace unload tests, and fresh
+x32dbg/x64dbg workflows covering the step cap, immutable pagination, one-active
+ownership, cancellation, timeout, and breakpoint interruption. The installed
+Flare-On checksum workflow also qualified a short non-destructive trace and
+clean debugger-owned sidecar shutdown.
+
 ## Parked work
 
 The following are intentionally outside the active roadmap until explicitly

@@ -105,7 +105,7 @@ Otherwise HTTP 503. Response is bounded and contains no target path or token:
   "diagnostic_code":null,
   "next_actions":[],
   "protocol_version":"2025-06-18",
-  "version":"0.16.0"
+  "version":"0.17.0"
 }
 ```
 
@@ -171,6 +171,10 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `debugger.step_out` | mutate | paused | Fixed `rtr`; newer pause plus return/CSP confirmation; interruptions return `completed: false` |
 | `debugger.run_to_address` | mutate | paused | Owned named single-shot target; 100-20,000 ms; interruption reporting and exact cleanup |
 | `debugger.stop` | mutate | starting/running/paused | Stop current debug session |
+| `trace.start` | mutate | actionable pause | Start one owned into/over address trace; 1-4,096 steps and 100-30,000 ms |
+| `trace.status` | read | any retained session | Copy state, reason, counters, and retained-point count for one exact trace ID |
+| `trace.cancel` | mutate | active retained session | Stop one exact trace through a fixed pause and callback-confirmed terminal state |
+| `trace.results` | read | terminal retained session | Page at most 256 immutable addresses with start-time module/RVA mappings |
 | `debuggee.launch` | destructive mutation | absent | Canonicalize and load an existing executable, accept only bounded structured arguments, then commit the quoted command line at an actionable initial pause |
 | `debuggee.launch_dll` | destructive mutation | absent | Validate an architecture-matched DLL, stop at the generated loader pause, and expose target-entry continuation without argv, exports, or hidden resume |
 | `debuggee.attach` | destructive mutation | absent | Attach to one explicit PID; no enumeration; PID plus paused-callback confirmation |
@@ -267,6 +271,10 @@ the backend never labels mixed-generation data with a newer generation.
   operation is omitted rather than called from the wrong thread.
 - Read operations may execute concurrently only after API-by-API proof of thread
   safety. The MVP default is serialized debugger access.
+- One joinable trace supervisor waits only for the current owned trace deadline.
+  Trace callbacks append into a preallocated 4,097-point buffer without Bridge
+  calls or formatting. Cancellation, timeout, and unload request a fixed pause;
+  shutdown wakes and joins the supervisor before draining the executor.
 - Deadlines are absolute and propagated HTTP -> IPC -> executor. Cancellation can
   remove queued work. Once a mutation starts, cancellation means “outcome may be
   unknown”; the backend observes state and records the result under `operation_id`

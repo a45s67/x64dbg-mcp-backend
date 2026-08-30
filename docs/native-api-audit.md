@@ -31,6 +31,14 @@ as caller command syntax. DLL launch has no argv and respects x64dbg's fixed
 512-wide-character loader mapping. A failure after launch submission is
 outcome-unknown and is never retried automatically.
 
+Owned trace sessions submit only fixed `TraceIntoConditional 0, .<decimal>` or
+`TraceOverConditional 0, .<decimal>` commands. The decimal prefix avoids
+x64dbg's default hexadecimal interpretation. `CB_TRACEEXECUTE` contributes only
+its copied CIP and stop flag to a preallocated 4,097-point policy object; the
+callback performs no Bridge call, allocation, formatting, or blocking. A single
+joinable supervisor owns the wall-clock deadline and may queue one fixed
+`pause` after rechecking trace identity.
+
 `debuggee.attach` accepts only a validated numeric PID, rejects the debugger
 host and owned sidecar PIDs, and renders the fixed command as hexadecimal. It
 does not enumerate or pre-open processes. `debuggee.detach` contains no caller
@@ -71,6 +79,7 @@ not mutated anything.
 | pause/resume/step-in/step-over/stop | `DbgCmdExec` | operation-specific | fixed command; callback and generation confirmation |
 | `debugger.step_out` | `DbgCmdExec` (`rtr`), `DbgGetRegDumpEx`, `DbgDisasmAt` | paused | newer paused callback, copied CIP/CSP/reason, exact generation recheck; return+CSP postcondition distinguishes completion from an intervening pause |
 | `debugger.run_to_address` | `DbgCmdExec` (fixed named `bp`, `run`, optional `pause`/`bc`), private command fence, `GetBridgeBp`, `DbgGetBpxTypeAt`, `DbgGetRegDumpEx`, `DbgDisasmAt` | paused | exact operation-derived single-shot name and typed read-back before run; callback wait bounded to 20 s; intervening pause/process exit are explicit results; cleanup deletes only the exact owned target record and otherwise returns outcome unknown |
+| `trace.start/status/cancel/results` (ADR 0038) | fixed `TraceIntoConditional`/`TraceOverConditional` and optional `pause`; `CB_TRACEEXECUTE`; `DbgGetRegDumpEx`; `Script::Module::GetList` | actionable pause / retained session | one active and latest terminal session; 4,096 steps, 30 s, and 4,097 copied addresses maximum; start-time module list released with `BridgeFree`; immutable 256-item pages; callback-driven reasons; fixed-command cancel; no expressions, files, registers, memory history, or Bridge calls in the trace callback |
 | `registers.write` | `Script::Register::Set`, `DbgGetRegDumpEx` | paused | one allowlisted full-width core register; before/after snapshots, exact read-back, and generation recheck; no batch |
 | `memory.write` | `DbgMemWrite`, `DbgMemRead` | paused | max 4 KiB; read-back verification |
 | breakpoint set/remove | `DbgCmdExec`, `DbgGetBpxTypeAt` | paused | validated address only; bounded observation loop |
@@ -109,15 +118,19 @@ joining the executor.
 
 ## Unload invariant
 
-`plugstop` first changes state to draining and wakes callback waiters. It closes
-the sidecar ownership channel, cancels pipe I/O, joins the IPC worker, stops and
-joins the executor, then waits for the sidecar process. Callbacks are unregistered
+`plugstop` first changes state to draining and wakes callback waiters. It marks
+an active trace `backend_shutdown`, requests at most one bounded fixed pause,
+wakes and joins the trace supervisor, then closes the sidecar ownership channel,
+cancels pipe I/O, joins the IPC worker, stops and joins the executor, and waits
+for the sidecar process. Callbacks are unregistered
 after `Runtime::Stop` returns. There are no detached threads. The five-second
 forced process termination path is a last-resort containment mechanism, not the
 normal sidecar shutdown path, and is covered separately from graceful EOF tests.
 The sidecar is created suspended, assigned to a `KILL_ON_JOB_CLOSE` Job Object,
 then resumed, so debugger process failure cannot leave it unmanaged. CTest also
 injects a sidecar crash for both architectures and verifies bounded plugin stop.
+Dedicated x32/x64 lifecycle cases also begin a 30-second trace and require
+runtime stop in under three seconds with the retained `backend_shutdown` reason.
 
 Any new native API requires updating this table and adding state, bound,
 allocation, timeout, and unload tests.

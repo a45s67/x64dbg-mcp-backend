@@ -1,6 +1,6 @@
 # ADR 0038: Owned bounded address-trace sessions
 
-Status: Accepted before implementation on 2026-08-31.
+Status: Implemented and qualified in 0.17.0 on 2026-08-31.
 
 ## Context
 

@@ -53,6 +53,28 @@ and returned `managed_id`; configured `both` never means the caller may infer wh
 If the plugin reports draining, cancelled, or unavailable, stop issuing work and let debugger
 shutdown finish.
 
+## Bounded address trace
+
+1. Confirm an actionable pause and retain the current backend instance ID.
+2. Start `trace.start` with `into` to observe calls or `over` to omit their
+   interiors. Keep both the step cap and timeout proportional to the question.
+3. Preserve the returned trace ID. If start reports `starting` or `running`, use
+   the normal pause-observation workflow or query `trace.status`; do not submit a
+   second trace.
+4. Accept only an explicit terminal reason. `max_steps` means normal bounded
+   completion; `breakpoint`, `exception`, `user_pause`, `process_exit`, timeout,
+   cancellation, and backend shutdown are distinct incomplete outcomes.
+5. Page `trace.results` with the exact ID and cursor. Module/RVA fields use the
+   immutable start-time module snapshot, while absolute addresses are the actual
+   observed CIPs. Restart neither a stale cursor nor a mutation under a new ID.
+6. If cancellation is needed, call `trace.cancel` once with the active trace ID,
+   current instance ID, and one operation ID. An unknown cancellation outcome is
+   state to inspect, not permission to start another trace.
+
+The backend retains only the latest terminal trace and at most 4,097 addresses.
+Use smaller traces around known code instead of treating this as whole-program
+coverage or as x64dbg's file-backed run trace.
+
 ## Assembly and reversible patches
 
 1. Resolve a module/RVA and read the entire instruction to be replaced.

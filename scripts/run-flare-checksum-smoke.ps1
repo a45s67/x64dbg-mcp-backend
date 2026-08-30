@@ -549,6 +549,35 @@ try {
         throw "Installed owned run-to did not return a cleaned replay-safe result: $($runTo | ConvertTo-Json -Compress -Depth 12)"
     }
 
+    # A short installed address trace changes only execution position. It
+    # verifies the packaged callback path and immutable result transport without
+    # enabling whole-program tracing or retaining registers/memory.
+    $traceBefore = Invoke-Tool 'debugger.state' @{} 130
+    $traceArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        mode = 'over'; max_steps = 8; timeout_ms = 3000
+    }
+    $traceStart = Invoke-Tool 'trace.start' $traceArguments 131
+    $traceReplay = Invoke-Tool 'trace.start' $traceArguments 132
+    if (($traceStart | ConvertTo-Json -Compress -Depth 12) -ne
+        ($traceReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Installed bounded trace start was not exactly replay-safe.'
+    }
+    if ($traceStart.state -in @('starting', 'running')) {
+        $null = Invoke-Tool 'debugger.wait_for_pause' @{
+            after_generation = $traceBefore.state_generation; timeout_ms = 5000
+        } 133
+    }
+    $traceStatus = Invoke-Tool 'trace.status' @{ trace_id = $traceStart.trace_id } 134
+    $traceResults = Invoke-Tool 'trace.results' @{
+        trace_id = $traceStart.trace_id; limit = 16
+    } 135
+    if ($traceStatus.state -ne 'completed' -or $traceStatus.reason -ne 'max_steps' -or
+        $traceStatus.steps_executed -ne 8 -or $traceStatus.points_retained -ne 9 -or
+        @($traceResults.items).Count -ne 9 -or $traceResults.next_cursor) {
+        throw "Installed bounded trace was incomplete: $($traceStatus | ConvertTo-Json -Compress)"
+    }
+
     $stopSubmitted = $true
     $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 40
     [ordered]@{
@@ -622,6 +651,10 @@ try {
         run_to_final_address = $runTo.instruction_pointer
         run_to_replay_equal = $true
         run_to_temporary_breakpoint_cleaned = $true
+        trace_id = $traceStart.trace_id
+        trace_steps = $traceStatus.steps_executed
+        trace_points = @($traceResults.items).Count
+        trace_replay_equal = $true
         stopped = $stop.debuggee_state -eq 'absent'
     } | ConvertTo-Json -Depth 5
 } finally {

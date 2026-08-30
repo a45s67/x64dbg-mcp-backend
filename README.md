@@ -128,6 +128,12 @@ native API does not provide; correlate with `memory.map` for current protection.
 named single-shot breakpoint, reports intervening pauses, and removes only its
 own exact temporary record. Its replay identity prevents an ambiguous execution
 request from being run again under a new operation ID.
+Owned `trace.start`, `trace.status`, `trace.cancel`, and `trace.results` sessions
+capture only a bounded into/over address path. One active session is capped at
+4,096 steps, 30 seconds, and 4,097 retained addresses; results are immutable,
+paginated, and mapped through the start-time module snapshot. Breakpoints,
+exceptions, user pause, timeout, cancellation, process exit, and backend unload
+remain explicit terminal reasons rather than being reported as completion.
 
 Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
 It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer

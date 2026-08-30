@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.16.0"
-  minimum-backend-version: "0.16.0"
+  version: "0.17.0"
+  minimum-backend-version: "0.17.0"
   mcp-protocol: "2025-06-18"
 ---
 
@@ -53,6 +53,16 @@ an explicit bounded timeout. Require `completed: true` before assuming the
 target was reached; otherwise inspect `interruption` and `pause_reason`. The
 backend removes only its exact operation-owned temporary breakpoint. Do not
 blindly repeat an unknown outcome with a fresh operation ID.
+
+Use `trace.start` only for a deliberately bounded control-flow question. Choose
+the closed `into` or `over` mode, the smallest useful `max_steps`, and an explicit
+deadline. Preserve the returned `trace_id`; inspect `trace.status`, wait for a
+terminal reason when necessary, and page `trace.results` only after termination.
+Results are an address path with start-time module/RVA mappings, not an instruction,
+register, memory, branch-target, or per-thread history. Use `trace.cancel` once for
+the exact active ID when the observation is no longer needed. Preserve its
+operation ID after ambiguity and never start a replacement trace merely to force
+the old one to stop.
 
 Use `breakpoints.hardware.set` only after transient `process_created` and `system_breakpoint`
 startup pauses. Choose one exact access and naturally aligned architecture-supported size; there

@@ -362,6 +362,27 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             one_of(object, "access", &["access", "read", "write", "execute"])?;
             integer(object, "size", 1, 65_536)
         }
+        "breakpoints.exception.set" => {
+            operation(object, &["code", "chance"])?;
+            validate_exception_code(object)?;
+            one_of(object, "chance", &["first", "second", "both"])
+        }
+        "breakpoints.exception.remove" => {
+            operation(object, &["code", "chance", "managed_id"])?;
+            validate_exception_code(object)?;
+            one_of(object, "chance", &["first", "second", "both"])?;
+            validate_uuid_field(object, "managed_id")
+        }
+        "breakpoints.conditional.set" => {
+            operation(object, &["address", "condition"])?;
+            validate_address_ref(object, "address")?;
+            validate_conditional_spec(object)
+        }
+        "breakpoints.conditional.remove" => {
+            operation(object, &["address", "managed_id"])?;
+            validate_address_ref(object, "address")?;
+            validate_uuid_field(object, "managed_id")
+        }
         "assembly.preview" => {
             exact_keys(object, &["address", "instruction"], &[])?;
             validate_address_ref(object, "address")?;
@@ -534,6 +555,90 @@ fn validate_instance_id(object: &serde_json::Map<String, Value>) -> Result<(), V
         return Err(invalid("instance_id", "must be a canonical lowercase UUID"));
     }
     Ok(())
+}
+
+fn validate_uuid_field(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+) -> Result<(), ValidationError> {
+    let id = string(object, field, 36, 36)?;
+    let parsed = Uuid::parse_str(id).map_err(|_| invalid(field, "must be a UUID"))?;
+    if parsed.hyphenated().to_string() != id {
+        return Err(invalid(field, "must be a canonical lowercase UUID"));
+    }
+    Ok(())
+}
+
+fn validate_exception_code(object: &serde_json::Map<String, Value>) -> Result<(), ValidationError> {
+    let code = string(object, "code", 3, 10)?;
+    validate_hex(code, "code")?;
+    u32::from_str_radix(&code[2..], 16)
+        .map(|_| ())
+        .map_err(|_| invalid("code", "must be a canonical 32-bit hexadecimal value"))
+}
+
+fn validate_conditional_spec(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), ValidationError> {
+    let condition = object
+        .get("condition")
+        .and_then(Value::as_object)
+        .ok_or(invalid("condition", "must be a bounded condition object"))?;
+    exact_keys(condition, &["mode", "predicates"], &[])?;
+    one_of(condition, "mode", &["all", "any"])?;
+    let predicates = condition
+        .get("predicates")
+        .and_then(Value::as_array)
+        .filter(|values| (1..=4).contains(&values.len()))
+        .ok_or(invalid("predicates", "must contain 1 to 4 predicates"))?;
+    for predicate in predicates {
+        let predicate = predicate
+            .as_object()
+            .ok_or(invalid("predicates", "must contain only predicate objects"))?;
+        let source = string(predicate, "source", 8, 10)?;
+        match source {
+            "register" => {
+                exact_keys(predicate, &["source", "register", "operator", "value"], &[])?;
+                one_of(
+                    predicate,
+                    "register",
+                    &[
+                        "cax", "cbx", "ccx", "cdx", "csi", "cdi", "cbp", "csp", "cip",
+                    ],
+                )?;
+                one_of(predicate, "operator", &["eq", "ne", "lt", "le", "gt", "ge"])?;
+                validate_bounded_hex_field(predicate, "value", 16)?;
+            }
+            "thread_id" => {
+                exact_keys(predicate, &["source", "operator", "value"], &[])?;
+                one_of(predicate, "operator", &["eq", "ne"])?;
+                validate_bounded_hex_field(predicate, "value", 8)?;
+            }
+            "hit_count" => {
+                exact_keys(predicate, &["source", "operator", "value"], &[])?;
+                one_of(
+                    predicate,
+                    "operator",
+                    &["eq", "ne", "lt", "le", "gt", "ge", "multiple_of"],
+                )?;
+                integer(predicate, "value", 1, 4_294_967_295)?;
+            }
+            _ => return Err(invalid("source", "is not an accepted enum value")),
+        }
+    }
+    Ok(())
+}
+
+fn validate_bounded_hex_field(
+    object: &serde_json::Map<String, Value>,
+    field: &'static str,
+    digits: usize,
+) -> Result<(), ValidationError> {
+    let value = string(object, field, 3, digits + 2)?;
+    validate_hex(value, field)?;
+    u64::from_str_radix(&value[2..], 16)
+        .map(|_| ())
+        .map_err(|_| invalid(field, "must be bounded canonical hexadecimal"))
 }
 
 fn validate_path(
@@ -1200,6 +1305,55 @@ fn build_catalog() -> Vec<Value> {
             ]),
             true,
         ),
+        mutation_tool(
+            "breakpoints.exception.set",
+            "Create one backend-managed exception breakpoint for an exact 32-bit code and first, second, or both chances. Existing records collide; exact typed read-back is required.",
+            operation_schema(vec![
+                (
+                    "code",
+                    json!({"type":"string","pattern":"^0x[0-9a-f]{1,8}$","minLength":3,"maxLength":10}),
+                ),
+                (
+                    "chance",
+                    json!({"type":"string","enum":["first","second","both"]}),
+                ),
+            ]),
+            false,
+        ),
+        mutation_tool(
+            "breakpoints.exception.remove",
+            "Remove one exception breakpoint only when its code, chance, and backend-managed identity still match. Batch and foreign-record deletion are unavailable.",
+            operation_schema(vec![
+                (
+                    "code",
+                    json!({"type":"string","pattern":"^0x[0-9a-f]{1,8}$","minLength":3,"maxLength":10}),
+                ),
+                (
+                    "chance",
+                    json!({"type":"string","enum":["first","second","both"]}),
+                ),
+                ("managed_id", uuid_schema()),
+            ]),
+            true,
+        ),
+        mutation_tool(
+            "breakpoints.conditional.set",
+            "Create one backend-managed software breakpoint whose condition is compiled from 1-4 closed register, thread-ID, or hit-count predicates. Caller debugger expressions and commands are not accepted.",
+            operation_schema(vec![
+                ("address", address_ref()),
+                ("condition", conditional_schema()),
+            ]),
+            false,
+        ),
+        mutation_tool(
+            "breakpoints.conditional.remove",
+            "Remove one conditional software breakpoint only when its address and backend-managed identity still match.",
+            operation_schema(vec![
+                ("address", address_ref()),
+                ("managed_id", uuid_schema()),
+            ]),
+            true,
+        ),
         read_tool(
             "assembly.preview",
             "Assemble exactly one printable ASCII instruction at a paused runtime address and return at most 16 bytes without changing memory.",
@@ -1497,33 +1651,80 @@ fn page_schema() -> Value {
     )
 }
 
+fn uuid_schema() -> Value {
+    json!({
+        "type":"string",
+        "format":"uuid",
+        "pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "minLength":36,
+        "maxLength":36
+    })
+}
+
+fn conditional_schema() -> Value {
+    let register = object(
+        vec![
+            ("source", json!({"type":"string","const":"register"})),
+            (
+                "register",
+                json!({"type":"string","enum":["cax","cbx","ccx","cdx","csi","cdi","cbp","csp","cip"]}),
+            ),
+            (
+                "operator",
+                json!({"type":"string","enum":["eq","ne","lt","le","gt","ge"]}),
+            ),
+            (
+                "value",
+                json!({"type":"string","pattern":"^0x[0-9a-f]{1,16}$","minLength":3,"maxLength":18}),
+            ),
+        ],
+        vec!["source", "register", "operator", "value"],
+    );
+    let thread_id = object(
+        vec![
+            ("source", json!({"type":"string","const":"thread_id"})),
+            ("operator", json!({"type":"string","enum":["eq","ne"]})),
+            (
+                "value",
+                json!({"type":"string","pattern":"^0x[0-9a-f]{1,8}$","minLength":3,"maxLength":10}),
+            ),
+        ],
+        vec!["source", "operator", "value"],
+    );
+    let hit_count = object(
+        vec![
+            ("source", json!({"type":"string","const":"hit_count"})),
+            (
+                "operator",
+                json!({"type":"string","enum":["eq","ne","lt","le","gt","ge","multiple_of"]}),
+            ),
+            (
+                "value",
+                json!({"type":"integer","minimum":1,"maximum":4_294_967_295_u64}),
+            ),
+        ],
+        vec!["source", "operator", "value"],
+    );
+    object(
+        vec![
+            ("mode", json!({"type":"string","enum":["all","any"]})),
+            (
+                "predicates",
+                json!({
+                    "type":"array",
+                    "minItems":1,
+                    "maxItems":4,
+                    "items":{"oneOf":[register,thread_id,hit_count]}
+                }),
+            ),
+        ],
+        vec!["mode", "predicates"],
+    )
+}
+
 fn operation_schema(mut properties: Vec<(&'static str, Value)>) -> Value {
-    properties.insert(
-        0,
-        (
-            "instance_id",
-            json!({
-                "type":"string",
-                "format":"uuid",
-                "pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-                "minLength":36,
-                "maxLength":36
-            }),
-        ),
-    );
-    properties.insert(
-        0,
-        (
-            "operation_id",
-            json!({
-                "type":"string",
-                "format":"uuid",
-                "pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-                "minLength":36,
-                "maxLength":36
-            }),
-        ),
-    );
+    properties.insert(0, ("instance_id", uuid_schema()));
+    properties.insert(0, ("operation_id", uuid_schema()));
     let mut required = vec!["operation_id", "instance_id"];
     required.extend(properties.iter().skip(2).map(|(name, _)| *name));
     object(properties, required)
@@ -1621,7 +1822,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 47);
+        assert_eq!(catalog().len(), 51);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -1884,6 +2085,77 @@ mod tests {
                 })
             )
             .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "breakpoints.exception.set",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "code":"0xe0424242",
+                    "chance":"first"
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "breakpoints.exception.remove",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "code":"0x100000000",
+                    "chance":"all",
+                    "managed_id":"01234567-89ab-4cde-8fab-0123456789ab"
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "breakpoints.conditional.set",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "address":{"module":"sample.exe","rva":"0x1000"},
+                    "condition":{
+                        "mode":"all",
+                        "predicates":[
+                            {"source":"register","register":"cax","operator":"eq","value":"0x1"},
+                            {"source":"thread_id","operator":"ne","value":"0x20"},
+                            {"source":"hit_count","operator":"multiple_of","value":3}
+                        ]
+                    }
+                })
+            )
+            .is_ok()
+        );
+        for invalid_condition in [
+            json!({"mode":"all","predicates":[]}),
+            json!({"mode":"all","predicates":[{"source":"register","register":"rax","operator":"eq","value":"0x1"}]}),
+            json!({"mode":"all","predicates":[{"source":"thread_id","operator":"lt","value":"0x1"}]}),
+            json!({"mode":"all","predicates":[{"source":"hit_count","operator":"multiple_of","value":0}]}),
+            json!({"mode":"all","predicates":[{"source":"hit_count","operator":"eq","value":1,"extra":true}]}),
+        ] {
+            assert!(
+                validate_arguments(
+                    "breakpoints.conditional.set",
+                    &json!({
+                        "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                        "address":"0x1000",
+                        "condition":invalid_condition
+                    })
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            validate_arguments(
+                "breakpoints.conditional.remove",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "address":"0x1000",
+                    "managed_id":"01234567-89ab-4cde-8fab-0123456789ab"
+                })
+            )
+            .is_ok()
         );
         assert!(
             validate_arguments("memory.read", &json!({"address":"0X1000","length":1})).is_err()

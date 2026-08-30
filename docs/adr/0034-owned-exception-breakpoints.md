@@ -1,6 +1,6 @@
 # ADR 0034: Owned typed exception breakpoints
 
-Status: Accepted before implementation on 2026-08-31.
+Status: Implemented and qualified in 0.14.0 on 2026-08-31.
 
 ## Context
 
@@ -84,3 +84,13 @@ Agents gain a precise exception stop policy without a debugger command or
 script surface. The MVP intentionally omits exception names, wildcard codes,
 process enumeration, arbitrary exception conditions, logging, commands on hit,
 and delete-all behavior.
+
+The live x64dbg callback shape required one refinement: an exception breakpoint
+arrives as `CB_BREAKPOINT` with its code in the breakpoint address field. The
+runtime therefore retains only the immediately preceding
+`EXCEPTION_DEBUG_EVENT` metadata and consumes it when code, process, and thread
+match that exception-breakpoint callback. It does not infer first chance from
+the configured policy. Isolated instances
+`f8edad8c-0cae-4c3b-a24e-42c8e4160a87` (x64) and
+`96baf49c-d4ea-4f1a-8e23-00476f796968` (x32) proved the correlation and exact
+managed lifecycle.

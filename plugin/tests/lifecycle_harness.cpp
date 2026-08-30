@@ -125,6 +125,32 @@ bool ExercisePauseCallbacks(mcp::Runtime& runtime) {
     }
 
     runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+    DEBUG_EVENT rawException{};
+    rawException.dwDebugEventCode = EXCEPTION_DEBUG_EVENT;
+    rawException.dwProcessId = 0x1234U;
+    rawException.dwThreadId = 0x5678U;
+    rawException.u.Exception.ExceptionRecord.ExceptionCode = 0xe0424242U;
+    rawException.u.Exception.ExceptionRecord.ExceptionAddress =
+        reinterpret_cast<void*>(0x401234U);
+    rawException.u.Exception.dwFirstChance = 1U;
+    PLUG_CB_DEBUGEVENT rawExceptionInfo{&rawException};
+    runtime.OnDebuggerEvent(CB_DEBUGEVENT, &rawExceptionInfo);
+    BRIDGEBP exceptionBreakpoint{};
+    exceptionBreakpoint.type = bp_exception;
+    exceptionBreakpoint.addr = static_cast<duint>(0xe0424242U);
+    exceptionBreakpoint.hitCount = 1U;
+    PLUG_CB_BREAKPOINT exceptionBreakpointInfo{&exceptionBreakpoint};
+    runtime.OnDebuggerEvent(CB_BREAKPOINT, &exceptionBreakpointInfo);
+    const mcp::PauseObservation correlatedException = runtime.PauseForTesting();
+    if (correlatedException.kind != mcp::PauseReasonKind::exception ||
+        !correlatedException.hasExceptionCode ||
+        correlatedException.exceptionCode != 0xe0424242U ||
+        !correlatedException.hasAddress || correlatedException.address != 0x401234U ||
+        !correlatedException.firstChance) {
+        return false;
+    }
+
+    runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
     if (runtime.PausedSnapshotCurrentForTesting(*snapshot)) {
         return false;
     }

@@ -416,7 +416,16 @@ managed identities, typed native read-back, exact removal, and the mutation
 ledger. Exception breakpoints are limited to an exact 32-bit code and closed
 chance policy. Conditional software breakpoints compile one to four closed
 register, thread-ID, or hit-count predicates; callers never submit an x64dbg
-expression or command. Implementation and qualification remain in progress.
+expression or command.
+
+Completed in 0.14.0. Both families use private command fences, exact typed
+postconditions, operation-derived managed IDs, replay-safe mutation records, and
+foreign-removal refusal. Exception pauses correlate the generic Windows debug
+event with the matching x64dbg breakpoint callback, preserving the actual code,
+exception address, and first-chance value instead of inferring from policy.
+Fresh isolated x32 and x64 workflows proved conditional `hit_count == 2` fast
+resume, first-chance private exceptions, list recovery, exact replay/removal,
+prior-tool regression coverage, and owned sidecar shutdown.
 
 ### Stage 8: multithreaded read ergonomics before thread control
 

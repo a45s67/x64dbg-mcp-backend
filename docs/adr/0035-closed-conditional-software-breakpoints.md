@@ -1,6 +1,6 @@
 # ADR 0035: Closed-schema conditional software breakpoints
 
-Status: Accepted before implementation on 2026-08-31.
+Status: Implemented and qualified in 0.14.0 on 2026-08-31.
 
 ## Context
 
@@ -86,3 +86,8 @@ MCP clients quote x64dbg expressions. More elaborate string, memory, argument,
 or exception predicates remain out of scope until a concrete workflow justifies
 another closed predicate type. An arbitrary expression or breakpoint-command
 escape hatch is not introduced.
+
+Fresh isolated instances `f8edad8c-0cae-4c3b-a24e-42c8e4160a87` (x64) and
+`96baf49c-d4ea-4f1a-8e23-00476f796968` (x32) both skipped the first fixture hit,
+paused with hit count two, recovered the managed identity through listing,
+refused a foreign removal, replayed exactly, and removed the owned record.

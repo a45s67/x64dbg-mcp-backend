@@ -640,11 +640,15 @@ try {
     $runToTargetSymbol = @($symbols.items | Where-Object {
         $_.name -ieq 'mcp_fixture_run_to_target'
     })[0]
+    $exceptionTriggerSymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_exception_trigger'
+    })[0]
     if (!$analysisSymbol -or !$analysisSymbol.location.rva -or
         !$markerSymbol -or !$markerSymbol.location.rva -or
         !$runToInterrupterSymbol -or !$runToInterrupterSymbol.location.rva -or
-        !$runToTargetSymbol -or !$runToTargetSymbol.location.rva) {
-        throw 'Fixture analysis, marker, and run-to exports were not available as structured symbols.'
+        !$runToTargetSymbol -or !$runToTargetSymbol.location.rva -or
+        !$exceptionTriggerSymbol -or !$exceptionTriggerSymbol.location.rva) {
+        throw 'Fixture analysis, marker, run-to, and exception-trigger exports were not available as structured symbols.'
     }
     $analysisRuntimeAddress = [Convert]::ToUInt64(
         $analysisSymbol.location.address.Substring(2), 16)
@@ -687,6 +691,10 @@ try {
     $runToTargetRef = @{
         module = $fixtureModule.name.ToUpperInvariant()
         rva = $runToTargetSymbol.location.rva
+    }
+    $exceptionTriggerRef = @{
+        module = $fixtureModule.name.ToUpperInvariant()
+        rva = $exceptionTriggerSymbol.location.rva
     }
     $analysisOperation = [Guid]::NewGuid().ToString()
     $analysis = Invoke-Tool 'analysis.function' @{
@@ -1155,6 +1163,132 @@ try {
         ($memoryRemoveReplay | ConvertTo-Json -Compress -Depth 10)) {
         throw 'Typed memory breakpoint removal was not exactly replay-safe.'
     }
+
+    $conditionalSetArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $runToInterrupterRef
+        condition = @{
+            mode = 'all'
+            predicates = @(@{ source = 'hit_count'; operator = 'eq'; value = 2 })
+        }
+    }
+    $conditionalSet = Invoke-Tool 'breakpoints.conditional.set' $conditionalSetArguments 300
+    $conditionalSetReplay = Invoke-Tool 'breakpoints.conditional.set' $conditionalSetArguments 301
+    $conditionalList = Invoke-Tool 'breakpoints.list' @{ limit = 256 } 302
+    $listedConditional = @($conditionalList.items | Where-Object {
+        $_.address -eq $runToInterrupterSymbol.location.address -and
+        $_.type -eq 'software'
+    })[0]
+    if (!$conditionalSet.present -or !$conditionalSet.fast_resume -or
+        $conditionalSet.managed_id -ne $conditionalSetArguments.operation_id -or
+        !$conditionalSet.condition_expression -or !$listedConditional -or
+        $listedConditional.managed_id -ne $conditionalSet.managed_id -or
+        !$listedConditional.fast_resume -or
+        $listedConditional.condition_expression -ne $conditionalSet.condition_expression -or
+        ($conditionalSet | ConvertTo-Json -Compress -Depth 12) -ne
+        ($conditionalSetReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Typed conditional breakpoint was not exactly listed or replay-safe.'
+    }
+    $conditionalForeignRemove = Invoke-Mcp 'tools/call' @{
+        name = 'breakpoints.conditional.remove'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString()
+            address = $runToInterrupterRef
+            managed_id = [Guid]::NewGuid().ToString()
+        }
+    } 303
+    if (!$conditionalForeignRemove.isError -or
+        $conditionalForeignRemove.structuredContent.error.code -ne 'CONFLICT') {
+        throw 'Conditional breakpoint removal did not refuse a foreign managed identity.'
+    }
+    $conditionalResume = Invoke-Tool 'debugger.resume' @{
+        operation_id = [Guid]::NewGuid().ToString()
+    } 304
+    $conditionalPause = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $conditionalResume.state_generation; timeout_ms = 9000
+    } 305
+    if ($conditionalPause.pause_reason.kind -ne 'breakpoint' -or
+        $conditionalPause.pause_reason.breakpoint_type -ne 'software' -or
+        $conditionalPause.pause_reason.address -ne $runToInterrupterSymbol.location.address -or
+        $conditionalPause.pause_reason.hit_count -ne 2) {
+        throw 'Conditional hit-count breakpoint did not skip the first hit and pause on the second.'
+    }
+    $conditionalRemoveArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $runToInterrupterRef
+        managed_id = $conditionalSet.managed_id
+    }
+    $conditionalRemove = Invoke-Tool 'breakpoints.conditional.remove' $conditionalRemoveArguments 306
+    $conditionalRemoveReplay = Invoke-Tool 'breakpoints.conditional.remove' $conditionalRemoveArguments 307
+    if ($conditionalRemove.present -or
+        ($conditionalRemove | ConvertTo-Json -Compress -Depth 10) -ne
+        ($conditionalRemoveReplay | ConvertTo-Json -Compress -Depth 10)) {
+        throw 'Typed conditional breakpoint removal was not exactly replay-safe.'
+    }
+
+    $exceptionSetArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        code = '0xe0424242'
+        chance = 'first'
+    }
+    $exceptionSet = Invoke-Tool 'breakpoints.exception.set' $exceptionSetArguments 308
+    $exceptionSetReplay = Invoke-Tool 'breakpoints.exception.set' $exceptionSetArguments 309
+    $exceptionList = Invoke-Tool 'breakpoints.list' @{ limit = 256 } 310
+    $listedException = @($exceptionList.items | Where-Object {
+        $_.type -eq 'exception' -and $_.code -eq '0xe0424242'
+    })[0]
+    if (!$exceptionSet.present -or $exceptionSet.chance -ne 'first' -or
+        $exceptionSet.managed_id -ne $exceptionSetArguments.operation_id -or
+        !$listedException -or $listedException.chance -ne 'first' -or
+        $listedException.managed_id -ne $exceptionSet.managed_id -or
+        ($exceptionSet | ConvertTo-Json -Compress -Depth 12) -ne
+        ($exceptionSetReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Typed exception breakpoint was not exactly listed or replay-safe.'
+    }
+    $exceptionForeignRemove = Invoke-Mcp 'tools/call' @{
+        name = 'breakpoints.exception.remove'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString()
+            code = '0xe0424242'; chance = 'first'
+            managed_id = [Guid]::NewGuid().ToString()
+        }
+    } 311
+    if (!$exceptionForeignRemove.isError -or
+        $exceptionForeignRemove.structuredContent.error.code -ne 'CONFLICT') {
+        throw 'Exception breakpoint removal did not refuse a foreign managed identity.'
+    }
+    $null = Invoke-Tool 'memory.write' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $exceptionTriggerRef; data_hex = '01000000'
+    } 312
+    $exceptionResume = Invoke-Tool 'debugger.resume' @{
+        operation_id = [Guid]::NewGuid().ToString()
+    } 313
+    $exceptionPause = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $exceptionResume.state_generation; timeout_ms = 9000
+    } 314
+    if ($exceptionPause.pause_reason.kind -ne 'exception' -or
+        $exceptionPause.pause_reason.code -ne '0xe0424242' -or
+        !$exceptionPause.pause_reason.first_chance) {
+        throw "Typed exception breakpoint did not report its exact first-chance pause metadata: $($exceptionPause | ConvertTo-Json -Compress -Depth 10)"
+    }
+    $exceptionRemoveArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        code = '0xe0424242'; chance = 'first'
+        managed_id = $exceptionSet.managed_id
+    }
+    $exceptionRemove = Invoke-Tool 'breakpoints.exception.remove' $exceptionRemoveArguments 315
+    $exceptionRemoveReplay = Invoke-Tool 'breakpoints.exception.remove' $exceptionRemoveArguments 316
+    if ($exceptionRemove.present -or
+        ($exceptionRemove | ConvertTo-Json -Compress -Depth 10) -ne
+        ($exceptionRemoveReplay | ConvertTo-Json -Compress -Depth 10)) {
+        throw 'Typed exception breakpoint removal was not exactly replay-safe.'
+    }
+    $exceptionContinue = Invoke-Tool 'debugger.resume' @{
+        operation_id = [Guid]::NewGuid().ToString()
+    } 317
+    $null = Invoke-Tool 'debugger.pause' @{
+        operation_id = [Guid]::NewGuid().ToString()
+    } 318
+
     $runToInterrupterSet = Invoke-Tool 'breakpoints.set' @{
         operation_id = [Guid]::NewGuid().ToString(); address = $runToInterrupterRef
     } 221
@@ -1439,6 +1573,19 @@ try {
         memory_breakpoint_size = $memoryBreakpoint.size
         memory_breakpoint_replay_equal = $true
         memory_breakpoint_mismatch_rejected = $true
+        conditional_breakpoint_hit_count = $conditionalPause.pause_reason.hit_count
+        conditional_breakpoint_managed = $conditionalSet.managed_id
+        conditional_breakpoint_listed = $true
+        conditional_breakpoint_replay_equal = $true
+        conditional_breakpoint_foreign_remove_rejected = $true
+        conditional_breakpoint_removed = !$conditionalRemove.present
+        exception_breakpoint_code = $exceptionPause.pause_reason.code
+        exception_breakpoint_chance = $exceptionSet.chance
+        exception_breakpoint_managed = $exceptionSet.managed_id
+        exception_breakpoint_listed = $true
+        exception_breakpoint_replay_equal = $true
+        exception_breakpoint_foreign_remove_rejected = $true
+        exception_breakpoint_removed = !$exceptionRemove.present
         run_to_interruption_preserved_caller_breakpoint = $runToInterrupterSet.present
         run_to_target = $runToCompleted.instruction_pointer
         run_to_replay_equal = $true

@@ -202,6 +202,73 @@ try {
         throw 'Installed native call-stack read was not bounded and generation-consistent.'
     }
 
+    # Qualify managed breakpoint metadata without resuming challenge logic.
+    $managedBreakpointInstruction = @($disassemblySnapshot.items)[1]
+    if (!$managedBreakpointInstruction -or $managedBreakpointInstruction.size -lt 1 -or
+        $managedBreakpointInstruction.size -gt 16) {
+        throw 'Main disassembly has no bounded instruction for managed breakpoint qualification.'
+    }
+    $managedBreakpointTarget = @{ absolute = $managedBreakpointInstruction.address }
+    $conditionalArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $managedBreakpointTarget
+        condition = @{
+            mode = 'all'
+            predicates = @(@{ source = 'hit_count'; operator = 'eq'; value = 1 })
+        }
+    }
+    $conditionalSet = Invoke-Tool 'breakpoints.conditional.set' $conditionalArguments 130
+    $conditionalReplay = Invoke-Tool 'breakpoints.conditional.set' $conditionalArguments 131
+    $conditionalList = Invoke-Tool 'breakpoints.list' @{ limit = 256 } 132
+    $listedConditional = @($conditionalList.items | Where-Object {
+        $_.address -eq $managedBreakpointTarget.absolute -and $_.type -eq 'software'
+    })[0]
+    if (!$conditionalSet.present -or !$conditionalSet.fast_resume -or
+        !$listedConditional -or $listedConditional.managed_id -ne $conditionalSet.managed_id -or
+        ($conditionalSet | ConvertTo-Json -Compress -Depth 12) -ne
+        ($conditionalReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Installed conditional breakpoint was not listed or replay-safe.'
+    }
+    $conditionalRemoveArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $managedBreakpointTarget; managed_id = $conditionalSet.managed_id
+    }
+    $conditionalRemove = Invoke-Tool 'breakpoints.conditional.remove' $conditionalRemoveArguments 133
+    $conditionalRemoveReplay = Invoke-Tool 'breakpoints.conditional.remove' $conditionalRemoveArguments 134
+    if ($conditionalRemove.present -or
+        ($conditionalRemove | ConvertTo-Json -Compress -Depth 12) -ne
+        ($conditionalRemoveReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Installed conditional breakpoint removal was not replay-safe.'
+    }
+
+    $exceptionArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        code = '0xe0424343'; chance = 'first'
+    }
+    $exceptionSet = Invoke-Tool 'breakpoints.exception.set' $exceptionArguments 135
+    $exceptionReplay = Invoke-Tool 'breakpoints.exception.set' $exceptionArguments 136
+    $exceptionList = Invoke-Tool 'breakpoints.list' @{ limit = 256 } 137
+    $listedException = @($exceptionList.items | Where-Object {
+        $_.type -eq 'exception' -and $_.code -eq '0xe0424343'
+    })[0]
+    if (!$exceptionSet.present -or $exceptionSet.chance -ne 'first' -or
+        !$listedException -or $listedException.managed_id -ne $exceptionSet.managed_id -or
+        ($exceptionSet | ConvertTo-Json -Compress -Depth 12) -ne
+        ($exceptionReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Installed exception breakpoint was not listed or replay-safe.'
+    }
+    $exceptionRemoveArguments = @{
+        operation_id = [Guid]::NewGuid().ToString()
+        code = '0xe0424343'; chance = 'first'; managed_id = $exceptionSet.managed_id
+    }
+    $exceptionRemove = Invoke-Tool 'breakpoints.exception.remove' $exceptionRemoveArguments 138
+    $exceptionRemoveReplay = Invoke-Tool 'breakpoints.exception.remove' $exceptionRemoveArguments 139
+    if ($exceptionRemove.present -or
+        ($exceptionRemove | ConvertTo-Json -Compress -Depth 12) -ne
+        ($exceptionRemoveReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Installed exception breakpoint removal was not replay-safe.'
+    }
+
     # Patch the next instruction, verify x64dbg tracking, and restore it before execution.
     $patchInstructionTarget = @($disassemblySnapshot.items)[1]
     if (!$patchInstructionTarget -or $patchInstructionTarget.size -lt 1 -or
@@ -525,6 +592,12 @@ try {
         memory_breakpoint_address = $memoryPause.instruction_pointer
         memory_breakpoint_size = $memorySet.size
         memory_breakpoint_replay_equal = $true
+        conditional_breakpoint_managed = $conditionalSet.managed_id
+        conditional_breakpoint_replay_equal = $true
+        conditional_breakpoint_removed = !$conditionalRemove.present
+        exception_breakpoint_managed = $exceptionSet.managed_id
+        exception_breakpoint_replay_equal = $true
+        exception_breakpoint_removed = !$exceptionRemove.present
         run_to_target = $runToInstruction.address
         run_to_completed = $runTo.completed
         run_to_interruption = $runTo.interruption

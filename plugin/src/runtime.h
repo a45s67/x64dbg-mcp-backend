@@ -67,6 +67,15 @@ struct EventRecord {
     bool firstChance{false};
 };
 
+struct PendingExceptionObservation {
+    std::uint32_t processId{0};
+    std::uint32_t threadId{0};
+    std::uint32_t code{0};
+    std::uint64_t address{0};
+    bool firstChance{false};
+    bool valid{false};
+};
+
 class Runtime final {
 public:
     Runtime() = default;
@@ -137,6 +146,7 @@ private:
     std::mutex stateMutex_;
     std::condition_variable stateChanged_;
     PauseObservation latestPause_;
+    PendingExceptionObservation pendingException_;
     static constexpr std::size_t kEventCapacity = 256U;
     std::array<EventRecord, kEventCapacity> eventRing_{};
     std::size_t eventStart_{0U};

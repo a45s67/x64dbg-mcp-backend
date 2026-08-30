@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "bridgemain.h"
 
@@ -11,6 +13,23 @@ namespace mcp {
 
 enum class HardwareAccess { execute, write, readWrite };
 enum class MemoryAccess { access, read, write, execute };
+enum class ExceptionChance { first, second, both };
+enum class ConditionalMode { all, any };
+enum class ConditionalSource { registerValue, threadId, hitCount };
+enum class ConditionalOperator { equal, notEqual, less, lessEqual, greater, greaterEqual,
+                                 multipleOf };
+
+struct ConditionalPredicate {
+    ConditionalSource source{ConditionalSource::hitCount};
+    ConditionalOperator operation{ConditionalOperator::equal};
+    std::string registerName;
+    std::uint64_t value{0U};
+};
+
+struct ConditionalSpec {
+    ConditionalMode mode{ConditionalMode::all};
+    std::vector<ConditionalPredicate> predicates;
+};
 
 [[nodiscard]] std::optional<HardwareAccess>
 ParseHardwareAccess(std::string_view value) noexcept;
@@ -42,6 +61,32 @@ ParseMemoryAccess(std::string_view value) noexcept;
                                            std::size_t size,
                                            duint observedSize,
                                            bool requireEnabled) noexcept;
+
+[[nodiscard]] std::optional<ExceptionChance>
+ParseExceptionChance(std::string_view value) noexcept;
+[[nodiscard]] const char* ExceptionChanceName(ExceptionChance value) noexcept;
+[[nodiscard]] const char* ExceptionChanceCommand(ExceptionChance value) noexcept;
+[[nodiscard]] bool ExceptionBreakpointMatches(const BRIDGEBP& breakpoint,
+                                              std::uint32_t code,
+                                              ExceptionChance chance,
+                                              std::string_view managedId) noexcept;
+
+[[nodiscard]] std::optional<ConditionalOperator>
+ParseConditionalOperator(std::string_view value) noexcept;
+[[nodiscard]] bool PortableConditionalRegister(std::string_view value) noexcept;
+[[nodiscard]] std::optional<std::string>
+CompileConditionalExpression(const ConditionalSpec& condition);
+[[nodiscard]] std::string ManagedBreakpointName(std::string_view family,
+                                                std::string_view managedId);
+[[nodiscard]] std::optional<std::string>
+ManagedBreakpointId(const BRIDGEBP& breakpoint, std::string_view family);
+[[nodiscard]] bool ConditionalBreakpointMatches(const BRIDGEBP& breakpoint,
+                                                duint address,
+                                                std::string_view managedId,
+                                                std::string_view expression) noexcept;
+[[nodiscard]] bool ConditionalBreakpointOwned(const BRIDGEBP& breakpoint,
+                                              duint address,
+                                              std::string_view managedId) noexcept;
 
 [[nodiscard]] std::string RunToBreakpointName(std::string_view operationId);
 [[nodiscard]] std::string RunToBreakpointSetCommand(duint target,

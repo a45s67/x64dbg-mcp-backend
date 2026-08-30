@@ -95,6 +95,11 @@ Typed hardware and memory breakpoint tools validate access, size, architecture,
 alignment, slot/range ownership, and exact native read-back. Hardware setup
 rejects transient process-created and system-breakpoint startup pauses; removals require the current shape
 to match instead of deleting address-only state.
+Typed conditional software breakpoints compile one to four closed register,
+thread-ID, or hit-count predicates and enable fast resume without accepting a
+caller expression. Typed exception breakpoints bind one exact 32-bit code to a
+closed chance policy. Both families return recoverable managed identities,
+verify native fields exactly, refuse foreign removal, and preserve replay semantics.
 Assembly preview is read-only. Tracked code patches require exact original bytes,
 are limited to one 16-byte instruction span, and restore only from verified x64dbg
 patch metadata.

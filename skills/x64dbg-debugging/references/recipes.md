@@ -34,6 +34,17 @@ noisy; prefer them only when a software or hardware breakpoint cannot observe th
 For either typed kind, remove with the same address, access, and size. A mismatch is a conflict to
 inspect, not permission to delete by address.
 
+For a loop that should stop on a bounded occurrence, use
+`breakpoints.conditional.set` with a `hit_count` predicate and retain its returned
+`managed_id`. `fast_resume` skips nonmatching hits without creating MCP pause events. Register
+predicates use only the portable `cax` through `cip` names, and thread predicates use an exact ID
+copied from `threads.list`. List and remove the exact managed breakpoint after the intended pause.
+
+For exception triage, use `breakpoints.exception.set` with one canonical code and an explicit
+chance. After resume, validate `pause_reason.kind == "exception"`, the observed code, actual
+`first_chance`, and instruction pointer before inspecting state. Remove with the same code, chance,
+and returned `managed_id`; configured `both` never means the caller may infer which chance occurred.
+
 If the plugin reports draining, cancelled, or unavailable, stop issuing work and let debugger
 shutdown finish.
 

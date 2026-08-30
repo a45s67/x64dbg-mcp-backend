@@ -40,6 +40,7 @@ evidence, not a substitute for the release gate.
 | Configurable loopback bind, port, and bearer token | configuration tests, installer contracts, and `docs/install.md` |
 | x32dbg and x64dbg | x86/x64 native suites and isolated real-debugger integration |
 | Safe debugger-thread execution | executor tests and `docs/native-api-audit.md` |
+| Typed conditional and exception breakpoint ownership | ADRs 0034/0035, closed-schema compiler tests, callback-correlation regression, dual-architecture live hits, and installed non-resuming Flare-On lifecycle smoke |
 | Owned threads/processes and graceful unload | supervised shutdown matrix, native lifecycle tests, and finite integration soak |
 | Explicit state and structured errors | MCP golden/handler tests and actionable diagnostic contracts |
 | Bounded input, output, concurrency, operations, and discovery | Rust/native deterministic robustness corpus and bounded tool contracts |

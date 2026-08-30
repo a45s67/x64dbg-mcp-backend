@@ -1098,3 +1098,40 @@ then repeated the installed checksum workflow as instance
 with exact replay and confirmed cleanup. The offline-verified archive SHA-256 is
 `142131cc4bee339c5f660cbce5d3582e4071b6b06383c67ee836afb4cb185935`.
 Publisher signing and pristine-VM qualification remain intentionally not run.
+
+## 0.14.0 typed breakpoint qualification
+
+ADRs 0034 and 0035 added four backend-owned mutations without exposing x64dbg
+commands or expressions. Conditional software breakpoints compile one to four
+closed register, thread-ID, or hit-count predicates, enable fast resume, and
+return an operation-derived `managed_id`. Exception breakpoints accept one exact
+32-bit code plus `first`, `second`, or `both` chance policy and use the same
+recoverable ownership model. Both removals fail closed on a foreign identity.
+
+The first x64 live run exposed a callback-shape issue: x64dbg reports an
+exception-breakpoint hit through `CB_BREAKPOINT`, with the exception code in the
+breakpoint address field. It does not provide the actual first-chance flag there.
+The runtime now retains only the preceding `EXCEPTION_DEBUG_EVENT`, correlates
+code/process/thread to the breakpoint callback, emits the real exception address
+and chance, and immediately consumes the pending record. A lifecycle regression
+test fixes that behavior rather than inferring chance from configuration.
+
+Fresh isolated x64 instance `f8edad8c-0cae-4c3b-a24e-42c8e4160a87` and x32
+instance `96baf49c-d4ea-4f1a-8e23-00476f796968` both skipped the first fixture
+function hit and paused on hit count two. Both then raised private code
+`0xe0424242`, returned `first_chance: true`, recovered managed identities through
+`breakpoints.list`, refused foreign removal, replayed exact mutations, removed
+owned records, completed the full previous workflow, stopped the debuggee, and
+closed the debugger-owned sidecar.
+
+The 0.14.0 package gate passed 52 Rust unit/contract tests, seven supervised
+shutdown tests, 13 native x32 tests, 13 native x64 tests, installer, Codex
+registration, skill, and offline package-verifier contracts. The installed
+checksum.exe smoke used instance `dfcf5d4b-8286-4dfc-951e-16e6f38ace8f`, resolved
+`CHECKSUM.EXE+0xa78a0` to `0x6678a0` from ASLR base `0x5c0000`, and completed
+conditional and exception set/list/replay/remove without executing either new
+breakpoint. Existing reversible patch, hardware/memory breakpoint, run-to, and
+shutdown checks also passed. The offline-verified archive SHA-256 is
+`de7e8aed6be7839391d1d5f28c51d4094611cbf01c020a0248e76ce2b9596eb8`.
+Both global Codex endpoints remain enabled with static Authorization headers,
+and the managed workflow skill is version 0.14.0.

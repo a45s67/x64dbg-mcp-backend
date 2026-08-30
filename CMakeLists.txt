@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(x64dbg_mcp_backend VERSION 0.13.0 LANGUAGES CXX)
+project(x64dbg_mcp_backend VERSION 0.14.0 LANGUAGES CXX)
 include(CTest)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -15,6 +15,7 @@ endif()
 if(BUILD_TESTING)
   add_executable(x64dbg_mcp_lifecycle_test
     plugin/tests/lifecycle_harness.cpp
+    plugin/src/breakpoint_policy.cpp
     plugin/src/command_fence.cpp
     plugin/src/debugger_executor.cpp
     plugin/src/memory_filters.cpp

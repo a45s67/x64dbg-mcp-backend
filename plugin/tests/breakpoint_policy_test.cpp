@@ -112,5 +112,97 @@ int main() {
         std::cerr << "run-to exact identity policy failed\n";
         return 7;
     }
+
+    constexpr std::string_view managedId = "01234567-89ab-4cde-8fab-0123456789ab";
+    const auto first = mcp::ParseExceptionChance("first");
+    const auto second = mcp::ParseExceptionChance("second");
+    const auto both = mcp::ParseExceptionChance("both");
+    if (!first || !second || !both || mcp::ParseExceptionChance("all") ||
+        std::string_view(mcp::ExceptionChanceCommand(*both)) != "all" ||
+        std::string_view(mcp::ExceptionChanceName(*both)) != "both") {
+        std::cerr << "exception chance policy failed\n";
+        return 8;
+    }
+    const std::string exceptionName = mcp::ManagedBreakpointName("exception", managedId);
+    if (exceptionName != "__x64dbg_mcp_exception_01234567-89ab-4cde-8fab-0123456789ab" ||
+        !mcp::ManagedBreakpointName("other", managedId).empty() ||
+        !mcp::ManagedBreakpointName("exception", "not-a-uuid").empty()) {
+        std::cerr << "managed breakpoint naming policy failed\n";
+        return 8;
+    }
+    BRIDGEBP exception{};
+    exception.type = bp_exception;
+    exception.addr = 0xe0424242U;
+    exception.enabled = true;
+    exception.typeEx = static_cast<unsigned char>(ex_firstchance);
+    memcpy_s(exception.name, sizeof(exception.name), exceptionName.data(), exceptionName.size());
+    if (!mcp::ExceptionBreakpointMatches(exception, 0xe0424242U, *first, managedId) ||
+        mcp::ExceptionBreakpointMatches(exception, 0xe0424242U, *second, managedId) ||
+        !mcp::ManagedBreakpointId(exception, "exception") ||
+        *mcp::ManagedBreakpointId(exception, "exception") != managedId) {
+        std::cerr << "exception ownership policy failed\n";
+        return 8;
+    }
+    exception.commandText[0] = 'r';
+    if (mcp::ExceptionBreakpointMatches(exception, 0xe0424242U, *first, managedId)) {
+        std::cerr << "exception action-field policy failed\n";
+        return 8;
+    }
+
+    mcp::ConditionalSpec condition;
+    condition.mode = mcp::ConditionalMode::all;
+    condition.predicates = {
+        {mcp::ConditionalSource::registerValue, mcp::ConditionalOperator::equal, "cax", 1U},
+        {mcp::ConditionalSource::threadId, mcp::ConditionalOperator::notEqual, "", 0x20U},
+        {mcp::ConditionalSource::hitCount, mcp::ConditionalOperator::multipleOf, "", 3U},
+    };
+    const auto expression = mcp::CompileConditionalExpression(condition);
+    if (!expression ||
+        *expression != "(cax==0x1)&&(tid()!=0x20)&&(($breakpointcounter%0x3)==0)") {
+        std::cerr << "conditional compiler policy failed\n";
+        return 9;
+    }
+    condition.predicates[0].registerName = "rax";
+    if (mcp::CompileConditionalExpression(condition)) {
+        std::cerr << "architecture-specific condition register was accepted\n";
+        return 9;
+    }
+    condition.predicates[0].registerName = "cax";
+    condition.predicates[2].value = 0U;
+    if (mcp::CompileConditionalExpression(condition)) {
+        std::cerr << "zero conditional divisor was accepted\n";
+        return 9;
+    }
+    condition.predicates = {
+        {mcp::ConditionalSource::hitCount, mcp::ConditionalOperator::equal, "", 2U},
+    };
+    const auto hitExpression = mcp::CompileConditionalExpression(condition);
+    if (!hitExpression) {
+        std::cerr << "hit-count conditional compiler failed\n";
+        return 9;
+    }
+    const std::string conditionalName = mcp::ManagedBreakpointName("conditional", managedId);
+    BRIDGEBP conditional{};
+    conditional.type = bp_normal;
+    conditional.addr = 0x1234U;
+    conditional.enabled = true;
+    conditional.active = true;
+    conditional.fastResume = true;
+    memcpy_s(conditional.name, sizeof(conditional.name), conditionalName.data(),
+             conditionalName.size());
+    memcpy_s(conditional.breakCondition, sizeof(conditional.breakCondition),
+             hitExpression->data(), hitExpression->size());
+    if (!mcp::ConditionalBreakpointMatches(conditional, 0x1234U, managedId, *hitExpression) ||
+        !mcp::ConditionalBreakpointOwned(conditional, 0x1234U, managedId) ||
+        !mcp::ManagedBreakpointId(conditional, "conditional") ||
+        *mcp::ManagedBreakpointId(conditional, "conditional") != managedId) {
+        std::cerr << "conditional ownership policy failed\n";
+        return 9;
+    }
+    conditional.fastResume = false;
+    if (mcp::ConditionalBreakpointMatches(conditional, 0x1234U, managedId, *hitExpression)) {
+        std::cerr << "conditional fast-resume policy failed\n";
+        return 9;
+    }
     return 0;
 }

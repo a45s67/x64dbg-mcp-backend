@@ -9,6 +9,7 @@
 #include <string>
 
 extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_marker{0x1234abcdU};
+extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_exception_trigger{0U};
 extern "C" __declspec(dllexport) char mcp_fixture_discovery_ascii[] =
     "MCP_DISCOVERY_ASCII_SENTINEL";
 extern "C" __declspec(dllexport) wchar_t mcp_fixture_discovery_utf16[] =
@@ -37,6 +38,15 @@ namespace {
 constexpr wchar_t kArgumentObservationFile[] = L"mcp-argv-observed.bin";
 constexpr std::array<std::uint8_t, 8> kArgumentObservationMagic{
     'M', 'A', 'R', 'G', 'V', '1', '\r', '\n'};
+constexpr DWORD kFixtureExceptionCode = 0xe0424242U;
+
+__declspec(noinline) void RaiseHandledFixtureException() {
+    __try {
+        RaiseException(kFixtureExceptionCode, 0U, 0U, nullptr);
+    } __except (GetExceptionCode() == kFixtureExceptionCode ? EXCEPTION_EXECUTE_HANDLER
+                                                            : EXCEPTION_CONTINUE_SEARCH) {
+    }
+}
 
 bool WriteAll(const HANDLE file, const void* bytes, const std::size_t size) {
     const auto* cursor = static_cast<const std::uint8_t*>(bytes);
@@ -101,6 +111,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     mcp_fixture_marker.store(mcp_fixture_analysis_target(mcp_fixture_marker.load()));
     std::uint32_t value = mcp_fixture_marker.load();
     while (value != 0U) {
+        if (mcp_fixture_exception_trigger.exchange(0U) != 0U) {
+            RaiseHandledFixtureException();
+        }
         value = mcp_fixture_run_to_interrupter(value);
         value = mcp_fixture_run_to_target(value);
         mcp_fixture_marker.store(value);

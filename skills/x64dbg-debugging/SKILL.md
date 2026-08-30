@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.13.0"
-  minimum-backend-version: "0.13.0"
+  version: "0.14.0"
+  minimum-backend-version: "0.14.0"
   mcp-protocol: "2025-06-18"
 ---
 
@@ -45,6 +45,14 @@ startup pauses. Choose one exact access and naturally aligned architecture-suppo
 are four logical slots. Use `breakpoints.memory.set` only for an intentionally bounded guard-page
 range. Typed removals require the original access and size, so inspect `breakpoints.list` rather
 than guessing externally changed state.
+
+Use `breakpoints.conditional.set` for portable register, thread-ID, or hit-count conditions. Build
+one to four predicates through the closed `condition` schema; never synthesize an x64dbg expression.
+Use `breakpoints.exception.set` for one exact 32-bit exception code and `first`, `second`, or `both`
+chance policy. Preserve the returned `managed_id`: conditional and exception removal requires it
+and refuses a foreign or renamed record. An exception-breakpoint hit is reported as an `exception`
+pause with the observed code, actual exception address, and first-chance flag, not merely the
+configured chance policy.
 
 Use `assembly.preview` to obtain debugger-architecture bytes without changing memory. For an
 authorized code change, read the complete original instruction span, then call `assembly.patch`

@@ -62,7 +62,7 @@ not mutated anything.
 | `modules.list` | `Script::Module::GetList` | paused | validates `ListInfo`; `BridgeFree(list.data)` |
 | `threads.list` | `DbgGetThreadList` | paused | max 256 returned items; `BridgeFree(list.list)` |
 | `callstack.read` | `DbgGetThreadList`, `DBGFUNCTIONS::GetCallStackByThread` | paused | exact current/supplied thread handle; native maximum 50 frames; both Bridge allocations released; empty result labeled inconclusive |
-| `breakpoints.list` | `DbgGetBpList`, `MemBpSize` | paused/running | max 256 returned items; `BridgeFree(map.bp)`; typed hardware access/size/slot and memory access/size |
+| `breakpoints.list` | `DbgGetBpList`, `MemBpSize` | paused/running | max 256 returned items; `BridgeFree(map.bp)`; typed hardware/memory/conditional/exception fields and recoverable managed IDs |
 | `disassembly.read` | `DbgDisasmAt` | paused | max 256 instructions; size must be 1-15 |
 | `expression.evaluate` | `DbgFunctions()->ValFromString` | paused | max 1024-byte expression; no command execution |
 | pause/resume/step-in/step-over/stop | `DbgCmdExec` | operation-specific | fixed command; callback and generation confirmation |
@@ -73,8 +73,8 @@ not mutated anything.
 | breakpoint set/remove | `DbgCmdExec`, `DbgGetBpxTypeAt` | paused | validated address only; bounded observation loop |
 | typed hardware breakpoint set/remove | fixed `bphws`/`bphwc`, `GetBridgeBp`, `DbgGetBpList` | actionable pause | enum-only command composition; x86/x64 size/alignment; four enabled slots; exact access/size/slot read-back; shape-matched remove |
 | typed memory breakpoint set/remove | fixed `bpmrange`/`bpmc`, `DbgMemFindBaseAddr`, `GetBridgeBp`, `MemBpSize` | paused | 1-65536 bytes in one region; exact access/size read-back; shape-matched remove |
-| owned exception breakpoint set/remove (ADR 0034; planned) | fixed `SetExceptionBPX`/`DeleteExceptionBPX`, private command fence, `BpRefException`, typed `BP_REF` fields | paused | exact 32-bit code and closed chance enum; operation-derived managed name; reject collisions; exact ownership/chance read-back; never use delete-all |
-| closed conditional software breakpoint set/remove (ADR 0035; planned) | fixed named `bp`/`bc`, private command fence, `BpRefVa`, typed `BP_REF` fields | paused | one to four typed register/thread/hit-count predicates compile to at most 255 fixed-token bytes; fast-resume and empty command/log fields verified; exact managed-name removal |
+| owned exception breakpoint set/remove (ADR 0034) | fixed `SetExceptionBPX`/`DeleteExceptionBPX`, private command fence, `BpRefException`, typed `BP_REF` fields | paused | exact 32-bit code and closed chance enum; operation-derived managed name; reject collisions; exact ownership/chance read-back; generic exception-event metadata is correlated to the matching breakpoint callback; never use delete-all |
+| closed conditional software breakpoint set/remove (ADR 0035) | fixed named `bp`/`bc`, private command fence, `BpRefVa`, typed `BP_REF` fields | paused | one to four typed register/thread/hit-count predicates compile to at most 255 fixed-token bytes; fast-resume and empty command/log fields verified; exact managed-name removal |
 | `assembly.preview` | `DBGFUNCTIONS::Assemble` | paused | one printable ASCII instruction; fixed 16-byte output and 256-byte printable error bound; no memory or patch call |
 | `assembly.patch` | `Assemble`, `PatchInRange`, `DbgMemRead`, `MemPatch`, `PatchGetEx` | paused | exact 1-16 byte compare-before-write; no overlapping tracked patch; one mutation call; exact memory and per-byte patch-record verification |
 | `patches.restore` | `DbgMemRead`, `PatchGetEx`, `PatchRestoreRange`, `PatchInRange` | paused | exact patched/original preconditions; one inclusive range restore; exact read-back and empty patch-range confirmation |

@@ -105,7 +105,7 @@ Otherwise HTTP 503. Response is bounded and contains no target path or token:
   "diagnostic_code":null,
   "next_actions":[],
   "protocol_version":"2025-06-18",
-  "version":"0.13.0"
+  "version":"0.14.0"
 }
 ```
 
@@ -188,13 +188,17 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `exports.list` | read | paused | One module's exports, ordinals, and forwarders; at most 256/page and 65,536 native records |
 | `threads.list` | read | paused | Paginated threads, at most 256 per page |
 | `callstack.read` | read | paused | Current or exact thread; at most 50 native frames; explicit completeness |
-| `breakpoints.list` | read | paused/running | Paginated snapshot with typed hardware/memory fields |
+| `breakpoints.list` | read | paused/running | Paginated snapshot with typed hardware, memory, conditional, exception, and managed-identity fields |
 | `breakpoints.set` | mutate | paused | Create software breakpoint with explicit address |
 | `breakpoints.remove` | mutate | paused | Remove a software breakpoint by explicit address |
 | `breakpoints.hardware.set` | mutate | actionable pause | Exact execute/write/read-write mode, architecture size/alignment, four-slot preflight, and typed read-back |
 | `breakpoints.hardware.remove` | mutate | actionable pause | Remove only an exact address/access/size match |
 | `breakpoints.memory.set` | mutate | paused | Exact 1-65536 byte single-region guard range and access mode with typed read-back |
 | `breakpoints.memory.remove` | mutate | paused | Remove only an exact address/access/size match |
+| `breakpoints.conditional.set` | mutate | paused | One to four closed register/thread-ID/hit-count predicates; fixed-token compiler, fast resume, managed identity, exact read-back |
+| `breakpoints.conditional.remove` | mutate | paused | Remove only the exact address and managed identity; refuse foreign or renamed records |
+| `breakpoints.exception.set` | mutate | paused | Exact 32-bit code and first/second/both chance policy; managed identity and exact typed read-back |
+| `breakpoints.exception.remove` | mutate | paused | Remove only the exact code/chance/managed identity; never invoke delete-all |
 | `assembly.preview` | read | paused | Assemble one instruction at its runtime address without changing memory |
 | `assembly.patch` | destructive mutate | paused | Compare-before-write one 1-16 byte instruction span and verify patch metadata |
 | `patches.restore` | destructive mutate | paused | Restore an exact tracked span only when memory and patch metadata match |

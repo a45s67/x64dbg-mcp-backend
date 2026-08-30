@@ -49,6 +49,8 @@ $published = @(
     'modules.list', 'threads.list', 'breakpoints.list', 'breakpoints.set',
     'breakpoints.remove', 'breakpoints.hardware.set', 'breakpoints.hardware.remove',
     'breakpoints.memory.set', 'breakpoints.memory.remove',
+    'breakpoints.conditional.set', 'breakpoints.conditional.remove',
+    'breakpoints.exception.set', 'breakpoints.exception.remove',
     'assembly.preview', 'assembly.patch', 'patches.restore', 'patches.list',
     'disassembly.read', 'expression.evaluate', 'symbols.search',
     'functions.list', 'functions.at', 'callstack.read', 'symbols.resolve', 'imports.list', 'exports.list',

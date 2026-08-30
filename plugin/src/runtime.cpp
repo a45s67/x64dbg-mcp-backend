@@ -187,6 +187,12 @@ struct Request {
     std::size_t runToTimeoutMs{9000U};
     bool memorySearchModuleScope{false};
     MemoryPattern memoryPattern;
+    std::uint32_t exceptionCode{0U};
+    std::string exceptionChance;
+    std::string managedBreakpointId;
+    ConditionalSpec conditionalSpec;
+    std::string conditionalExpression;
+    bool conditionalInvalid{false};
 };
 
 bool IsMutation(const std::string_view method) {
@@ -200,6 +206,10 @@ bool IsMutation(const std::string_view method) {
            method == "breakpoints.hardware.remove" ||
            method == "breakpoints.memory.set" ||
            method == "breakpoints.memory.remove" ||
+           method == "breakpoints.exception.set" ||
+           method == "breakpoints.exception.remove" ||
+           method == "breakpoints.conditional.set" ||
+           method == "breakpoints.conditional.remove" ||
            method == "assembly.patch" || method == "patches.restore" ||
            method == "debuggee.launch" || method == "debuggee.attach" ||
            method == "debuggee.detach" || method == "analysis.function";
@@ -526,6 +536,12 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::size_t runToTimeoutMs = 9000U;
     bool memorySearchModuleScope = false;
     MemoryPattern memoryPattern;
+    std::uint32_t exceptionCode = 0U;
+    std::string exceptionChance;
+    std::string managedBreakpointId;
+    ConditionalSpec conditionalSpec;
+    std::string conditionalExpression;
+    bool conditionalInvalid = false;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
@@ -1120,6 +1136,127 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             !ParseAddressReference(json_object_get(payload, "address"), addressValue)) {
             return std::nullopt;
         }
+    } else if (methodValue == "breakpoints.exception.set" ||
+               methodValue == "breakpoints.exception.remove") {
+        const bool removing = methodValue == "breakpoints.exception.remove";
+        json_t* code = json_object_get(payload, "code");
+        json_t* chance = json_object_get(payload, "chance");
+        json_t* managed = json_object_get(payload, "managed_id");
+        std::uint64_t parsedCode = 0U;
+        if (json_object_size(payload) != (removing ? 4U : 3U) ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !ParseCanonicalHex64(code, parsedCode) || parsedCode > 0xffffffffULL ||
+            !json_is_string(chance) || (removing && !json_is_string(managed)) ||
+            (!removing && managed != nullptr)) {
+            return std::nullopt;
+        }
+        exceptionCode = static_cast<std::uint32_t>(parsedCode);
+        exceptionChance.assign(json_string_value(chance), json_string_length(chance));
+        if (!ParseExceptionChance(exceptionChance)) return std::nullopt;
+        if (removing) {
+            managedBreakpointId.assign(json_string_value(managed), json_string_length(managed));
+            if (ManagedBreakpointName("exception", managedBreakpointId).empty()) {
+                return std::nullopt;
+            }
+        } else {
+            managedBreakpointId.assign(operationIdValue);
+        }
+    } else if (methodValue == "breakpoints.conditional.set" ||
+               methodValue == "breakpoints.conditional.remove") {
+        const bool removing = methodValue == "breakpoints.conditional.remove";
+        json_t* managed = json_object_get(payload, "managed_id");
+        if (json_object_size(payload) != 3U ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !ParseAddressReference(json_object_get(payload, "address"), addressValue) ||
+            (removing && !json_is_string(managed)) || (!removing && managed != nullptr)) {
+            return std::nullopt;
+        }
+        if (removing) {
+            managedBreakpointId.assign(json_string_value(managed), json_string_length(managed));
+            if (ManagedBreakpointName("conditional", managedBreakpointId).empty()) {
+                return std::nullopt;
+            }
+        } else {
+            json_t* condition = json_object_get(payload, "condition");
+            json_t* mode = json_is_object(condition) ? json_object_get(condition, "mode") : nullptr;
+            json_t* predicates =
+                json_is_object(condition) ? json_object_get(condition, "predicates") : nullptr;
+            if (!json_is_object(condition) || json_object_size(condition) != 2U ||
+                !json_is_string(mode) || !json_is_array(predicates) ||
+                json_array_size(predicates) < 1U || json_array_size(predicates) > 4U) {
+                return std::nullopt;
+            }
+            const std::string_view modeText(json_string_value(mode), json_string_length(mode));
+            if (modeText == "all") {
+                conditionalSpec.mode = ConditionalMode::all;
+            } else if (modeText == "any") {
+                conditionalSpec.mode = ConditionalMode::any;
+            } else {
+                return std::nullopt;
+            }
+            std::size_t index = 0U;
+            json_t* predicateValue = nullptr;
+            json_array_foreach(predicates, index, predicateValue) {
+                if (!json_is_object(predicateValue)) return std::nullopt;
+                json_t* sourceValue = json_object_get(predicateValue, "source");
+                json_t* operatorValue = json_object_get(predicateValue, "operator");
+                json_t* value = json_object_get(predicateValue, "value");
+                if (!json_is_string(sourceValue) || !json_is_string(operatorValue)) {
+                    return std::nullopt;
+                }
+                const std::string_view source(json_string_value(sourceValue),
+                                              json_string_length(sourceValue));
+                const std::string_view operation(json_string_value(operatorValue),
+                                                 json_string_length(operatorValue));
+                const auto parsedOperation = ParseConditionalOperator(operation);
+                if (!parsedOperation) return std::nullopt;
+                ConditionalPredicate predicate;
+                predicate.operation = *parsedOperation;
+                if (source == "register") {
+                    json_t* registerValue = json_object_get(predicateValue, "register");
+                    std::uint64_t parsedValue = 0U;
+                    if (json_object_size(predicateValue) != 4U ||
+                        !json_is_string(registerValue) ||
+                        !ParseCanonicalHex64(value, parsedValue)) {
+                        return std::nullopt;
+                    }
+                    predicate.source = ConditionalSource::registerValue;
+                    predicate.registerName.assign(json_string_value(registerValue),
+                                                  json_string_length(registerValue));
+                    predicate.value = parsedValue;
+                } else if (source == "thread_id") {
+                    std::uint64_t parsedValue = 0U;
+                    if (json_object_size(predicateValue) != 3U ||
+                        !ParseCanonicalHex64(value, parsedValue)) {
+                        return std::nullopt;
+                    }
+                    predicate.source = ConditionalSource::threadId;
+                    predicate.value = parsedValue;
+                } else if (source == "hit_count") {
+                    if (json_object_size(predicateValue) != 3U || !json_is_integer(value) ||
+                        json_integer_value(value) < 1 ||
+                        static_cast<std::uint64_t>(json_integer_value(value)) > 0xffffffffULL) {
+                        return std::nullopt;
+                    }
+                    predicate.source = ConditionalSource::hitCount;
+                    predicate.value =
+                        static_cast<std::uint64_t>(json_integer_value(value));
+                } else {
+                    return std::nullopt;
+                }
+                conditionalSpec.predicates.push_back(std::move(predicate));
+            }
+            const auto compiled = CompileConditionalExpression(conditionalSpec);
+            if (compiled) {
+                conditionalExpression = *compiled;
+            } else {
+                // Keep architecture-specific policy failures inside the normal
+                // request path so x32 returns a structured error instead of
+                // treating a schema-valid 64-bit register value as malformed IPC.
+                conditionalInvalid = true;
+            }
+            managedBreakpointId.assign(operationIdValue);
+        }
     } else if (methodValue == "memory.write") {
         json_t* data = json_object_get(payload, "data_hex");
         if (json_object_size(payload) != 3U ||
@@ -1165,7 +1302,10 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(expectedOriginalBytes), fillNop, addressProvided,
                    targetThreadId, std::move(symbolName), cursorSnapshotFingerprint,
                    afterEventSequence, std::move(eventTypes), std::move(operationIdValue),
-                   runToTimeoutMs, memorySearchModuleScope, std::move(memoryPattern)};
+                   runToTimeoutMs, memorySearchModuleScope, std::move(memoryPattern),
+                   exceptionCode, std::move(exceptionChance),
+                   std::move(managedBreakpointId), std::move(conditionalSpec),
+                   std::move(conditionalExpression), conditionalInvalid};
 }
 
 bool IsCanonicalUuid(const std::string_view value) {
@@ -1205,6 +1345,48 @@ std::string HexValue(const std::uint64_t value) {
     std::ostringstream formatted;
     formatted << "0x" << std::hex << std::nouppercase << value;
     return formatted.str();
+}
+
+const char* ConditionalOperatorName(const ConditionalOperator operation) noexcept {
+    switch (operation) {
+    case ConditionalOperator::equal: return "eq";
+    case ConditionalOperator::notEqual: return "ne";
+    case ConditionalOperator::less: return "lt";
+    case ConditionalOperator::lessEqual: return "le";
+    case ConditionalOperator::greater: return "gt";
+    case ConditionalOperator::greaterEqual: return "ge";
+    case ConditionalOperator::multipleOf: return "multiple_of";
+    }
+    return "unknown";
+}
+
+std::string ConditionalSpecJson(const ConditionalSpec& condition) {
+    std::string predicates = "[";
+    for (std::size_t index = 0U; index < condition.predicates.size(); ++index) {
+        if (index != 0U) predicates.push_back(',');
+        const ConditionalPredicate& predicate = condition.predicates[index];
+        predicates += "{\"source\":";
+        switch (predicate.source) {
+        case ConditionalSource::registerValue:
+            predicates += JsonString("register") + ",\"register\":" +
+                          JsonString(predicate.registerName);
+            break;
+        case ConditionalSource::threadId: predicates += JsonString("thread_id"); break;
+        case ConditionalSource::hitCount: predicates += JsonString("hit_count"); break;
+        }
+        predicates += ",\"operator\":" +
+                      JsonString(ConditionalOperatorName(predicate.operation)) + ",\"value\":";
+        if (predicate.source == ConditionalSource::hitCount) {
+            predicates += std::to_string(predicate.value);
+        } else {
+            predicates += JsonString(HexValue(predicate.value));
+        }
+        predicates.push_back('}');
+    }
+    predicates.push_back(']');
+    return "{\"mode\":" +
+           JsonString(condition.mode == ConditionalMode::all ? "all" : "any") +
+           ",\"predicates\":" + predicates + "}";
 }
 
 std::string PauseReasonJson(const PauseObservation& pause) {
@@ -1834,6 +2016,33 @@ void Runtime::Worker() noexcept {
         const auto requestDeadline = SteadyDeadline(parsed->deadlineUnixMs);
         const ExecutionResult execution = executor_.Execute(
             [this, parsed, requestDeadline] {
+                const auto submitFencedCommand = [this, requestDeadline](
+                                                      const std::string& command) {
+                    std::uint64_t fenceToken = 0U;
+                    for (int attempt = 0; attempt < 4 && fenceToken == 0U; ++attempt) {
+                        if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&fenceToken),
+                                            static_cast<ULONG>(sizeof(fenceToken)),
+                                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+                            fenceToken = 0U;
+                        }
+                    }
+                    if (fenceToken == 0U || !commandFence_.Arm(fenceToken)) return 1;
+                    if (!DbgCmdExec(command.c_str())) {
+                        commandFence_.Cancel(fenceToken);
+                        return 1;
+                    }
+                    std::ostringstream fenceText;
+                    fenceText << "x64dbg_mcp_fence_internal " << std::hex << std::nouppercase
+                              << std::setw(16) << std::setfill('0') << fenceToken;
+                    if (!DbgCmdExec(fenceText.str().c_str())) {
+                        commandFence_.Cancel(fenceToken);
+                        return 2;
+                    }
+                    return commandFence_.Wait(fenceToken, requestDeadline) ==
+                                   CommandFenceWait::completed
+                               ? 0
+                               : 2;
+                };
                 if (parsed->method == "debugger.state") {
                     return StateResponse(parsed->requestId);
                 }
@@ -2096,6 +2305,147 @@ void Runtime::Worker() noexcept {
                            ",\"registers\":" + registers +
                            ",\"disassembly\":" + disassembly + "}}";
                 }
+                if (parsed->method == "breakpoints.exception.set" ||
+                    parsed->method == "breakpoints.exception.remove") {
+                    const auto snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false, false);
+                    }
+                    const auto chance = ParseExceptionChance(parsed->exceptionChance);
+                    const DBGFUNCTIONS* functions = DbgFunctions();
+                    if (!chance || functions == nullptr || functions->GetBridgeBp == nullptr ||
+                        functions->BpRefException == nullptr ||
+                        functions->BpRefExists == nullptr ||
+                        functions->BpSetFieldText == nullptr) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "typed exception breakpoint API is unavailable",
+                                             false, false);
+                    }
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed before exception breakpoint mutation",
+                                             true, false);
+                    }
+                    const std::string ownedName = ManagedBreakpointName(
+                        "exception", parsed->managedBreakpointId);
+                    BRIDGEBP before{};
+                    const bool beforePresent = functions->GetBridgeBp(
+                        bp_exception, static_cast<duint>(parsed->exceptionCode), &before);
+                    const bool setting = parsed->method == "breakpoints.exception.set";
+                    if (setting && beforePresent) {
+                        return ErrorResponse(*parsed, "ALREADY_EXISTS",
+                                             "an exception breakpoint already exists for this code",
+                                             false, false);
+                    }
+                    if (!setting) {
+                        if (!beforePresent) {
+                            return ErrorResponse(*parsed, "NOT_FOUND",
+                                                 "exception breakpoint does not exist", false,
+                                                 false);
+                        }
+                        if (!ExceptionBreakpointMatches(before, parsed->exceptionCode, *chance,
+                                                        parsed->managedBreakpointId)) {
+                            return ErrorResponse(*parsed, "CONFLICT",
+                                                 "exception breakpoint is foreign or was modified",
+                                                 false, false);
+                        }
+                    }
+                    const auto cleanupCreated = [&]() {
+                        BRIDGEBP current{};
+                        if (!functions->GetBridgeBp(
+                                bp_exception, static_cast<duint>(parsed->exceptionCode),
+                                &current)) {
+                            return 0;
+                        }
+                        const std::size_t nameLength =
+                            strnlen_s(current.name, sizeof(current.name));
+                        if (nameLength >= sizeof(current.name)) return 1;
+                        const std::string_view name(
+                            current.name, nameLength);
+                        if (current.type != bp_exception ||
+                            current.addr != static_cast<duint>(parsed->exceptionCode) ||
+                            current.typeEx != static_cast<unsigned char>(
+                                *chance == ExceptionChance::first
+                                    ? ex_firstchance
+                                    : (*chance == ExceptionChance::second ? ex_secondchance
+                                                                          : ex_all)) ||
+                            (name != ownedName && !name.empty())) {
+                            return 1;
+                        }
+                        const int cleanupStatus = submitFencedCommand(
+                            "DeleteExceptionBPX " + HexValue(parsed->exceptionCode));
+                        if (cleanupStatus != 0) return 2;
+                        BRIDGEBP remaining{};
+                        return functions->GetBridgeBp(
+                                   bp_exception,
+                                   static_cast<duint>(parsed->exceptionCode), &remaining)
+                                   ? 2
+                                   : 0;
+                    };
+                    const std::string command =
+                        setting
+                            ? "SetExceptionBPX " + HexValue(parsed->exceptionCode) + ", " +
+                                  ExceptionChanceCommand(*chance)
+                            : "DeleteExceptionBPX " + HexValue(parsed->exceptionCode);
+                    const int commandStatus = submitFencedCommand(command);
+                    if (commandStatus == 1) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected exception breakpoint mutation",
+                                             true, false);
+                    }
+                    if (commandStatus == 2) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "exception breakpoint mutation was admitted without confirmation",
+                                             false, true);
+                    }
+                    if (setting) {
+                        BP_REF reference{};
+                        functions->BpRefException(&reference, parsed->exceptionCode);
+                        if (!functions->BpRefExists(&reference) ||
+                            !functions->BpSetFieldText(&reference, bpf_name,
+                                                       ownedName.c_str())) {
+                            const int cleanup = cleanupCreated();
+                            return ErrorResponse(
+                                *parsed, cleanup == 1 ? "CONFLICT" : "INTERNAL",
+                                "exception breakpoint ownership could not be assigned", false,
+                                cleanup == 2);
+                        }
+                        BRIDGEBP installed{};
+                        if (!functions->GetBridgeBp(
+                                bp_exception, static_cast<duint>(parsed->exceptionCode),
+                                &installed) ||
+                            !ExceptionBreakpointMatches(installed, parsed->exceptionCode, *chance,
+                                                        parsed->managedBreakpointId)) {
+                            const int cleanup = cleanupCreated();
+                            return ErrorResponse(
+                                *parsed, cleanup == 1 ? "CONFLICT" : "INTERNAL",
+                                "exception breakpoint setup could not be verified", false,
+                                cleanup == 2);
+                        }
+                    } else {
+                        BRIDGEBP remaining{};
+                        if (functions->GetBridgeBp(
+                                bp_exception, static_cast<duint>(parsed->exceptionCode),
+                                &remaining)) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "exception breakpoint removal could not be confirmed",
+                                                 false, true);
+                        }
+                    }
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during exception breakpoint mutation",
+                                             false, true);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"code\":" +
+                           JsonString(HexValue(parsed->exceptionCode)) + ",\"chance\":" +
+                           JsonString(ExceptionChanceName(*chance)) + ",\"managed_id\":" +
+                           JsonString(parsed->managedBreakpointId) + ",\"present\":" +
+                           (setting ? "true" : "false") + "}}";
+                }
                 const bool addressMethod = parsed->method == "address.resolve" ||
                                            parsed->method == "functions.at" ||
                                            (parsed->method == "symbols.resolve" &&
@@ -2110,6 +2460,8 @@ void Runtime::Worker() noexcept {
                                            parsed->method == "breakpoints.hardware.remove" ||
                                            parsed->method == "breakpoints.memory.set" ||
                                            parsed->method == "breakpoints.memory.remove" ||
+                                           parsed->method == "breakpoints.conditional.set" ||
+                                           parsed->method == "breakpoints.conditional.remove" ||
                                            parsed->method == "assembly.preview" ||
                                            parsed->method == "assembly.patch" ||
                                            parsed->method == "patches.restore" ||
@@ -3289,6 +3641,135 @@ void Runtime::Worker() noexcept {
                            LocationJson(*resolvedLocation, resolvedGeneration) +
                            ",\"bytes_written\":" +
                            std::to_string(parsed->writeBytes.size()) + ",\"verified\":true}}";
+                }
+                if (parsed->method == "breakpoints.conditional.set" ||
+                    parsed->method == "breakpoints.conditional.remove") {
+                    if (parsed->conditionalInvalid) {
+                        return ErrorResponse(
+                            *parsed, "INVALID_ARGUMENT",
+                            "conditional breakpoint value is invalid for this architecture",
+                            false, false);
+                    }
+                    const duint address = resolvedLocation->address;
+                    const bool setting = parsed->method == "breakpoints.conditional.set";
+                    const DBGFUNCTIONS* functions = DbgFunctions();
+                    if (functions == nullptr || functions->GetBridgeBp == nullptr ||
+                        functions->BpRefVa == nullptr || functions->BpRefExists == nullptr ||
+                        functions->BpSetFieldText == nullptr ||
+                        functions->BpSetFieldNumber == nullptr) {
+                        return ErrorResponse(*parsed, "INTERNAL",
+                                             "typed conditional breakpoint API is unavailable",
+                                             false, false);
+                    }
+                    if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed before conditional breakpoint mutation",
+                                             true, false);
+                    }
+                    BRIDGEBP before{};
+                    const bool beforePresent =
+                        functions->GetBridgeBp(bp_normal, address, &before);
+                    if (setting && beforePresent) {
+                        return ErrorResponse(*parsed, "ALREADY_EXISTS",
+                                             "a software breakpoint already exists at this address",
+                                             false, false);
+                    }
+                    if (!setting) {
+                        if (!beforePresent) {
+                            return ErrorResponse(*parsed, "NOT_FOUND",
+                                                 "conditional breakpoint does not exist", false,
+                                                 false);
+                        }
+                        if (!ConditionalBreakpointOwned(before, address,
+                                                       parsed->managedBreakpointId)) {
+                            return ErrorResponse(*parsed, "CONFLICT",
+                                                 "conditional breakpoint is foreign or was renamed",
+                                                 false, false);
+                        }
+                    }
+                    const std::string ownedName = ManagedBreakpointName(
+                        "conditional", parsed->managedBreakpointId);
+                    const auto cleanupOwned = [&]() {
+                        BRIDGEBP current{};
+                        if (!functions->GetBridgeBp(bp_normal, address, &current)) return 0;
+                        if (!ConditionalBreakpointOwned(current, address,
+                                                        parsed->managedBreakpointId)) {
+                            return 1;
+                        }
+                        const int cleanupStatus =
+                            submitFencedCommand("bc " + HexValue(address));
+                        if (cleanupStatus != 0) return 2;
+                        BRIDGEBP remaining{};
+                        return functions->GetBridgeBp(bp_normal, address, &remaining) ? 2 : 0;
+                    };
+                    const std::string command =
+                        setting ? "bp " + HexValue(address) + ", \"" + ownedName + "\""
+                                : "bc " + HexValue(address);
+                    const int commandStatus = submitFencedCommand(command);
+                    if (commandStatus == 1) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger command queue rejected conditional breakpoint mutation",
+                                             true, false);
+                    }
+                    if (commandStatus == 2) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "conditional breakpoint mutation was admitted without confirmation",
+                                             false, true);
+                    }
+                    if (setting) {
+                        BP_REF reference{};
+                        if (!functions->BpRefVa(&reference, bp_normal, address) ||
+                            !functions->BpRefExists(&reference) ||
+                            !functions->BpSetFieldText(
+                                &reference, bpf_breakcondition,
+                                parsed->conditionalExpression.c_str()) ||
+                            !functions->BpSetFieldNumber(&reference, bpf_fastresume, 1U)) {
+                            const int cleanup = cleanupOwned();
+                            return ErrorResponse(
+                                *parsed, cleanup == 1 ? "CONFLICT" : "INTERNAL",
+                                "conditional breakpoint fields could not be assigned", false,
+                                cleanup == 2);
+                        }
+                        BRIDGEBP installed{};
+                        if (!functions->GetBridgeBp(bp_normal, address, &installed) ||
+                            !ConditionalBreakpointMatches(
+                                installed, address, parsed->managedBreakpointId,
+                                parsed->conditionalExpression)) {
+                            const int cleanup = cleanupOwned();
+                            return ErrorResponse(
+                                *parsed, cleanup == 1 ? "CONFLICT" : "INTERNAL",
+                                "conditional breakpoint setup could not be verified", false,
+                                cleanup == 2);
+                        }
+                    } else {
+                        BRIDGEBP remaining{};
+                        if (functions->GetBridgeBp(bp_normal, address, &remaining)) {
+                            return ErrorResponse(*parsed, "TIMEOUT",
+                                                 "conditional breakpoint removal could not be confirmed",
+                                                 false, true);
+                        }
+                    }
+                    if (!PausedSnapshotCurrent(resolvedGeneration)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during conditional breakpoint mutation",
+                                             false, true);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" +
+                           std::to_string(resolvedGeneration) +
+                           ",\"status\":\"ok\",\"result\":{\"address\":" +
+                           JsonString(HexValue(address)) + ",\"location\":" +
+                           LocationJson(*resolvedLocation, resolvedGeneration) +
+                           ",\"managed_id\":" +
+                           JsonString(parsed->managedBreakpointId) + ",\"present\":" +
+                           (setting ? "true" : "false") +
+                           (setting ? ",\"condition\":" +
+                                          ConditionalSpecJson(parsed->conditionalSpec) +
+                                          ",\"condition_expression\":" +
+                                          JsonString(parsed->conditionalExpression) +
+                                          ",\"fast_resume\":true"
+                                    : "") +
+                           "}}";
                 }
                 if (parsed->method == "breakpoints.set" ||
                     parsed->method == "breakpoints.remove") {
@@ -5253,6 +5734,41 @@ void Runtime::Worker() noexcept {
                                           ",\"size\":" +
                                           (size == 0U ? std::string("null")
                                                       : std::to_string(size));
+                        } else if (breakpoint.type == bp_normal) {
+                            const std::size_t conditionLength = strnlen_s(
+                                breakpoint.breakCondition,
+                                sizeof(breakpoint.breakCondition));
+                            if (conditionLength >= sizeof(breakpoint.breakCondition)) {
+                                return ErrorResponse(*parsed, "INTERNAL",
+                                                     "software breakpoint condition is invalid",
+                                                     false, false);
+                            }
+                            const auto managed =
+                                ManagedBreakpointId(breakpoint, "conditional");
+                            typedFields = ",\"condition_expression\":" +
+                                          (conditionLength == 0U
+                                               ? std::string("null")
+                                               : JsonString(std::string_view(
+                                                     breakpoint.breakCondition,
+                                                     conditionLength))) +
+                                          ",\"fast_resume\":" +
+                                          (breakpoint.fastResume ? "true" : "false") +
+                                          ",\"managed_id\":" +
+                                          (managed ? JsonString(*managed) : "null");
+                        } else if (breakpoint.type == bp_exception) {
+                            const char* chance = "unknown";
+                            switch (static_cast<BPEXTYPE>(breakpoint.typeEx)) {
+                            case ex_firstchance: chance = "first"; break;
+                            case ex_secondchance: chance = "second"; break;
+                            case ex_all: chance = "both"; break;
+                            }
+                            const auto managed =
+                                ManagedBreakpointId(breakpoint, "exception");
+                            typedFields = ",\"code\":" +
+                                          JsonString(HexValue(breakpoint.addr)) +
+                                          ",\"chance\":" + JsonString(chance) +
+                                          ",\"managed_id\":" +
+                                          (managed ? JsonString(*managed) : "null");
                         }
                         items += "{\"address\":" + JsonString(HexValue(breakpoint.addr)) +
                                  ",\"type\":" + JsonString(type) + ",\"enabled\":" +
@@ -5651,6 +6167,8 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     bool markLaunched = false;
     bool markAttached = false;
     bool markDetaching = false;
+    bool exceptionBreakpointCallback = false;
+    bool clearPendingException = false;
     EventRecord event;
     switch (callbackType) {
     case CB_INITDEBUG:
@@ -5698,6 +6216,7 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
             event.hasAddress = true;
             event.breakpointType = pause.breakpointType;
             event.auxiliary = pause.hitCount;
+            exceptionBreakpointCallback = info->breakpoint->type == bp_exception;
         }
         break;
     }
@@ -5721,6 +6240,7 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
             event.hasAddress = true;
             event.firstChance = pause.firstChance;
         }
+        clearPendingException = true;
         break;
     }
     case CB_PAUSEDEBUG:
@@ -5738,6 +6258,7 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     case CB_RESUMEDEBUG:
         event.kind = EventKind::resumed;
         next = DebuggeeState::running;
+        clearPendingException = true;
         break;
     case CB_ATTACH: {
         event.kind = EventKind::attached;
@@ -5794,6 +6315,17 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
             generic.hasThreadId = true;
             bool recordGeneric = true;
             switch (debugEvent.dwDebugEventCode) {
+            case EXCEPTION_DEBUG_EVENT:
+                pendingException_.processId = debugEvent.dwProcessId;
+                pendingException_.threadId = debugEvent.dwThreadId;
+                pendingException_.code = debugEvent.u.Exception.ExceptionRecord.ExceptionCode;
+                pendingException_.address = reinterpret_cast<std::uintptr_t>(
+                    debugEvent.u.Exception.ExceptionRecord.ExceptionAddress);
+                pendingException_.firstChance =
+                    debugEvent.u.Exception.dwFirstChance != 0U;
+                pendingException_.valid = true;
+                recordGeneric = false;
+                break;
             case CREATE_THREAD_DEBUG_EVENT:
                 generic.kind = EventKind::threadCreated;
                 generic.address = reinterpret_cast<std::uintptr_t>(
@@ -5839,6 +6371,28 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     default: return;
     }
     std::lock_guard lock(stateMutex_);
+    if (exceptionBreakpointCallback && pendingException_.valid && pause.hasAddress &&
+        pendingException_.code == pause.address &&
+        (pendingException_.processId == 0U ||
+         pendingException_.processId == processId_.load()) &&
+        (pendingException_.threadId == 0U ||
+         pendingException_.threadId == activeThreadId_.load())) {
+        pause.kind = PauseReasonKind::exception;
+        pause.exceptionCode = pendingException_.code;
+        pause.hasExceptionCode = true;
+        pause.address = pendingException_.address;
+        pause.hasAddress = pause.address != 0U;
+        pause.firstChance = pendingException_.firstChance;
+        event.kind = EventKind::exception;
+        event.code = pendingException_.code;
+        event.hasCode = true;
+        event.address = pendingException_.address;
+        event.hasAddress = pendingException_.address != 0U;
+        event.firstChance = pendingException_.firstChance;
+        pendingException_.valid = false;
+    } else if (clearPendingException) {
+        pendingException_.valid = false;
+    }
     if (resetOrigin) sessionOrigin_.store(SessionOrigin::none);
     if (markAttached) sessionOrigin_.store(SessionOrigin::attached);
     if (markLaunched && sessionOrigin_.load() != SessionOrigin::attached) {

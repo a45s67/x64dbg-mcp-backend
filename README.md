@@ -39,6 +39,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0030-bounded-debugger-event-history.md`](docs/adr/0030-bounded-debugger-event-history.md)
 - [`docs/adr/0031-bounded-loaded-section-metadata.md`](docs/adr/0031-bounded-loaded-section-metadata.md)
 - [`docs/adr/0032-owned-bounded-run-to-address.md`](docs/adr/0032-owned-bounded-run-to-address.md)
+- [`docs/adr/0033-bounded-memory-pattern-search.md`](docs/adr/0033-bounded-memory-pattern-search.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/development-roadmap.md`](docs/development-roadmap.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)

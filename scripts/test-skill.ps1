@@ -42,7 +42,7 @@ foreach ($reference in @('references\recipes.md', 'references\troubleshooting.md
 $published = @(
     'debugger.state', 'debugger.snapshot', 'debugger.wait_for_pause', 'debugger.pause', 'debugger.resume',
     'debugger.step_into', 'debugger.step_over', 'debugger.step_out', 'debugger.run_to_address',
-    'debugger.stop', 'debuggee.launch',
+    'debugger.stop', 'debuggee.launch', 'debuggee.launch_dll',
     'debuggee.attach', 'debuggee.detach',
     'registers.read', 'registers.write', 'address.resolve', 'analysis.function',
     'memory.read', 'memory.write', 'memory.map', 'memory.search',

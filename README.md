@@ -90,6 +90,9 @@ it uses a private command-queue fence and never depends on the user's GUI select
 Existing processes can be attached only by an explicit numeric PID. State exposes
 whether the session was launched or attached; attached sessions must use
 `debuggee.detach`, so generic cleanup cannot terminate a pre-existing process.
+Typed DLL launch validates PE kind and architecture before mutation, stops first
+in x64dbg's generated loader, and requires a separate visible resume/wait cycle
+to reach the target DLL entry; it accepts neither argv nor an export name.
 One-register writes use the typed SDK plus exact read-back. `debugger.step_out`
 returns compact pause context and an explicit `completed` flag, so an intervening
 breakpoint or exception is not mistaken for reaching the return.

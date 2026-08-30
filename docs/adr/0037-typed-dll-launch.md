@@ -1,6 +1,6 @@
 # ADR 0037: Typed DLL launch through x64dbg's fixed loader
 
-Status: Accepted before implementation on 2026-08-31.
+Status: Implemented and qualified in 0.16.0 on 2026-08-31.
 
 ## Context
 
@@ -49,6 +49,10 @@ The executable launch path rejects the DLL characteristic. Architecture or
 kind mismatch is non-retryable `INVALID_ARGUMENT` and does not cross the
 debugger command queue.
 
+The canonical DLL path must occupy fewer than 512 UTF-16 code units. This
+matches x64dbg's fixed `WCHAR[512]` loader mapping and rejects an overlong path
+before `init` can mutate debugger state.
+
 The DLL tool verifies that the matching x64dbg-distributed `loaddll.exe` exists,
 builds the same fixed path-only `scriptcmd init` form used for executable
 launch, and waits for the first callback-confirmed non-process-created pause.
@@ -93,4 +97,3 @@ that every DLL exposes a safe callable export. The first tool result is a
 loader pause rather than a loaded-module claim, so the mutation never hides
 execution behind automatic resumes. Reaching DLL entry costs one normal,
 observable resume/wait cycle and retains x64dbg's own TLS/entry/event policy.
-

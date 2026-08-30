@@ -24,8 +24,10 @@ $server = (Resolve-Path -LiteralPath $ServerPath).Path
 $debuggerName = if ($Backend -eq 'x32') { 'x32dbg-unsigned.exe' } else { 'x64dbg.exe' }
 $debugger = Join-Path $backendRoot $debuggerName
 $fixture = Join-Path $backendRoot $FixtureName
+$dllFixture = Join-Path $backendRoot 'mcp-debuggee-dll-fixture.dll'
 $argumentObservation = Join-Path $backendRoot 'mcp-argv-observed.bin'
-if (!(Test-Path -LiteralPath $debugger) -or !(Test-Path -LiteralPath $fixture)) {
+if (!(Test-Path -LiteralPath $debugger) -or !(Test-Path -LiteralPath $fixture) -or
+    !(Test-Path -LiteralPath $dllFixture)) {
     throw 'The isolated debugger tree or fixture is missing. Run prepare-integration.ps1 first.'
 }
 $plugins = Get-ChildItem -LiteralPath (Join-Path $backendRoot 'plugins') -File
@@ -1521,6 +1523,71 @@ try {
         throw 'Debugger-event breakpoint metadata was not structured and applicable.'
     }
     $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 21
+
+    $dllThroughExeTool = Invoke-Mcp 'tools/call' @{
+        name = 'debuggee.launch'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString(); path = $dllFixture
+        }
+    } 246
+    $exeThroughDllTool = Invoke-Mcp 'tools/call' @{
+        name = 'debuggee.launch_dll'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString(); path = $fixture
+        }
+    } 247
+    if (!$dllThroughExeTool.isError -or !$exeThroughDllTool.isError -or
+        $dllThroughExeTool.structuredContent.error.code -ne 'INVALID_ARGUMENT' -or
+        $exeThroughDllTool.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Typed executable/DLL launch did not reject a PE kind mismatch before mutation.'
+    }
+    $dllOperation = [Guid]::NewGuid().ToString()
+    $dllLaunchArguments = @{ operation_id = $dllOperation; path = $dllFixture }
+    $dllLaunch = Invoke-Tool 'debuggee.launch_dll' $dllLaunchArguments 238
+    $dllLaunchReplay = Invoke-Tool 'debuggee.launch_dll' $dllLaunchArguments 239
+    if ($dllLaunch.target_kind -ne 'dll' -or $dllLaunch.target_loaded -or
+        $dllLaunch.loader_module -notmatch '^DLLLoader(32|64)_[0-9A-Fa-f]{4}\.exe$' -or
+        $dllLaunch.entry_rva -eq '0x0' -or
+        ($dllLaunch | ConvertTo-Json -Compress -Depth 12) -ne
+        ($dllLaunchReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Typed DLL launch did not return an exact replay-safe initial loader pause.'
+    }
+    $dllConflict = Invoke-Mcp 'tools/call' @{
+        name = 'debuggee.launch_dll'; arguments = @{
+            operation_id = $dllOperation; path = $dllFixture
+            working_directory = $backendRoot
+        }
+    } 240
+    if (!$dllConflict.isError -or
+        $dllConflict.structuredContent.error.code -ne 'OPERATION_ID_CONFLICT') {
+        throw 'Typed DLL launch accepted changed arguments under a reused operation ID.'
+    }
+    $loaderModules = Invoke-Tool 'modules.list' @{ limit = 256 } 241
+    if (@($loaderModules.items | Where-Object {
+            $_.name -ieq 'mcp-debuggee-dll-fixture.dll'
+        }).Count -ne 0 -or
+        @($loaderModules.items | Where-Object {
+            $_.name -ieq $dllLaunch.loader_module
+        }).Count -ne 1) {
+        throw 'Initial DLL launch pause did not preserve the loader/target distinction.'
+    }
+    $dllResume = Invoke-Tool 'debugger.resume' @{
+        operation_id = [Guid]::NewGuid().ToString()
+    } 242
+    $dllPause = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $dllResume.state_generation; timeout_ms = 9000
+    } 243
+    $dllModules = Invoke-Tool 'modules.list' @{ limit = 256 } 244
+    $loadedDll = @($dllModules.items | Where-Object {
+        $_.name -ieq 'mcp-debuggee-dll-fixture.dll'
+    })[0]
+    if (!$loadedDll -or $dllPause.pause_reason.kind -ne 'breakpoint' -or
+        $dllPause.instruction_pointer -ne $loadedDll.entry -or
+        $dllPause.state_generation -ne $dllModules.state_generation) {
+        throw 'Typed DLL workflow did not stop at the loaded fixture entry breakpoint.'
+    }
+    $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 245
+    if (@(Get-ChildItem -LiteralPath $backendRoot -File -Filter 'DLLLoader*.exe').Count -ne 0) {
+        throw 'x64dbg retained a generated DLL loader after debugger stop.'
+    }
     $stoppedEvents = Invoke-Tool 'events.list' @{
         types = @('debug_stopped'); limit = 16
     } 215
@@ -1540,6 +1607,12 @@ try {
         launch_arguments_exact = $true
         launch_replay_equal = $true
         launch_conflict_rejected = $true
+        dll_launch_loader = $dllLaunch.loader_module
+        dll_launch_entry = $loadedDll.entry
+        dll_launch_replay_equal = $true
+        dll_launch_conflict_rejected = $true
+        dll_launch_kind_mismatch_rejected = $true
+        dll_loader_cleaned = $true
         process_id = $state.process_id
         registers = @($registers.registers.PSObject.Properties).Count
         memory_bytes = $memory.bytes_read

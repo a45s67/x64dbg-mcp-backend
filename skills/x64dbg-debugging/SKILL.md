@@ -3,8 +3,8 @@ name: x64dbg-debugging
 description: Analyze and control authorized Windows binaries through the x64dbg or x32dbg MCP backend. Use for debugger lifecycle, module/RVA addressing, breakpoints, stepping, registers, memory, disassembly, and bounded discovery; do not use for static-only analysis or unsupported arbitrary debugger commands.
 metadata:
   short-description: Safe x64dbg/x32dbg MCP workflows
-  version: "0.15.0"
-  minimum-backend-version: "0.15.0"
+  version: "0.16.0"
+  minimum-backend-version: "0.16.0"
   mcp-protocol: "2025-06-18"
 ---
 
@@ -27,6 +27,12 @@ Use `debuggee.launch` only for an authorized absolute executable path. Supply ar
 structured `arguments` string array; never pre-quote them or combine them into a raw command line.
 The backend preserves empty strings, spaces, quotes, backslashes, commas, and Unicode and returns
 only after committing the command line at the initial actionable pause.
+
+Use `debuggee.launch_dll` only for an authorized architecture-matched DLL. It accepts no argv or
+export and returns at the generated x64dbg loader's initial pause with `target_loaded: false`.
+Reaching `DllMain` requires one separately authorized `debugger.resume` followed by
+`debugger.wait_for_pause`; verify the loaded target module and require the pause instruction
+pointer to equal its reported entry. Never treat the temporary loader as the target DLL.
 
 Use `registers.write` for one full-width core register at a time. Preserve the original value
 when the workflow requires restoration, use a fresh operation ID only for that distinct restore,

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(x64dbg_mcp_backend VERSION 0.15.0 LANGUAGES CXX)
+project(x64dbg_mcp_backend VERSION 0.16.0 LANGUAGES CXX)
 include(CTest)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -22,6 +22,7 @@ if(BUILD_TESTING)
     plugin/src/launch_arguments.cpp
     plugin/src/patch_policy.cpp
     plugin/src/memory_search.cpp
+    plugin/src/pe_policy.cpp
     plugin/src/runtime.cpp
     plugin/src/utf8.cpp
   )
@@ -63,6 +64,17 @@ if(BUILD_TESTING)
   target_compile_options(x64dbg_mcp_debuggee_fixture PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
   target_link_libraries(x64dbg_mcp_debuggee_fixture PRIVATE shell32)
 
+  add_library(x64dbg_mcp_debuggee_dll_fixture SHARED
+    plugin/tests/debuggee_dll_fixture.cpp
+  )
+  target_compile_features(x64dbg_mcp_debuggee_dll_fixture PRIVATE cxx_std_20)
+  target_compile_definitions(x64dbg_mcp_debuggee_dll_fixture PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(x64dbg_mcp_debuggee_dll_fixture PRIVATE
+    /W4 /WX /permissive- /EHsc /utf-8)
+  set_target_properties(x64dbg_mcp_debuggee_dll_fixture PROPERTIES
+    OUTPUT_NAME "mcp-debuggee-dll-fixture")
+
   add_executable(x64dbg_mcp_utf8_test
     plugin/tests/utf8_test.cpp
     plugin/src/utf8.cpp
@@ -103,6 +115,17 @@ if(BUILD_TESTING)
   target_compile_definitions(x64dbg_mcp_register_policy_test PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(x64dbg_mcp_register_policy_test PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
+
+  add_executable(x64dbg_mcp_pe_policy_test
+    plugin/tests/pe_policy_test.cpp
+    plugin/src/pe_policy.cpp
+  )
+  target_compile_features(x64dbg_mcp_pe_policy_test PRIVATE cxx_std_20)
+  target_include_directories(x64dbg_mcp_pe_policy_test PRIVATE plugin/src)
+  target_compile_definitions(x64dbg_mcp_pe_policy_test PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(x64dbg_mcp_pe_policy_test PRIVATE
+    /W4 /WX /permissive- /EHsc /utf-8)
 
   add_executable(x64dbg_mcp_breakpoint_policy_test
     plugin/tests/breakpoint_policy_test.cpp
@@ -147,6 +170,7 @@ if(BUILD_TESTING)
       x64dbg_mcp_memory_filters_test
       x64dbg_mcp_memory_search_test
       x64dbg_mcp_register_policy_test
+      x64dbg_mcp_pe_policy_test
       x64dbg_mcp_breakpoint_policy_test
       x64dbg_mcp_patch_policy_test)
     target_compile_options(${MCP_ASSERT_TEST} PRIVATE /UNDEBUG)
@@ -162,6 +186,7 @@ add_library(x64dbg_mcp_plugin SHARED
   plugin/src/memory_search.cpp
   plugin/src/launch_arguments.cpp
   plugin/src/patch_policy.cpp
+  plugin/src/pe_policy.cpp
   plugin/src/plugin.cpp
   plugin/src/register_policy.cpp
   plugin/src/runtime.cpp
@@ -217,6 +242,7 @@ if(BUILD_TESTING)
   add_test(NAME memory-filters-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_memory_filters_test)
   add_test(NAME memory-search-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_memory_search_test)
   add_test(NAME register-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_register_policy_test)
+  add_test(NAME pe-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_pe_policy_test)
   add_test(NAME breakpoint-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_breakpoint_policy_test)
   add_test(NAME patch-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_patch_policy_test)
   add_test(NAME launch-arguments-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_launch_arguments_test)
@@ -242,6 +268,7 @@ if(BUILD_TESTING)
     utf8-${MCP_TEST_ARCH}
     memory-filters-${MCP_TEST_ARCH} memory-search-${MCP_TEST_ARCH}
     register-policy-${MCP_TEST_ARCH}
+    pe-policy-${MCP_TEST_ARCH}
     breakpoint-policy-${MCP_TEST_ARCH}
     patch-policy-${MCP_TEST_ARCH}
     launch-arguments-${MCP_TEST_ARCH}

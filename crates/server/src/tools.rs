@@ -172,6 +172,20 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             }
             Ok(())
         }
+        "debuggee.launch_dll" => {
+            exact_keys(
+                object,
+                &["operation_id", "instance_id", "path"],
+                &["working_directory"],
+            )?;
+            validate_operation_id(object)?;
+            validate_instance_id(object)?;
+            validate_path(object, "path")?;
+            if object.contains_key("working_directory") {
+                validate_path(object, "working_directory")?;
+            }
+            Ok(())
+        }
         "debuggee.attach" => {
             operation(object, &["process_id"])?;
             integer(object, "process_id", 1, 4_294_967_295)
@@ -1049,6 +1063,21 @@ fn build_catalog() -> Vec<Value> {
             true,
         ),
         mutation_tool(
+            "debuggee.launch_dll",
+            "Start one architecture-matched DLL through x64dbg's fixed loaddll helper and return at the initial loader pause without resuming. The target is not yet loaded; resume and wait separately to reach x64dbg's DLL-entry breakpoint.",
+            operation_schema_with_optional(
+                vec![(
+                    "path",
+                    json!({"type":"string","minLength":3,"maxLength":32767}),
+                )],
+                vec![(
+                    "working_directory",
+                    json!({"type":"string","minLength":3,"maxLength":32767}),
+                )],
+            ),
+            true,
+        ),
+        mutation_tool(
             "debuggee.attach",
             "Attach this matching-architecture debugger to one explicitly supplied PID and wait for pre-attach PID plus actionable-pause confirmation. No process enumeration is performed.",
             operation_schema(vec![(
@@ -1845,7 +1874,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 51);
+        assert_eq!(catalog().len(), 52);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -2222,6 +2251,27 @@ mod tests {
                     "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
                     "path":"C:\\samples\\fixture.exe",
                     "arguments":"unbounded raw command line"
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "debuggee.launch_dll",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "path":"C:\\samples\\fixture.dll"
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "debuggee.launch_dll",
+                &json!({
+                    "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                    "path":"C:\\samples\\fixture.dll",
+                    "arguments":[]
                 })
             )
             .is_err()

@@ -455,7 +455,7 @@ worker, match its CIP, preserve selected-thread identity, reject a missing TID,
 and prove sidecar shutdown. The installed Flare-On checksum workflow qualifies
 an exact paused-thread register and compact snapshot read.
 
-### Stage 9: typed DLL launch evaluation
+### Stage 9: typed DLL launch
 
 Evaluate an architecture-matched `debuggee.launch_dll` contract using the
 x64dbg-distributed `loaddll.exe` or another fixed reviewed loader. The public
@@ -471,6 +471,12 @@ loader pause without a hidden resume; the caller explicitly resumes and
 validates the later x64dbg-owned DLL entry breakpoint. Bounded PE kind/machine
 validation and exact helper/target reporting are required before implementation
 can be considered complete.
+
+Completed in 0.16.0. The Rust contract, bounded native PE policy, fixed loader
+mapping preflight, deterministic x32/x64 DLL fixtures, replay/conflict checks,
+and helper ownership checks passed fresh dual-architecture workflows. Both
+debuggers reached the target entry only after an explicit resume, then removed
+their generated helpers and shut down their owned sidecars and listeners.
 
 ### Stage 10: bounded trace-session evaluation
 

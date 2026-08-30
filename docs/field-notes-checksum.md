@@ -1156,3 +1156,18 @@ mutation and shutdown workflow also passed. The offline-verified archive
 SHA-256 is
 `9c59a9d539209f2290b1fcde8f575b56d8fc93b037946c8059c7b07f7dfabfed`.
 Both Codex endpoints and the managed skill were then updated to 0.15.0.
+
+## 0.16.0 typed DLL launch qualification
+
+ADR 0037 added `debuggee.launch_dll` as a separate no-argv mutation rather than
+overloading executable launch. Bounded native PE parsing rejects DLL/EXE kind
+or backend-machine mismatches before debugger mutation and enforces x64dbg's
+fixed loader-path mapping bound. The initial result reports the generated
+loader and explicitly states that the target DLL is not loaded.
+
+Fresh isolated x32dbg and x64dbg workflows used architecture-matched DLL
+fixtures. Each verified exact operation replay, changed-argument conflict,
+initial loader/target separation, one explicitly authorized resume, the loaded
+fixture module, and a breakpoint pause exactly at its entry. Debugger stop
+removed the generated `DLLLoader*` helper. Both owned sidecars exited and both
+loopback listeners closed after their debugger hosts ended.

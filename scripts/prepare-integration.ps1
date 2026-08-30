@@ -47,11 +47,14 @@ foreach ($backend in @('x32', 'x64')) {
     $architecture = if ($backend -eq 'x32') { 'x86' } else { 'x64' }
     $plugin = Join-Path $workspacePath "build\windows-$architecture\x64dbg-mcp-backend.$extension"
     $fixture = Join-Path $workspacePath "build\windows-$architecture\x64dbg_mcp_debuggee_fixture.exe"
-    if (!(Test-Path -LiteralPath $plugin) -or !(Test-Path -LiteralPath $fixture)) {
-        throw "Build the $architecture plugin and fixture before preparing integration files."
+    $dllFixture = Join-Path $workspacePath "build\windows-$architecture\mcp-debuggee-dll-fixture.dll"
+    if (!(Test-Path -LiteralPath $plugin) -or !(Test-Path -LiteralPath $fixture) -or
+        !(Test-Path -LiteralPath $dllFixture)) {
+        throw "Build the $architecture plugin and fixtures before preparing integration files."
     }
     Copy-Item -LiteralPath $plugin -Destination $pluginDirectory
     Copy-Item -LiteralPath $fixture -Destination (Join-Path $target $FixtureName)
+    Copy-Item -LiteralPath $dllFixture -Destination $target
 }
 
 $forbidden = Get-ChildItem -LiteralPath $destinationPath -Recurse -File |
@@ -59,6 +62,7 @@ $forbidden = Get-ChildItem -LiteralPath $destinationPath -Recurse -File |
         $_.Name -ine 'x64dbg-mcp-backend.dp32' -and
         $_.Name -ine 'x64dbg-mcp-backend.dp64' -and
         $_.Name -ine $FixtureName -and
+        $_.Name -ine 'mcp-debuggee-dll-fixture.dll' -and
         ($_.Name -match '(?i)mcp' -or $_.Name -ieq 'mcp_config.json')
     }
 if ($forbidden) {

@@ -4,7 +4,7 @@
 
 | Debuggee state | Useful next actions | Avoid |
 |---|---|---|
-| `absent` | Explicitly request `debuggee.launch` or PID-only `debuggee.attach` if authorized | Reads that require a target; process enumeration; starting a separate sidecar |
+| `absent` | Explicitly request typed EXE/DLL launch or PID-only `debuggee.attach` if authorized | Reads that require a target; process enumeration; starting a separate sidecar |
 | `starting` | Wait for the launch mutation's callback confirmation | A second launch or speculative resume |
 | `paused` | Resolve addresses; inspect; set/remove breakpoints; step or resume if authorized | Large unfiltered reads |
 | `running` | Use `debugger.wait_for_pause` after a known resume generation, or explicitly pause | Register/memory/disassembly reads; polling loops |
@@ -17,6 +17,11 @@ Retain the `instance_id` from the initial state observation and supply it with
 every mutation in the workflow. If a later state reports another value, discard
 all pending mutation requests from the old instance and reassess from the new
 state; operation-ledger results do not survive that boundary.
+
+For a DLL, call `debuggee.launch_dll` and confirm its initial result names one generated
+`DLLLoader32_*` or `DLLLoader64_*` module while `target_loaded` is false. Authorize and issue one
+normal resume, wait from that returned generation, then list modules and verify the pause IP equals
+the target DLL's entry. The tool never calls an export, supplies argv, or hides this resume.
 
 For a temporary register change, read the original value, call `registers.write` once with one
 operation ID, and restore with a different operation ID only when restoration is a separately

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <charconv>
 #include <cstddef>
 #include <cstring>
@@ -33,6 +34,7 @@
 #include "memory_filters.h"
 #include "memory_search.h"
 #include "patch_policy.h"
+#include "pe_policy.h"
 #include "register_policy.h"
 
 namespace mcp {
@@ -211,7 +213,8 @@ bool IsMutation(const std::string_view method) {
            method == "breakpoints.conditional.set" ||
            method == "breakpoints.conditional.remove" ||
            method == "assembly.patch" || method == "patches.restore" ||
-           method == "debuggee.launch" || method == "debuggee.attach" ||
+           method == "debuggee.launch" || method == "debuggee.launch_dll" ||
+           method == "debuggee.attach" ||
            method == "debuggee.detach" || method == "analysis.function";
 }
 
@@ -660,6 +663,21 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                 totalBytes += value.size();
                 launchArguments.emplace_back(value);
             }
+        }
+    } else if (methodValue == "debuggee.launch_dll") {
+        json_t* pathValue = json_object_get(payload, "path");
+        json_t* directoryValue = json_object_get(payload, "working_directory");
+        const std::size_t expectedFields = 2U + (directoryValue ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !IsBoundedPathString(pathValue) ||
+            (directoryValue != nullptr && !IsBoundedPathString(directoryValue))) {
+            return std::nullopt;
+        }
+        path.assign(json_string_value(pathValue), json_string_length(pathValue));
+        if (directoryValue != nullptr) {
+            workingDirectory.assign(json_string_value(directoryValue),
+                                    json_string_length(directoryValue));
         }
     } else if (methodValue == "debuggee.attach") {
         json_t* process = json_object_get(payload, "process_id");
@@ -3485,7 +3503,9 @@ void Runtime::Worker() noexcept {
                            JsonString(HexValue(parsed->targetProcessId)) +
                            ",\"state_generation\":" + std::to_string(confirmed) + "}}";
                 }
-                if (parsed->method == "debuggee.launch") {
+                if (parsed->method == "debuggee.launch" ||
+                    parsed->method == "debuggee.launch_dll") {
+                    const bool dllLaunch = parsed->method == "debuggee.launch_dll";
                     if (debuggeeState_.load() != DebuggeeState::absent || DbgIsDebugging()) {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
                                              "launch requires no current debuggee", false, false);
@@ -3497,12 +3517,41 @@ void Runtime::Worker() noexcept {
                                              "path must name an existing absolute regular file",
                                              false, false);
                     }
+                    const std::u8string executableEncoded(
+                        reinterpret_cast<const char8_t*>(executable->data()), executable->size());
+                    const std::filesystem::path executablePath(executableEncoded);
+                    const auto pe = ReadPeIdentity(executablePath);
+                    if (!pe || !PeMatchesBackend(*pe, dllLaunch)) {
+                        return ErrorResponse(
+                            *parsed, "INVALID_ARGUMENT",
+                            dllLaunch
+                                ? "path must name an architecture-matched PE DLL"
+                                : "path must name an architecture-matched PE executable",
+                            false, false);
+                    }
+                    if (dllLaunch) {
+                        const int dllPathLength = MultiByteToWideChar(
+                            CP_UTF8, MB_ERR_INVALID_CHARS, executable->data(),
+                            static_cast<int>(executable->size()), nullptr, 0);
+                        // x64dbg hands the target to loaddll.exe through a
+                        // fixed WCHAR[512] mapping, including the trailing NUL.
+                        if (dllPathLength <= 0 || dllPathLength >= 512) {
+                            return ErrorResponse(
+                                *parsed, "INVALID_ARGUMENT",
+                                "DLL path exceeds the x64dbg loader mapping bound", false,
+                                false);
+                        }
+                        std::error_code loaderError;
+                        const std::filesystem::path loader =
+                            ModuleDirectory().parent_path() / L"loaddll.exe";
+                        if (!std::filesystem::is_regular_file(loader, loaderError) || loaderError) {
+                            return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                                 "x64dbg loaddll.exe is unavailable", false,
+                                                 false);
+                        }
+                    }
                     std::string requestedDirectory = parsed->workingDirectory;
                     if (requestedDirectory.empty()) {
-                        const std::u8string encoded(
-                            reinterpret_cast<const char8_t*>(executable->data()),
-                            executable->size());
-                        const std::filesystem::path executablePath(encoded);
                         const std::u8string parent = executablePath.parent_path().u8string();
                         requestedDirectory.assign(reinterpret_cast<const char*>(parent.data()),
                                                   parent.size());
@@ -3515,8 +3564,9 @@ void Runtime::Worker() noexcept {
                             "working_directory must name an existing absolute directory", false,
                             false);
                     }
-                    const std::optional<std::string> renderedArguments =
-                        RenderWindowsArguments(parsed->launchArguments);
+                    const std::optional<std::string> renderedArguments = dllLaunch
+                        ? std::optional<std::string>(std::string{})
+                        : RenderWindowsArguments(parsed->launchArguments);
                     if (!renderedArguments) {
                         return ErrorResponse(*parsed, "INVALID_ARGUMENT",
                                              "arguments exceed native quoting bounds", false,
@@ -3558,6 +3608,52 @@ void Runtime::Worker() noexcept {
                                              "launch did not reach an actionable debugger pause",
                                              false, true);
                     }
+                    const std::uint64_t confirmed = ObservedGeneration(DebuggeeState::paused);
+                    if (dllLaunch) {
+                        const auto modules = CaptureModuleRecords();
+                        std::optional<std::string> loaderModule;
+                        if (modules) {
+#ifdef _WIN64
+                            constexpr std::string_view loaderPrefix = "dllloader64_";
+#else
+                            constexpr std::string_view loaderPrefix = "dllloader32_";
+#endif
+                            for (const auto& module : *modules) {
+                                std::string lowered = module.name;
+                                std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                                               [](const unsigned char value) {
+                                                   return static_cast<char>(std::tolower(value));
+                                               });
+                                if (lowered.starts_with(loaderPrefix) &&
+                                    lowered.ends_with(".exe")) {
+                                    if (loaderModule) {
+                                        return ErrorResponse(*parsed, "OUTCOME_UNKNOWN",
+                                                             "DLL loader identity is ambiguous",
+                                                             false, true);
+                                    }
+                                    loaderModule = module.name;
+                                }
+                            }
+                        }
+                        const std::u8string targetNameEncoded = executablePath.filename().u8string();
+                        const std::string targetName(
+                            reinterpret_cast<const char*>(targetNameEncoded.data()),
+                            targetNameEncoded.size());
+                        if (!modules || !loaderModule || UniqueModule(*modules, targetName)) {
+                            return ErrorResponse(*parsed, "OUTCOME_UNKNOWN",
+                                                 "initial DLL loader pause could not be verified",
+                                                 false, true);
+                        }
+                        return "{\"request_id\":" + JsonString(parsed->requestId) +
+                               ",\"state_generation\":" + std::to_string(confirmed) +
+                               ",\"status\":\"ok\",\"result\":{\"debuggee_state\":\"paused\"" +
+                               ",\"target_kind\":\"dll\",\"path\":" + JsonString(*executable) +
+                               ",\"working_directory\":" + JsonString(*workingDirectory) +
+                               ",\"loader_module\":" + JsonString(*loaderModule) +
+                               ",\"target_loaded\":false,\"entry_rva\":" +
+                               JsonString(HexValue(pe->entryRva)) +
+                               ",\"state_generation\":" + std::to_string(confirmed) + "}}";
+                    }
                     const DBGFUNCTIONS* functions = DbgFunctions();
                     if (functions == nullptr || functions->SetCmdline == nullptr ||
                         !functions->SetCmdline(processCommandLine.c_str())) {
@@ -3566,7 +3662,6 @@ void Runtime::Worker() noexcept {
                             "debuggee launched but its command line could not be committed",
                             false, true);
                     }
-                    const std::uint64_t confirmed = ObservedGeneration(DebuggeeState::paused);
                     std::string argumentsJson = "[";
                     for (std::size_t index = 0U; index < parsed->launchArguments.size(); ++index) {
                         if (index != 0U) argumentsJson.push_back(',');

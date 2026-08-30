@@ -1,6 +1,6 @@
 # Development principles and roadmap
 
-Status: Active project guideline as of 2026-08-29.
+Status: Active project guideline as of 2026-08-31.
 
 This document governs post-0.7 development. It is intentionally about this
 backend's design and delivery discipline, not about matching another project's
@@ -355,6 +355,87 @@ The other candidates are deliberately not admitted in this stage:
 Stage 5 therefore closes with the one mutation whose ownership and completion
 could be proven. Reconsidering any deferred candidate starts with a new ADR and
 new workflow evidence; it is not an implicit continuation of this release.
+
+### Post-0.12 product boundary refresh
+
+The next roadmap continues to use Python, Codex, or Gateway workflows to compose
+atomic MCP tools. It does not expose an arbitrary debugger command or debugger
+script merely to make orchestration shorter. When a workflow needs a missing
+native primitive, admit one bounded typed tool instead.
+
+The following decisions apply to the active stages:
+
+- retain `analysis.function` for one explicitly requested runtime address, but
+  call it only after `functions.at` is missing and x64dbg function metadata is
+  needed; static-file analysis normally belongs in IDA;
+- retain bounded known-only inbound `references.to`, but do not add general or
+  outbound reference enumeration;
+- keep process enumeration outside the debugger backend and require an explicit
+  PID for attach;
+- do not add file transfer, unrestricted dump paths, shell execution,
+  whole-module analysis, automatic OEP detection, or unpacking heuristics; and
+- treat local caller control as reducing adversarial-input risk, not as a reason
+  to discard bounds, state validation, mutation identity, or completion proof.
+
+### Stage 6: bounded memory-pattern search
+
+Evaluate and, if the native scan can be bounded without allocating from an
+unchecked region size, add a read-only `memory.search` tool. The contract must
+use an explicit byte pattern and mask, an exact module or bounded address range,
+a hard scan-byte limit, a result cap, generation consistency, and filter-bound
+pagination. It must not silently scan the whole process or return an unbounded
+compiler/runtime pool.
+
+Exit: deterministic pattern/mask tests, unreadable/partial-region behavior,
+x32/x64 integration, shutdown, and a real-sample search all pass without adding
+a mutation surface.
+
+### Stage 7: conditional and exception breakpoints
+
+Consider two independent typed families rather than a breakpoint-command
+escape hatch:
+
+- conditional software breakpoints may accept a bounded x64dbg condition
+  expression, but never a hit command or script; exact breakpoint identity,
+  enabled state, condition read-back, and removal ownership remain required;
+- exception breakpoints use an exact exception code plus closed first-chance,
+  second-chance, or both policy, process scope, and exact read-back/removal.
+
+Each family requires its own ADR and may ship without the other. Completion
+cannot be inferred solely from debugger command admission.
+
+### Stage 8: multithreaded read ergonomics before thread control
+
+Prefer explicit `thread_id` on read operations over changing x64dbg's global GUI
+selection. First evaluate thread-scoped register and compact snapshot reads in
+addition to the existing explicit-thread call stack. Admit `threads.switch` only
+for a demonstrated write/step workflow that cannot remain thread-addressed and
+that proves the selected-thread postcondition.
+
+`threads.suspend` and `threads.resume` remain conditional advanced mutations.
+They must account for pre-existing suspend counts, avoid claiming ownership of
+external state, define behavior when a suspended thread owns a lock, and clean
+up only suspend state created by the same backend operation. A global debugger
+pause is not equivalent: after continue, an explicitly suspended thread remains
+stopped while eligible peer threads run.
+
+### Stage 9: typed DLL launch evaluation
+
+Evaluate an architecture-matched `debuggee.launch_dll` contract using the
+x64dbg-distributed `loaddll.exe` or another fixed reviewed loader. The public
+input may contain an absolute DLL path and bounded structured arguments, not a
+raw `init`, `rundll32`, or debugger command. Direct DLL entry behavior,
+architecture mismatch, loader ownership, actionable initial pause, replay, and
+shutdown must be proven on x32 and x64 before admission. If those semantics
+cannot be made precise, keep DLL launch as a documented manual workflow.
+
+### Stage 10: bounded trace-session evaluation
+
+Tracing remains last because it introduces a long-lived ownership object.
+Before implementation, specify trace identity, maximum instructions, wall-clock
+deadline, retained byte/item caps, status, cancellation, interruption, result
+pagination, disconnect, and plugin-unload behavior. Never approximate a trace by
+holding the single debugger executor in an unbounded step loop.
 
 ## Parked work
 

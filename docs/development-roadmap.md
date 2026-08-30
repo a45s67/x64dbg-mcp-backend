@@ -465,6 +465,13 @@ architecture mismatch, loader ownership, actionable initial pause, replay, and
 shutdown must be proven on x32 and x64 before admission. If those semantics
 cannot be made precise, keep DLL launch as a documented manual workflow.
 
+ADR 0037 admits a separate no-argv DLL mutation through x64dbg's fixed
+architecture-matched loader. Completion is the callback-confirmed initial
+loader pause without a hidden resume; the caller explicitly resumes and
+validates the later x64dbg-owned DLL entry breakpoint. Bounded PE kind/machine
+validation and exact helper/target reporting are required before implementation
+can be considered complete.
+
 ### Stage 10: bounded trace-session evaluation
 
 Tracing remains last because it introduces a long-lived ownership object.

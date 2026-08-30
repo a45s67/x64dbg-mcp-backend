@@ -44,6 +44,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0035-closed-conditional-software-breakpoints.md`](docs/adr/0035-closed-conditional-software-breakpoints.md)
 - [`docs/adr/0036-thread-scoped-context-reads.md`](docs/adr/0036-thread-scoped-context-reads.md)
 - [`docs/adr/0037-typed-dll-launch.md`](docs/adr/0037-typed-dll-launch.md)
+- [`docs/adr/0038-bounded-trace-sessions.md`](docs/adr/0038-bounded-trace-sessions.md)
 - [`docs/design/mvp.md`](docs/design/mvp.md)
 - [`docs/development-roadmap.md`](docs/development-roadmap.md)
 - [`docs/native-api-audit.md`](docs/native-api-audit.md)

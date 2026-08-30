@@ -486,6 +486,12 @@ deadline, retained byte/item caps, status, cancellation, interruption, result
 pagination, disconnect, and plugin-unload behavior. Never approximate a trace by
 holding the single debugger executor in an unbounded step loop.
 
+ADR 0038 admits a narrow address-path session with closed into/over modes,
+4096-step and 30-second hard caps, immutable paginated results, exact trace
+identity, callback-driven interruption, fixed-command cancellation, and one
+joinable deadline supervisor. Full register/memory trace recording, expressions,
+trace files, and caller commands remain outside the contract.
+
 ## Parked work
 
 The following are intentionally outside the active roadmap until explicitly

@@ -30,8 +30,22 @@ distribution trust issue, not an MCP result. The installer intentionally does
 not clear alternate streams or weaken security policy; the isolated x32 test
 provides backend evidence while keeping that decision explicit.
 
-The generic x64 rerun was not forced because an existing installed x64dbg
-session owned the MVP's x64 single-instance slot. The complete 0.12.0 release
-gate and installed `checksum.exe` qualification already provide x64 evidence;
-a new generic x64 observation should be recorded only after that session is
-closed normally.
+## 2026-08-30 x64 Checksum qualification
+
+After `debugger.state` confirmed that the installed x64dbg session had no
+debuggee, the GUI was closed normally and its owned sidecar exited without a
+force termination. Flare-On 11 `checksum.exe` was identified as PE32+/AMD64
+(`Machine = 0x8664`) with SHA-256
+`9a08155ddcd2b88164a9661fa19c491e6e4f6331d8b17851497eaaca7d765580`.
+
+Isolated x64 instance `8bf45169-6292-4339-9de3-aa6cb6262734` reached the system
+breakpoint in generation 10 at `0x7ff91d9a0861`. The bounded observations
+returned eight decoded instructions, the relocated sample at base `0xf80000`,
+15 loaded sections, all 47 imports in the first bounded page, and six filtered
+startup events. `debugger.stop` returned the absent state, x64dbg exited, and
+the ephemeral MCP listener was closed. The sample's challenge logic was never
+resumed.
+
+Together with the x32 Frog run, this independently exercises the same smoke
+contract on both architecture builds while retaining the backend's one-instance
+ownership rule.

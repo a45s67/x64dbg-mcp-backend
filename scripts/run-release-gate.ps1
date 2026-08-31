@@ -51,6 +51,17 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Real-debugger integration gate failed.' }
     $soak = $soakText | ConvertFrom-Json
 
+    $hostControl = [ordered]@{}
+    foreach ($backend in @('x32', 'x64')) {
+        $controlOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File (Join-Path $PSScriptRoot 'run-host-control-integration.ps1') `
+            -Backend $backend -IntegrationRoot $integrationRoot `
+            -ServerPath (Join-Path $workspace 'target\release\x64dbg-mcp-server.exe') `
+            -ControllerPath (Join-Path $workspace 'build\windows-x64\x96dbg-mcp-control.exe')
+        if ($LASTEXITCODE -ne 0) { throw "Host control integration failed for $backend." }
+        $hostControl[$backend] = ($controlOutput -join "`n")
+    }
+
     $flare = $null
     if (![string]::IsNullOrWhiteSpace($InstalledFlareSamplePath)) {
         $flareText = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
@@ -72,6 +83,7 @@ try {
             offline_verified = $true
         }
         real_debugger_integration = $soak
+        host_control_integration = $hostControl
         installed_flare_qualification = $flare
         publisher_qualification = 'not_run'
         publisher_requirements = @('authenticode_signing', 'pristine_windows_vm_install')
@@ -82,4 +94,3 @@ try {
 } finally {
     Pop-Location
 }
-

@@ -38,9 +38,11 @@ try {
         [IO.Directory]::CreateDirectory($directory) | Out-Null
     }
     $serverSource = Join-Path $package 'mcp\x96dbg-mcp-server.exe'
+    $controlSource = Join-Path $package 'mcp\x96dbg-mcp-control.exe'
     $x32Source = Join-Path $package 'x32\x64dbg-mcp-backend.dp32'
     $x64Source = Join-Path $package 'x64\x64dbg-mcp-backend.dp64'
     [IO.File]::WriteAllText($serverSource, 'server-v1')
+    [IO.File]::WriteAllText($controlSource, 'control-v1')
     [IO.File]::WriteAllText($x32Source, 'x32-v1')
     [IO.File]::WriteAllText($x64Source, 'x64-v1')
     $packagedInstaller = Join-Path $package 'install.ps1'
@@ -68,6 +70,7 @@ try {
     $firstToken = $x32.Token
 
     [IO.File]::WriteAllText($serverSource, 'server-v2')
+    [IO.File]::WriteAllText($controlSource, 'control-v2')
     [IO.File]::WriteAllText($x32Source, 'x32-v2')
     [IO.File]::WriteAllText($x64Source, 'x64-v2')
     & $installer -X64dbgRoot $debugger -PackageRoot $package | Out-Null
@@ -75,6 +78,7 @@ try {
     $x64 = Read-TestConfig $x64ConfigPath
     Assert-True ($x32.Token -ceq $firstToken -and $x64.Token -ceq $firstToken) 'idempotent reinstall rotated the token'
     Assert-True ([IO.File]::ReadAllText((Join-Path $mcpDirectory 'x96dbg-mcp-server.exe')) -ceq 'server-v2') 'reinstall did not update the sidecar'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $mcpDirectory 'x96dbg-mcp-control.exe')) -ceq 'control-v2') 'reinstall did not update the controller'
 
     & $installer -X64dbgRoot $debugger -PackageRoot $package -X32Port 44132 -X64Port 44164 | Out-Null
     $x32 = Read-TestConfig $x32ConfigPath

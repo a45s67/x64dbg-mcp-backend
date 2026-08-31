@@ -12,6 +12,7 @@ function Get-RelativePackagePath([string]$FullName) {
 $requiredFiles = @(
     'install.ps1',
     'mcp/x96dbg-mcp-server.exe',
+    'mcp/x96dbg-mcp-control.exe',
     'mcp/x96dbg-mcp-server.example.toml',
     'x32/x64dbg-mcp-backend.dp32',
     'x64/x64dbg-mcp-backend.dp64'
@@ -69,4 +70,5 @@ function Assert-PeMachine([string]$Relative, [uint16]$ExpectedMachine) {
 Assert-PeMachine 'x32/x64dbg-mcp-backend.dp32' 0x014c
 Assert-PeMachine 'x64/x64dbg-mcp-backend.dp64' 0x8664
 Assert-PeMachine 'mcp/x96dbg-mcp-server.exe' 0x8664
-Write-Output 'Package verified: minimal five-file layout'
+Assert-PeMachine 'mcp/x96dbg-mcp-control.exe' 0x8664
+Write-Output 'Package verified: minimal six-file layout'

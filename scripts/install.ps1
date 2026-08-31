@@ -27,9 +27,10 @@ if (!(Test-Path -LiteralPath (Join-Path $debuggerRoot 'x32\plugins')) -or
 }
 
 $serverSource = Join-Path $package 'mcp\x96dbg-mcp-server.exe'
+$controlSource = Join-Path $package 'mcp\x96dbg-mcp-control.exe'
 $x32Source = Join-Path $package 'x32\x64dbg-mcp-backend.dp32'
 $x64Source = Join-Path $package 'x64\x64dbg-mcp-backend.dp64'
-foreach ($required in @($serverSource, $x32Source, $x64Source)) {
+foreach ($required in @($serverSource, $controlSource, $x32Source, $x64Source)) {
     if (!(Test-Path -LiteralPath $required)) { throw "Package file is missing: $required" }
 }
 
@@ -91,6 +92,7 @@ if ($tokenWasGenerated) {
 if ($PSCmdlet.ShouldProcess($debuggerRoot, 'Install x64dbg MCP backend')) {
     New-Item -ItemType Directory -Path $mcpDirectory -Force | Out-Null
     Copy-Item -LiteralPath $serverSource -Destination $mcpDirectory -Force
+    Copy-Item -LiteralPath $controlSource -Destination $mcpDirectory -Force
     Copy-Item -LiteralPath $x32Source -Destination (Join-Path $debuggerRoot 'x32\plugins') -Force
     Copy-Item -LiteralPath $x64Source -Destination (Join-Path $debuggerRoot 'x64\plugins') -Force
 
@@ -106,6 +108,7 @@ bearer_token = "$token"
     Write-Output "Installed backend. Bearer token $tokenAction and stored in the two server config files."
     Write-Output "x32 endpoint: http://127.0.0.1:$effectiveX32Port/mcp"
     Write-Output "x64 endpoint: http://127.0.0.1:$effectiveX64Port/mcp"
+    Write-Output "Host controller: $(Join-Path $mcpDirectory 'x96dbg-mcp-control.exe')"
     Write-Output ''
     Write-Output 'Codex setup is manual. Treat the Authorization value below as a secret.'
     Write-Output 'Do not paste this output into an issue, chat, or build log.'

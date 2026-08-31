@@ -7,12 +7,38 @@ if(NOT WIN32)
   message(FATAL_ERROR "The x64dbg plugin is Windows-only")
 endif()
 
+# One architecture-neutral host controller is shipped with the x64 build and
+# manages either x32dbg or x64dbg by exact installed path.
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  add_executable(x96dbg_mcp_control
+    controller/src/main.cpp
+    controller/src/control_policy.cpp
+  )
+  target_compile_features(x96dbg_mcp_control PRIVATE cxx_std_20)
+  target_include_directories(x96dbg_mcp_control PRIVATE controller/src)
+  target_compile_definitions(x96dbg_mcp_control PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(x96dbg_mcp_control PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
+  target_link_options(x96dbg_mcp_control PRIVATE /Brepro)
+  target_link_libraries(x96dbg_mcp_control PRIVATE winhttp user32)
+  set_target_properties(x96dbg_mcp_control PROPERTIES OUTPUT_NAME "x96dbg-mcp-control")
+endif()
+
 set(X64DBG_ROOT "$ENV{X64DBG_ROOT}" CACHE PATH "Root of the pinned x64dbg SDK/release")
 if(NOT EXISTS "${X64DBG_ROOT}/pluginsdk/_plugins.h")
   message(FATAL_ERROR "Set X64DBG_ROOT to an x64dbg distribution containing pluginsdk")
 endif()
 
 if(BUILD_TESTING)
+  add_executable(x64dbg_mcp_control_policy_test
+    controller/tests/control_policy_test.cpp
+    controller/src/control_policy.cpp
+  )
+  target_compile_features(x64dbg_mcp_control_policy_test PRIVATE cxx_std_20)
+  target_include_directories(x64dbg_mcp_control_policy_test PRIVATE controller/src)
+  target_compile_options(x64dbg_mcp_control_policy_test PRIVATE
+    /W4 /WX /permissive- /EHsc /utf-8 /UNDEBUG)
+
   add_executable(x64dbg_mcp_lifecycle_test
     plugin/tests/lifecycle_harness.cpp
     plugin/src/breakpoint_policy.cpp
@@ -261,6 +287,7 @@ if(BUILD_TESTING)
   add_test(NAME breakpoint-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_breakpoint_policy_test)
   add_test(NAME patch-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_patch_policy_test)
   add_test(NAME launch-arguments-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_launch_arguments_test)
+  add_test(NAME control-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_control_policy_test)
   add_test(NAME lifecycle-${MCP_TEST_ARCH}
     COMMAND x64dbg_mcp_lifecycle_test
       "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe" "${MCP_TEST_PORT}")
@@ -292,6 +319,7 @@ if(BUILD_TESTING)
     breakpoint-policy-${MCP_TEST_ARCH}
     patch-policy-${MCP_TEST_ARCH}
     launch-arguments-${MCP_TEST_ARCH}
+    control-policy-${MCP_TEST_ARCH}
     lifecycle-${MCP_TEST_ARCH}
     sidecar-crash-${MCP_TEST_ARCH} installed-config-${MCP_TEST_ARCH}
     active-wait-shutdown-${MCP_TEST_ARCH} active-trace-shutdown-${MCP_TEST_ARCH}

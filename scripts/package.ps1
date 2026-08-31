@@ -39,6 +39,8 @@ try {
         -Destination (Join-Path $stage 'x64')
     Copy-Item -LiteralPath 'target\release\x64dbg-mcp-server.exe' `
         -Destination (Join-Path $stage 'mcp\x96dbg-mcp-server.exe')
+    Copy-Item -LiteralPath 'build\windows-x64\x96dbg-mcp-control.exe' `
+        -Destination (Join-Path $stage 'mcp\x96dbg-mcp-control.exe')
     Copy-Item -Path 'config\*.toml' -Destination (Join-Path $stage 'mcp')
     Copy-Item -LiteralPath 'scripts\install.ps1' -Destination (Join-Path $stage 'install.ps1')
     & powershell.exe -NoProfile -ExecutionPolicy Bypass `

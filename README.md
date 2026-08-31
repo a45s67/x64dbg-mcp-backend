@@ -24,12 +24,13 @@ The release ZIP uses this compact binary/configuration layout:
 x32\x64dbg-mcp-backend.dp32
 x64\x64dbg-mcp-backend.dp64
 mcp\x96dbg-mcp-server.exe
+mcp\x96dbg-mcp-control.exe
 mcp\x96dbg-mcp-server.example.toml
 install.ps1
 ```
 
 The installer copies the plugins into the debugger's `x32\plugins` and
-`x64\plugins` directories, then creates `mcp\x96dbg-mcp-server.exe` plus
+`x64\plugins` directories, then creates the server and host controller plus
 separate `x64dbg-mcp-server-x32.toml` and `x64dbg-mcp-server-x64.toml` runtime
 files. Server limits and timeouts use built-in defaults; the generated config
 contains only the bind address, port, and bearer token. The installer
@@ -72,6 +73,22 @@ Register x32dbg and x64dbg as separate Streamable HTTP backends. Store the same
 installed bearer token in the Gateway secret facility. MCP uses protocol
 `2025-06-18`, endpoint `/mcp`, and `Authorization: Bearer <token>`. Do not retry
 mutating tools blindly; preserve `instance_id` and `operation_id` semantics.
+
+The optional host lifecycle command stays in each existing backend entry; it
+does not require a separate configuration section. A Gateway configuration may
+use flat fields such as:
+
+```toml
+[x64dbg]
+lifecycleCommand = 'C:\tools\x64dbg\release\mcp\x96dbg-mcp-control.exe'
+lifecycleArgs = ['--backend', 'x64', '--root', 'C:\tools\x64dbg']
+```
+
+The controller supports `status`, `start`, `stop`, and `restart`, emits one
+bounded JSON result, waits for authenticated MCP readiness, and closes the
+debugger through its main window. It never creates a detached shell helper or
+force-terminates x64dbg. `stop` and `restart` refuse an active or unobservable
+debuggee unless the caller explicitly supplies `--force`.
 
 ## Health
 
@@ -164,6 +181,7 @@ are authoritative in `crates/server/src/tools.rs`; native dispatch is in
 ## Uninstall
 
 Close both debuggers and remove the two installed plugins plus
-`mcp\x96dbg-mcp-server.exe`, `mcp\x64dbg-mcp-server-x32.toml`, and
+`mcp\x96dbg-mcp-server.exe`, `mcp\x96dbg-mcp-control.exe`,
+`mcp\x64dbg-mcp-server-x32.toml`, and
 `mcp\x64dbg-mcp-server-x64.toml`. Codex configuration is user-owned and must be
 removed separately if no longer wanted.

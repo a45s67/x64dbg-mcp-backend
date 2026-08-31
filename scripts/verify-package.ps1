@@ -69,7 +69,6 @@ $required = @(
     'skills/x64dbg-debugging/.managed-by-x64dbg-mcp-backend',
     'skills/x64dbg-debugging/references/recipes.md',
     'skills/x64dbg-debugging/references/troubleshooting.md',
-    'docs/install.md',
     'docs/contracts/ipc-v1.md',
     'version.json',
     'sbom.cdx.json',

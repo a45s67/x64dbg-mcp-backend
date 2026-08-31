@@ -40,7 +40,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'x64 plugin build failed.' }
 
     New-Item -ItemType Directory -Path $stage | Out-Null
-    foreach ($relative in @('x32\plugins', 'x64\plugins', 'server', 'config', 'docs', 'docs\adr', 'docs\contracts', 'LICENSES', 'scripts', 'skills')) {
+    foreach ($relative in @('x32\plugins', 'x64\plugins', 'server', 'config', 'docs', 'docs\contracts', 'LICENSES', 'scripts', 'skills')) {
         New-Item -ItemType Directory -Path (Join-Path $stage $relative) -Force | Out-Null
     }
     Copy-Item -LiteralPath 'build\windows-x86\x64dbg-mcp-backend.dp32' `
@@ -53,12 +53,7 @@ try {
     Copy-Item -LiteralPath 'LICENSE' -Destination (Join-Path $stage 'LICENSES\PROJECT-LICENSE.txt')
     Copy-Item -LiteralPath 'THIRD-PARTY-NOTICES.md' -Destination $stage
     Copy-Item -LiteralPath 'README.md' -Destination $stage
-    Copy-Item -LiteralPath 'docs\install.md' -Destination (Join-Path $stage 'docs')
-    Copy-Item -LiteralPath 'docs\design\mvp.md' -Destination (Join-Path $stage 'docs')
-    Copy-Item -Path 'docs\adr\*.md' -Destination (Join-Path $stage 'docs\adr')
     Copy-Item -LiteralPath 'docs\contracts\ipc-v1.md' -Destination (Join-Path $stage 'docs\contracts')
-    Copy-Item -LiteralPath 'docs\native-api-audit.md' -Destination (Join-Path $stage 'docs')
-    Copy-Item -LiteralPath 'docs\release-readiness.md' -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath 'scripts\install.ps1' -Destination (Join-Path $stage 'scripts')
     Copy-Item -LiteralPath 'scripts\verify-package.ps1' -Destination (Join-Path $stage 'scripts')
     Copy-Item -LiteralPath 'skills\x64dbg-debugging' -Destination (Join-Path $stage 'skills') -Recurse

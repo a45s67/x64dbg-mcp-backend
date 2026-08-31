@@ -1,152 +1,169 @@
 # x64dbg MCP Backend
 
-An independently usable Streamable HTTP MCP backend for x64dbg and x32dbg,
-designed for direct MCP clients and the Dynamic Analysis Gateway.
+Streamable HTTP MCP backend for x64dbg and x32dbg. Each architecture-specific
+native plugin starts and owns one shared, statically linked Rust HTTP sidecar.
+Users launch only x32dbg or x64dbg; closing the debugger shuts down its sidecar.
 
-The MVP consists of one statically linked Rust HTTP sidecar shared by two
-architecture-specific native plugins. The plugin starts and owns the sidecar;
-users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
+The server binds to localhost by default, requires a bearer token, exposes
+bounded structured tools, and can be used directly by MCP clients or behind the
+Dynamic Analysis Gateway. The Gateway may add its own namespace; backend tool
+names remain local.
 
-- [`docs/adr/0001-mvp-architecture.md`](docs/adr/0001-mvp-architecture.md)
-- [`docs/adr/0002-debuggee-launch.md`](docs/adr/0002-debuggee-launch.md)
-- [`docs/adr/0003-structured-address-references.md`](docs/adr/0003-structured-address-references.md)
-- [`docs/adr/0004-callback-pause-observation.md`](docs/adr/0004-callback-pause-observation.md)
-- [`docs/adr/0005-generation-consistent-snapshots.md`](docs/adr/0005-generation-consistent-snapshots.md)
-- [`docs/adr/0006-native-utf8-boundary.md`](docs/adr/0006-native-utf8-boundary.md)
-- [`docs/adr/0007-bounded-discovery-tools.md`](docs/adr/0007-bounded-discovery-tools.md)
-- [`docs/adr/0008-versioned-codex-workflow-skill.md`](docs/adr/0008-versioned-codex-workflow-skill.md)
-- [`docs/adr/0009-compact-snapshot-and-memory-map-filters.md`](docs/adr/0009-compact-snapshot-and-memory-map-filters.md)
-- [`docs/adr/0010-bounded-actionable-diagnostics.md`](docs/adr/0010-bounded-actionable-diagnostics.md)
-- [`docs/adr/0011-bounded-shutdown-matrix.md`](docs/adr/0011-bounded-shutdown-matrix.md)
-- [`docs/adr/0012-deterministic-robustness-corpus.md`](docs/adr/0012-deterministic-robustness-corpus.md)
-- [`docs/adr/0013-idempotent-install-and-package-verification.md`](docs/adr/0013-idempotent-install-and-package-verification.md)
-- [`docs/adr/0014-release-acceptance-gates.md`](docs/adr/0014-release-acceptance-gates.md)
-- [`docs/adr/0015-token-efficient-string-context.md`](docs/adr/0015-token-efficient-string-context.md)
-- [`docs/adr/0016-explicit-function-analysis.md`](docs/adr/0016-explicit-function-analysis.md)
-- [`docs/adr/0017-attach-and-detach-lifecycle.md`](docs/adr/0017-attach-and-detach-lifecycle.md)
-- [`docs/adr/0018-register-write-and-step-out.md`](docs/adr/0018-register-write-and-step-out.md)
-- [`docs/adr/0019-typed-hardware-and-memory-breakpoints.md`](docs/adr/0019-typed-hardware-and-memory-breakpoints.md)
-- [`docs/adr/0020-bounded-assembly-and-verified-patches.md`](docs/adr/0020-bounded-assembly-and-verified-patches.md)
-- [`docs/adr/0021-native-mutation-fuzzing-and-asan.md`](docs/adr/0021-native-mutation-fuzzing-and-asan.md)
-- [`docs/adr/0022-defer-fuzzing-pending-toolchain-survey.md`](docs/adr/0022-defer-fuzzing-pending-toolchain-survey.md)
-- [`docs/adr/0023-backend-instance-identity.md`](docs/adr/0023-backend-instance-identity.md)
-- [`docs/adr/0024-bounded-native-callstack.md`](docs/adr/0024-bounded-native-callstack.md)
-- [`docs/adr/0025-bounded-patch-enumeration.md`](docs/adr/0025-bounded-patch-enumeration.md)
-- [`docs/adr/0026-exact-symbol-resolution.md`](docs/adr/0026-exact-symbol-resolution.md)
-- [`docs/adr/0027-known-function-at-address.md`](docs/adr/0027-known-function-at-address.md)
-- [`docs/adr/0028-structured-launch-arguments.md`](docs/adr/0028-structured-launch-arguments.md)
-- [`docs/adr/0029-bounded-module-imports-and-exports.md`](docs/adr/0029-bounded-module-imports-and-exports.md)
-- [`docs/adr/0030-bounded-debugger-event-history.md`](docs/adr/0030-bounded-debugger-event-history.md)
-- [`docs/adr/0031-bounded-loaded-section-metadata.md`](docs/adr/0031-bounded-loaded-section-metadata.md)
-- [`docs/adr/0032-owned-bounded-run-to-address.md`](docs/adr/0032-owned-bounded-run-to-address.md)
-- [`docs/adr/0033-bounded-memory-pattern-search.md`](docs/adr/0033-bounded-memory-pattern-search.md)
-- [`docs/adr/0034-owned-exception-breakpoints.md`](docs/adr/0034-owned-exception-breakpoints.md)
-- [`docs/adr/0035-closed-conditional-software-breakpoints.md`](docs/adr/0035-closed-conditional-software-breakpoints.md)
-- [`docs/adr/0039-typed-breakpoint-enable-disable.md`](docs/adr/0039-typed-breakpoint-enable-disable.md)
-- [`docs/adr/0036-thread-scoped-context-reads.md`](docs/adr/0036-thread-scoped-context-reads.md)
-- [`docs/adr/0037-typed-dll-launch.md`](docs/adr/0037-typed-dll-launch.md)
-- [`docs/adr/0038-bounded-trace-sessions.md`](docs/adr/0038-bounded-trace-sessions.md)
-- [`docs/design/mvp.md`](docs/design/mvp.md)
-- [`docs/development-roadmap.md`](docs/development-roadmap.md)
-- [`docs/native-api-audit.md`](docs/native-api-audit.md)
-- [`docs/reference-implementation-review.md`](docs/reference-implementation-review.md)
-- [`docs/install.md`](docs/install.md)
-- [`docs/release-readiness.md`](docs/release-readiness.md)
+## Install
 
-The Gateway owns any dotted namespace prefix. This backend therefore publishes
-backend-local tool names such as `debugger.state` and `memory.read`.
+Download and extract the release ZIP, then run from its top-level directory:
 
-Authenticated readiness, MCP initialization metadata, and `debugger.state`
-publish one unpredictable `instance_id` per sidecar. Every mutation is bound to
-the observed instance as well as its own `operation_id`; a replacement backend
-returns `BACKEND_RESTARTED` before dispatch instead of accepting a blind retry.
-
-Address-taking tools preserve canonical absolute strings and also accept stable
-module-relative references, so clients do not need to redo ASLR arithmetic:
-
-```json
-{"address":{"module":"sample.exe","rva":"0x1000"}}
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
+  -X64dbgRoot C:\tools\x64dbg
 ```
 
-Use `address.resolve` to inspect the corresponding absolute address, module
-base, RVA, and state generation without performing a mutation.
+The installer deploys both plugins and the shared sidecar:
 
-Execution workflows use `debugger.resume` followed by
-`debugger.wait_for_pause`. The first call confirms the mutation and returns its
-generation; the second waits on native debugger callbacks and reports a bounded
-pause reason without sleeps or state polling.
+```text
+x32\plugins\x64dbg-mcp-backend.dp32
+x64\plugins\x64dbg-mcp-backend.dp64
+server\x64dbg-mcp-server.exe
+server\x64dbg-mcp-server-x32.toml
+server\x64dbg-mcp-server-x64.toml
+```
 
-Bounded discovery is available through `symbols.search`, `functions.list`,
-`strings.search`, and `references.to`. Results are generation-consistent,
-paginated, module/RVA aware, and explicitly report `completeness: "known_only"`;
-the read tools never silently trigger debugger analysis.
-Queried `strings.search` results default to compact UTF-8-safe context and expose
-reconstructable `before`, `match`, and `after` fields; use `context_bytes` to tune
-each side without returning an entire compiler/runtime string pool.
-`memory.search` locates bounded masked byte patterns in one loaded module or
-explicit runtime range. Each request evaluates at most 1 MiB of candidate
-addresses, preserves overlapping matches, reports unreadable bytes, and binds
-continuation to the paused generation and exact search filters.
-`analysis.function` is a separate, explicit mutation for one concrete address;
-it uses a private command-queue fence and never depends on the user's GUI selection.
-Existing processes can be attached only by an explicit numeric PID. State exposes
-whether the session was launched or attached; attached sessions must use
-`debuggee.detach`, so generic cleanup cannot terminate a pre-existing process.
-Typed DLL launch validates PE kind and architecture before mutation, stops first
-in x64dbg's generated loader, and requires a separate visible resume/wait cycle
-to reach the target DLL entry; it accepts neither argv nor an export name.
-One-register writes use the typed SDK plus exact read-back. `debugger.step_out`
-returns compact pause context and an explicit `completed` flag, so an intervening
-breakpoint or exception is not mistaken for reaching the return.
-Typed hardware and memory breakpoint tools validate access, size, architecture,
-alignment, slot/range ownership, and exact native read-back. Hardware setup
-rejects transient process-created and system-breakpoint startup pauses; removals require the current shape
-to match instead of deleting address-only state.
-Typed conditional software breakpoints compile one to four closed register,
-thread-ID, or hit-count predicates and enable fast resume without accepting a
-caller expression. Typed exception breakpoints bind one exact 32-bit code to a
-closed chance policy. Both families return recoverable managed identities,
-verify native fields exactly, refuse foreign removal, and preserve replay semantics.
-Assembly preview is read-only. Tracked code patches require exact original bytes,
-are limited to one 16-byte instruction span, and restore only from verified x64dbg
-patch metadata.
-`patches.list` exposes those tracked bytes as verified adjacent ranges with
-snapshot-bound pagination. `callstack.read` uses x64dbg's native unwind for the
-current or one exact thread and labels an empty result inconclusive. Exact
-`registers.read` and `debugger.snapshot` accept an optional exact thread ID and
-capture a non-current thread's bounded integer/control context without changing
-x64dbg's selected thread. The compact snapshot's registers, IP location, and
-disassembly all come from that same requested context.
-`symbols.resolve` and `functions.at` queries avoid scanning pages when the
-caller already knows a name or address; both remain bounded known-only reads.
-`events.list` exposes a callback-derived 256-record history in every debugger
-state. Sequence continuation, closed type filters, and explicit overflow
-metadata replace polling without creating a streaming or unbounded log API.
-`sections.list` exposes the SDK's named loaded-image spans with ASLR-correct
-locations. It deliberately omits characteristics and raw-file metadata that the
-native API does not provide; correlate with `memory.map` for current protection.
-`debugger.run_to_address` is an owned bounded mutation: it installs a uniquely
-named single-shot breakpoint, reports intervening pauses, and removes only its
-own exact temporary record. Its replay identity prevents an ambiguous execution
-request from being run again under a new operation ID.
-Owned `trace.start`, `trace.status`, `trace.cancel`, and `trace.results` sessions
-capture only a bounded into/over address path. One active session is capped at
-4,096 steps, 30 seconds, and 4,097 retained addresses; results are immutable,
-paginated, and mapped through the start-time module snapshot. Breakpoints,
-exceptions, user pause, timeout, cancellation, process exit, and backend unload
-remain explicit terminal reasons rather than being reported as completion.
+Default endpoints are `http://127.0.0.1:43132/mcp` for x32dbg and
+`http://127.0.0.1:43164/mcp` for x64dbg. Use `-X32Port` and `-X64Port` for
+different non-equal ports. Reinstall preserves valid ports and the shared token;
+`-RotateToken` deliberately creates a new credential. The installer output
+contains the token and must be treated as secret.
 
-After installation, the installer prints the exact manual Codex MCP tables and
-offline commands for copying the version-matched `x64dbg-debugging` workflow
-skill. It provides state-aware, ASLR-safe, no-blind-retry recipes without placing
-bearer tokens or machine-specific target data in instruction files. The installer
-does not edit Codex-owned files.
+Verify an extracted release before installing:
 
-Build a release with `powershell -File scripts/package.ps1`, then follow the
-[installation and client setup guide](docs/install.md). The installed package
-uses `server\x64dbg-mcp-server.exe`; no Rust, C++ runtime, or build tool is needed
-on the target machine.
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\verify-package.ps1
+```
 
-Before publishing, use `scripts/run-release-gate.ps1` for the complete locally
-available package plus isolated x32dbg/x64dbg evidence. Publisher signing and a
-pristine Windows VM install remain separately identified release gates.
+## Codex
+
+The installer prints ready-to-paste values for the effective ports and token.
+Open the Codex configuration:
+
+```powershell
+notepad.exe "$HOME\.codex\config.toml"
+```
+
+The generated tables have this form:
+
+```toml
+[mcp_servers.x64dbg]
+url = "http://127.0.0.1:43164/mcp"
+http_headers = { Authorization = "Bearer <shared installed token>" }
+
+[mcp_servers.x32dbg]
+url = "http://127.0.0.1:43132/mcp"
+http_headers = { Authorization = "Bearer <shared installed token>" }
+```
+
+Install the complete version-matched workflow skill from the extracted release:
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.codex\skills\x64dbg-debugging" | Out-Null
+Copy-Item -Path ".\skills\x64dbg-debugging\*" `
+  -Destination "$HOME\.codex\skills\x64dbg-debugging" -Recurse -Force
+```
+
+Restart Codex after editing the configuration. The installer never modifies
+Codex configuration, skills, or environment variables itself.
+
+## Dynamic Analysis Gateway
+
+Register x32dbg and x64dbg as separate Streamable HTTP backends. Store the same
+installed bearer token in the Gateway secret facility. MCP uses protocol
+`2025-06-18`, endpoint `/mcp`, and `Authorization: Bearer <token>`. Do not retry
+mutating tools blindly; preserve `instance_id` and `operation_id` semantics.
+
+## Health
+
+Liveness is public:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:43164/health/live
+```
+
+Readiness requires the installed bearer token and returns 503 until the matching
+plugin is connected:
+
+```powershell
+$headers = @{ Authorization = 'Bearer <installed token>' }
+Invoke-RestMethod http://127.0.0.1:43164/health/ready -Headers $headers
+```
+
+## Tools
+
+The catalog is intentionally bounded and contains no shell execution, file
+transfer, process enumeration, or arbitrary debugger-command tool.
+
+- Lifecycle: `debugger.state`, `debuggee.launch`, `debuggee.launch_dll`,
+  `debuggee.attach`, `debuggee.detach`, `debugger.stop`.
+- Execution: `debugger.pause`, `debugger.resume`, `debugger.step_into`,
+  `debugger.step_over`, `debugger.step_out`, `debugger.run_to_address`,
+  `debugger.wait_for_pause`.
+- Context: `debugger.snapshot`, `events.list`, `registers.read`,
+  `registers.write`, `threads.list`, `callstack.read`, `address.resolve`.
+- Memory/code: `memory.read`, `memory.write`, `memory.map`, `memory.search`,
+  `disassembly.read`, `expression.evaluate`, `assembly.preview`,
+  `assembly.patch`, `patches.list`, `patches.restore`.
+- Breakpoints: `breakpoints.list`, `breakpoints.set`, `breakpoints.remove`,
+  typed hardware/memory/conditional/exception set/remove, and
+  `breakpoints.enable` / `breakpoints.disable`.
+- Discovery: `modules.list`, `sections.list`, `symbols.search`,
+  `symbols.resolve`, `functions.list`, `functions.at`, `strings.search`,
+  `references.to`, `imports.list`, `exports.list`, `analysis.function`.
+- Trace: `trace.start`, `trace.status`, `trace.cancel`, `trace.results`.
+
+Use `{ "module": "sample.exe", "rva": "0x1000" }` instead of manual ASLR
+arithmetic where an address schema accepts module/RVA input. Every mutation
+requires the current backend `instance_id` and a fresh lowercase UUID
+`operation_id`.
+
+## Build and test
+
+Pinned baseline:
+
+- Visual Studio 2026 Build Tools with MSVC C++, CMake, and Ninja
+- Rust stable `x86_64-pc-windows-msvc`
+- x64dbg 2026.05.27
+
+Set the debugger SDK root and build:
+
+```powershell
+$env:X64DBG_ROOT = 'C:\tools\x64dbg'
+cargo test --offline --locked --workspace --all-targets
+cargo clippy --offline --locked --workspace --all-targets -- -D warnings
+scripts\build-plugin.cmd x86 test
+scripts\build-plugin.cmd x64 test
+```
+
+Build the release package:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\package.ps1
+```
+
+Run the full local release gate, optionally including the installed Flare-On
+sample:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\run-release-gate.ps1 -X64dbgRoot C:\tools\x64dbg `
+  -InstalledFlareSamplePath C:\Users\fish\Downloads\Flare-On11_Challenges\checksum.exe
+```
+
+The plugin/sidecar wire format is documented in
+[`docs/contracts/ipc-v1.md`](docs/contracts/ipc-v1.md). Tool schemas and limits
+are authoritative in `crates/server/src/tools.rs`; native dispatch is in
+`plugin/src/runtime.cpp`.
+
+## Uninstall
+
+Close both debuggers and remove only the five installed files listed in the
+Install section. Codex configuration and the optional skill are user-owned and
+must be removed separately if no longer wanted.

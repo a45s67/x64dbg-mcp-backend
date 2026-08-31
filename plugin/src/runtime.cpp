@@ -202,6 +202,9 @@ struct Request {
     std::size_t traceMaxSteps{0U};
     std::size_t traceTimeoutMs{0U};
     bool traceCursorInvalid{false};
+    std::vector<std::string> expressions;
+    std::string callingConvention{"auto"};
+    std::size_t argumentCount{8U};
 };
 
 bool IsMutation(const std::string_view method) {
@@ -581,6 +584,9 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::size_t traceMaxSteps = 0U;
     std::size_t traceTimeoutMs = 0U;
     bool traceCursorInvalid = false;
+    std::vector<std::string> expressions;
+    std::string callingConvention = "auto";
+    std::size_t argumentCount = 8U;
     if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
@@ -614,6 +620,32 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             if (!json_is_integer(limit) || json_integer_value(limit) < 1 ||
                 json_integer_value(limit) > 256) return std::nullopt;
             pageLimit = static_cast<std::size_t>(json_integer_value(limit));
+        }
+    } else if (methodValue == "events.wait") {
+        json_t* after = json_object_get(payload, "after_sequence");
+        json_t* types = json_object_get(payload, "types");
+        json_t* timeout = json_object_get(payload, "timeout_ms");
+        const std::size_t expectedFields = timeout == nullptr ? 2U : 3U;
+        if (json_object_size(payload) != expectedFields || !json_is_integer(after) ||
+            json_integer_value(after) < 0 ||
+            json_integer_value(after) > 9007199254740991LL || !json_is_array(types) ||
+            json_array_size(types) < 1U || json_array_size(types) > 19U) {
+            return std::nullopt;
+        }
+        afterEventSequence = static_cast<std::uint64_t>(json_integer_value(after));
+        for (std::size_t index = 0U; index < json_array_size(types); ++index) {
+            json_t* value = json_array_get(types, index);
+            if (!json_is_string(value)) return std::nullopt;
+            const auto parsedKind = ParseEventKind(std::string_view(
+                json_string_value(value), json_string_length(value)));
+            if (!parsedKind || std::find(eventTypes.begin(), eventTypes.end(), *parsedKind) !=
+                                   eventTypes.end()) return std::nullopt;
+            eventTypes.push_back(*parsedKind);
+        }
+        if (timeout != nullptr) {
+            if (!json_is_integer(timeout) || json_integer_value(timeout) < 1 ||
+                json_integer_value(timeout) > 9000) return std::nullopt;
+            waitTimeoutMs = static_cast<std::size_t>(json_integer_value(timeout));
         }
     } else if (methodValue == "debugger.snapshot") {
         json_t* registers = json_object_get(payload, "registers");
@@ -797,6 +829,58 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             return std::nullopt;
         }
         expression.assign(expressionValue);
+    } else if (methodValue == "expressions.evaluate_batch") {
+        json_t* values = json_object_get(payload, "expressions");
+        if (json_object_size(payload) != 1U || !json_is_array(values) ||
+            json_array_size(values) < 1U || json_array_size(values) > 32U) {
+            return std::nullopt;
+        }
+        std::size_t totalBytes = 0U;
+        for (std::size_t index = 0U; index < json_array_size(values); ++index) {
+            json_t* value = json_array_get(values, index);
+            if (!json_is_string(value) || json_string_length(value) == 0U ||
+                json_string_length(value) > 1024U) return std::nullopt;
+            const std::string_view text(json_string_value(value), json_string_length(value));
+            if (std::any_of(text.begin(), text.end(), [](const char character) {
+                    const auto byte = static_cast<unsigned char>(character);
+                    return byte < 0x20U || byte == 0x7fU;
+                }) || text.size() > 8192U - totalBytes) {
+                return std::nullopt;
+            }
+            totalBytes += text.size();
+            expressions.emplace_back(text);
+        }
+    } else if (methodValue == "process.peb") {
+        if (json_object_size(payload) != 0U) return std::nullopt;
+    } else if (methodValue == "context.arguments") {
+        json_t* count = json_object_get(payload, "count");
+        json_t* convention = json_object_get(payload, "calling_convention");
+        json_t* thread = json_object_get(payload, "thread_id");
+        const std::size_t expectedFields = (count ? 1U : 0U) +
+                                           (convention ? 1U : 0U) +
+                                           (thread ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields) return std::nullopt;
+        if (count != nullptr) {
+            if (!json_is_integer(count) || json_integer_value(count) < 1 ||
+                json_integer_value(count) > 16) return std::nullopt;
+            argumentCount = static_cast<std::size_t>(json_integer_value(count));
+        }
+        if (convention != nullptr) {
+            if (!json_is_string(convention)) return std::nullopt;
+            callingConvention.assign(json_string_value(convention),
+                                     json_string_length(convention));
+            if (callingConvention != "auto" && callingConvention != "windows_x64" &&
+                callingConvention != "cdecl" && callingConvention != "stdcall" &&
+                callingConvention != "fastcall" && callingConvention != "thiscall") {
+                return std::nullopt;
+            }
+        }
+        if (thread != nullptr) {
+            std::uint64_t parsedThread = 0U;
+            if (!ParseCanonicalHex64(thread, parsedThread) || parsedThread == 0U ||
+                parsedThread > 0xffffffffULL) return std::nullopt;
+            targetThreadId = static_cast<std::uint32_t>(parsedThread);
+        }
     } else if (methodValue == "address.resolve") {
         if (json_object_size(payload) != 1U ||
             !ParseAddressReference(json_object_get(payload, "address"), addressValue)) {
@@ -1493,7 +1577,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(managedBreakpointId), std::move(conditionalSpec),
                    std::move(conditionalExpression), conditionalInvalid,
                    std::move(traceId), std::move(traceMode), traceMaxSteps,
-                   traceTimeoutMs, traceCursorInvalid};
+                   traceTimeoutMs, traceCursorInvalid, std::move(expressions),
+                   std::move(callingConvention), argumentCount};
 }
 
 bool IsCanonicalUuid(const std::string_view value) {
@@ -1703,6 +1788,47 @@ std::optional<EventKind> ParseEventKind(const std::string_view value) noexcept {
         if (value == EventKindName(kind)) return kind;
     }
     return std::nullopt;
+}
+
+std::string EventJson(const EventRecord& event) {
+    std::string result = "{\"sequence\":" + std::to_string(event.sequence) +
+                         ",\"type\":" + JsonString(EventKindName(event.kind)) +
+                         ",\"state_generation\":" + std::to_string(event.generation);
+    if (event.hasProcessId) {
+        result += ",\"process_id\":" + JsonString(HexValue(event.processId));
+    }
+    if (event.hasThreadId) {
+        result += ",\"thread_id\":" + JsonString(HexValue(event.threadId));
+    }
+    if (event.hasAddress) {
+        result += ",\"address\":" + JsonString(HexValue(event.address));
+    }
+    if (event.hasCode) {
+        result += ",\"code\":" + JsonString(HexValue(event.code));
+    }
+    if (event.kind == EventKind::breakpoint) {
+        const char* type = "unknown";
+        switch (event.breakpointType) {
+        case 1U: type = "software"; break;
+        case 2U: type = "hardware"; break;
+        case 4U: type = "memory"; break;
+        case 8U: type = "dll"; break;
+        case 16U: type = "exception"; break;
+        default: break;
+        }
+        result += ",\"breakpoint_type\":" + JsonString(type) +
+                  ",\"hit_count\":" + std::to_string(event.auxiliary);
+    } else if (event.kind == EventKind::exception) {
+        result += ",\"first_chance\":" +
+                  std::string(event.firstChance ? "true" : "false");
+    } else if (event.kind == EventKind::threadExited ||
+               event.kind == EventKind::processExited || event.kind == EventKind::rip) {
+        result += ",\"status\":" + JsonString(HexValue(event.auxiliary));
+    } else if (event.kind == EventKind::debugString) {
+        result += ",\"length\":" + std::to_string(event.auxiliary) +
+                  ",\"unicode\":" + std::string(event.firstChance ? "true" : "false");
+    }
+    return result + "}";
 }
 
 #ifndef MCP_LIFECYCLE_HARNESS
@@ -2458,49 +2584,8 @@ void Runtime::Worker() noexcept {
                     }
                     std::string items = "[";
                     for (std::size_t index = 0U; index < copiedCount; ++index) {
-                        const EventRecord& event = copied[index];
                         if (index != 0U) items.push_back(',');
-                        items += "{\"sequence\":" + std::to_string(event.sequence) +
-                                 ",\"type\":" + JsonString(EventKindName(event.kind)) +
-                                 ",\"state_generation\":" +
-                                 std::to_string(event.generation);
-                        if (event.hasProcessId) {
-                            items += ",\"process_id\":" + JsonString(HexValue(event.processId));
-                        }
-                        if (event.hasThreadId) {
-                            items += ",\"thread_id\":" + JsonString(HexValue(event.threadId));
-                        }
-                        if (event.hasAddress) {
-                            items += ",\"address\":" + JsonString(HexValue(event.address));
-                        }
-                        if (event.hasCode) {
-                            items += ",\"code\":" + JsonString(HexValue(event.code));
-                        }
-                        if (event.kind == EventKind::breakpoint) {
-                            const char* type = "unknown";
-                            switch (event.breakpointType) {
-                            case 1U: type = "software"; break;
-                            case 2U: type = "hardware"; break;
-                            case 4U: type = "memory"; break;
-                            case 8U: type = "dll"; break;
-                            case 16U: type = "exception"; break;
-                            default: break;
-                            }
-                            items += ",\"breakpoint_type\":" + JsonString(type) +
-                                     ",\"hit_count\":" + std::to_string(event.auxiliary);
-                        } else if (event.kind == EventKind::exception) {
-                            items += ",\"first_chance\":" +
-                                     std::string(event.firstChance ? "true" : "false");
-                        } else if (event.kind == EventKind::threadExited ||
-                                   event.kind == EventKind::processExited ||
-                                   event.kind == EventKind::rip) {
-                            items += ",\"status\":" + JsonString(HexValue(event.auxiliary));
-                        } else if (event.kind == EventKind::debugString) {
-                            items += ",\"length\":" + std::to_string(event.auxiliary) +
-                                     ",\"unicode\":" +
-                                     std::string(event.firstChance ? "true" : "false");
-                        }
-                        items += "}";
+                        items += EventJson(copied[index]);
                     }
                     items += "]";
                     const std::string next = copiedCount == 0U
@@ -2514,6 +2599,67 @@ void Runtime::Worker() noexcept {
                            (overflowed ? "true" : "false") + ",\"has_more\":" +
                            (hasMore ? "true" : "false") + ",\"next_after_sequence\":" +
                            next + ",\"items\":" + items + "}}";
+                }
+                if (parsed->method == "events.wait") {
+                    const auto waitDeadline = (std::min)(
+                        requestDeadline, std::chrono::steady_clock::now() +
+                                             std::chrono::milliseconds(parsed->waitTimeoutMs));
+                    EventRecord matched;
+                    std::uint64_t oldest = 0U;
+                    std::uint64_t latest = 0U;
+                    bool overflowed = false;
+                    bool found = false;
+                    {
+                        std::unique_lock lock(stateMutex_);
+                        const auto findMatch = [this, parsed, &matched, &oldest, &latest,
+                                                &overflowed, &found] {
+                            oldest = 0U;
+                            latest = 0U;
+                            overflowed = false;
+                            found = false;
+                            if (eventCount_ != 0U) {
+                                oldest = eventRing_[eventStart_].sequence;
+                                latest = eventRing_[(eventStart_ + eventCount_ - 1U) %
+                                                    kEventCapacity].sequence;
+                                overflowed = oldest > 1U &&
+                                             parsed->afterEventSequence < oldest - 1U;
+                            }
+                            for (std::size_t offset = 0U; offset < eventCount_; ++offset) {
+                                const EventRecord& event =
+                                    eventRing_[(eventStart_ + offset) % kEventCapacity];
+                                if (event.sequence > parsed->afterEventSequence &&
+                                    std::find(parsed->eventTypes.begin(),
+                                              parsed->eventTypes.end(), event.kind) !=
+                                        parsed->eventTypes.end()) {
+                                    matched = event;
+                                    found = true;
+                                    return true;
+                                }
+                            }
+                            return pluginState_.load() != PluginState::ready;
+                        };
+                        if (!findMatch()) {
+                            stateChanged_.wait_until(lock, waitDeadline, findMatch);
+                            findMatch();
+                        }
+                    }
+                    if (pluginState_.load() != PluginState::ready) {
+                        return ErrorResponse(*parsed, "CANCELLED", "plugin is draining", true,
+                                             false);
+                    }
+                    if (!found) {
+                        return ErrorResponse(*parsed, "TIMEOUT",
+                                             "no matching debugger event was observed", true,
+                                             false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" +
+                           std::to_string(matched.generation) +
+                           ",\"status\":\"ok\",\"result\":{\"oldest_sequence\":" +
+                           std::to_string(oldest) + ",\"latest_sequence\":" +
+                           std::to_string(latest) + ",\"overflowed\":" +
+                           (overflowed ? "true" : "false") + ",\"event\":" +
+                           EventJson(matched) + "}}";
                 }
                 if (parsed->method == "trace.status") {
                     TracePolicy copied;
@@ -5011,6 +5157,209 @@ void Runtime::Worker() noexcept {
                            JsonString(MemoryAccessName(*access)) + ",\"size\":" +
                            std::to_string(parsed->breakpointSize) + ",\"present\":" +
                            (setting ? "true" : "false") + "}}";
+                }
+                if (parsed->method == "expressions.evaluate_batch") {
+                    const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false, false);
+                    }
+                    std::string items = "[";
+                    std::size_t successCount = 0U;
+                    for (std::size_t index = 0U; index < parsed->expressions.size(); ++index) {
+                        duint value = 0;
+                        const bool success = DbgFunctions()->ValFromString(
+                            parsed->expressions[index].c_str(), &value);
+                        if (index != 0U) items.push_back(',');
+                        items += "{\"expression\":" + JsonString(parsed->expressions[index]) +
+                                 ",\"success\":" + (success ? "true" : "false");
+                        if (success) {
+                            ++successCount;
+                            items += ",\"value\":" + JsonString(HexValue(value)) +
+                                     ",\"error\":null}";
+                        } else {
+                            items += ",\"value\":null,\"error\":{\"code\":"
+                                     "\"INVALID_EXPRESSION\",\"message\":"
+                                     "\"expression could not be evaluated\"}}";
+                        }
+                    }
+                    items += "]";
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during expression evaluation", true,
+                                             false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"items\":" + items +
+                           ",\"requested_count\":" +
+                           std::to_string(parsed->expressions.size()) +
+                           ",\"success_count\":" + std::to_string(successCount) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) + "}}";
+                }
+                if (parsed->method == "process.peb") {
+                    const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false, false);
+                    }
+                    const DWORD processId = DbgGetProcessId();
+                    const duint peb = DbgGetPebAddress(processId);
+                    if (processId == 0U || peb == 0U) {
+                        return ErrorResponse(*parsed, "INTERNAL", "PEB address is unavailable",
+                                             true, false);
+                    }
+                    unsigned char beingDebugged = 0U;
+                    duint imageBase = 0U;
+                    duint loaderData = 0U;
+                    duint processParameters = 0U;
+                    duint processHeap = 0U;
+                    DWORD ntGlobalFlag = 0U;
+#ifdef _WIN64
+                    constexpr duint imageBaseOffset = 0x10U;
+                    constexpr duint loaderDataOffset = 0x18U;
+                    constexpr duint processParametersOffset = 0x20U;
+                    constexpr duint processHeapOffset = 0x30U;
+                    constexpr duint ntGlobalFlagOffset = 0xbcU;
+                    constexpr const char* architecture = "x86_64";
+#else
+                    constexpr duint imageBaseOffset = 0x08U;
+                    constexpr duint loaderDataOffset = 0x0cU;
+                    constexpr duint processParametersOffset = 0x10U;
+                    constexpr duint processHeapOffset = 0x18U;
+                    constexpr duint ntGlobalFlagOffset = 0x68U;
+                    constexpr const char* architecture = "x86";
+#endif
+                    if (!DbgMemRead(peb + 2U, &beingDebugged, sizeof(beingDebugged)) ||
+                        !DbgMemRead(peb + imageBaseOffset, &imageBase, sizeof(imageBase)) ||
+                        !DbgMemRead(peb + loaderDataOffset, &loaderData, sizeof(loaderData)) ||
+                        !DbgMemRead(peb + processParametersOffset, &processParameters,
+                                    sizeof(processParameters)) ||
+                        !DbgMemRead(peb + processHeapOffset, &processHeap,
+                                    sizeof(processHeap)) ||
+                        !DbgMemRead(peb + ntGlobalFlagOffset, &ntGlobalFlag,
+                                    sizeof(ntGlobalFlag))) {
+                        return ErrorResponse(*parsed, "ACCESS_DENIED",
+                                             "one or more PEB fields are unreadable", false,
+                                             false);
+                    }
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during PEB snapshot", true, false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"architecture\":" +
+                           JsonString(architecture) + ",\"process_id\":" +
+                           std::to_string(processId) + ",\"address\":" +
+                           JsonString(HexValue(peb)) + ",\"being_debugged\":" +
+                           (beingDebugged == 0U ? "false" : "true") +
+                           ",\"being_debugged_raw\":" +
+                           JsonString(HexValue(beingDebugged)) + ",\"nt_global_flag\":" +
+                           JsonString(HexValue(ntGlobalFlag)) + ",\"image_base\":" +
+                           JsonString(HexValue(imageBase)) + ",\"loader_data\":" +
+                           JsonString(HexValue(loaderData)) +
+                           ",\"process_parameters\":" +
+                           JsonString(HexValue(processParameters)) +
+                           ",\"process_heap\":" + JsonString(HexValue(processHeap)) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) + "}}";
+                }
+                if (parsed->method == "context.arguments") {
+                    const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();
+                    if (!snapshot || !DbgIsDebugging()) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "operation requires a paused debuggee", false, false);
+                    }
+                    const ThreadContextCapture captured =
+                        CaptureThreadContext(parsed->targetThreadId);
+                    if (captured.status != ThreadContextStatus::ok) {
+                        return ThreadContextErrorResponse(*parsed, captured.status);
+                    }
+                    std::string convention = parsed->callingConvention;
+#ifdef _WIN64
+                    if (convention == "auto") convention = "windows_x64";
+                    if (convention != "windows_x64") {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "x64dbg supports windows_x64 arguments only", false,
+                                             false);
+                    }
+                    constexpr std::size_t registerArgumentCount = 4U;
+#else
+                    if (convention == "auto") convention = "cdecl";
+                    if (convention == "windows_x64") {
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                             "x32dbg does not support windows_x64 arguments",
+                                             false, false);
+                    }
+                    const std::size_t registerArgumentCount = convention == "fastcall" ? 2U :
+                                                              convention == "thiscall" ? 1U : 0U;
+#endif
+                    duint returnAddress = 0U;
+                    if (!DbgMemRead(captured.value.registers.csp, &returnAddress,
+                                    sizeof(returnAddress))) {
+                        return ErrorResponse(*parsed, "ACCESS_DENIED",
+                                             "stack return address is unreadable", false, false);
+                    }
+                    std::string items = "[";
+                    for (std::size_t index = 0U; index < parsed->argumentCount; ++index) {
+                        duint value = 0U;
+                        std::string source;
+                        std::string storageAddress = "null";
+                        if (index < registerArgumentCount) {
+#ifdef _WIN64
+                            constexpr const char* names[] = {"rcx", "rdx", "r8", "r9"};
+                            const duint values[] = {captured.value.registers.ccx,
+                                                    captured.value.registers.cdx,
+                                                    captured.value.registers.r8,
+                                                    captured.value.registers.r9};
+#else
+                            constexpr const char* names[] = {"ecx", "edx"};
+                            const duint values[] = {captured.value.registers.ccx,
+                                                    captured.value.registers.cdx};
+#endif
+                            source = names[index];
+                            value = values[index];
+                        } else {
+#ifdef _WIN64
+                            const duint address = captured.value.registers.csp +
+                                                  sizeof(duint) + index * sizeof(duint);
+#else
+                            const duint address = captured.value.registers.csp + sizeof(duint) +
+                                                  (index - registerArgumentCount) * sizeof(duint);
+#endif
+                            if (!DbgMemRead(address, &value, sizeof(value))) {
+                                return ErrorResponse(*parsed, "ACCESS_DENIED",
+                                                     "one or more stack arguments are unreadable",
+                                                     false, false);
+                            }
+                            source = "stack";
+                            storageAddress = JsonString(HexValue(address));
+                        }
+                        if (index != 0U) items.push_back(',');
+                        items += "{\"index\":" + std::to_string(index) +
+                                 ",\"value\":" + JsonString(HexValue(value)) +
+                                 ",\"source\":" + JsonString(source) +
+                                 ",\"storage_address\":" + storageAddress + "}";
+                    }
+                    items += "]";
+                    if (!PausedSnapshotCurrent(*snapshot)) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "debugger changed during argument snapshot", true,
+                                             false);
+                    }
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                           ",\"state_generation\":" + std::to_string(*snapshot) +
+                           ",\"status\":\"ok\",\"result\":{\"thread_id\":" +
+                           JsonString(HexValue(captured.value.threadId)) +
+                           ",\"instruction_pointer\":" +
+                           JsonString(HexValue(captured.value.registers.cip)) +
+                           ",\"stack_pointer\":" +
+                           JsonString(HexValue(captured.value.registers.csp)) +
+                           ",\"return_address\":" + JsonString(HexValue(returnAddress)) +
+                           ",\"calling_convention\":" + JsonString(convention) +
+                           ",\"assumption\":\"paused_at_callee_entry\",\"items\":" +
+                           items + ",\"state_generation\":" +
+                           std::to_string(*snapshot) + "}}";
                 }
                 if (parsed->method == "expression.evaluate") {
                     const std::optional<std::uint64_t> snapshot = BeginPausedSnapshot();

@@ -82,6 +82,27 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             }
             Ok(())
         }
+        "events.wait" => {
+            exact_keys(object, &["after_sequence", "types"], &["timeout_ms"])?;
+            integer(object, "after_sequence", 0, 9_007_199_254_740_991)?;
+            optional_integer(object, "timeout_ms", 1, 9_000)?;
+            let values = object
+                .get("types")
+                .and_then(Value::as_array)
+                .filter(|values| !values.is_empty() && values.len() <= EVENT_TYPES.len())
+                .ok_or(invalid("types", "must contain 1 to 19 event types"))?;
+            let mut seen = std::collections::HashSet::new();
+            for value in values {
+                let name = value
+                    .as_str()
+                    .filter(|name| EVENT_TYPES.contains(name))
+                    .ok_or(invalid("types", "contains an unknown event type"))?;
+                if !seen.insert(name) {
+                    return Err(invalid("types", "must not contain duplicates"));
+                }
+            }
+            Ok(())
+        }
         "debugger.snapshot" => {
             exact_keys(
                 object,
@@ -536,6 +557,55 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             let expression = string(object, "expression", 1, 1024)?;
             if expression.chars().any(char::is_control) {
                 return Err(invalid("expression", "must not contain control characters"));
+            }
+            Ok(())
+        }
+        "expressions.evaluate_batch" => {
+            exact_keys(object, &["expressions"], &[])?;
+            let expressions = object
+                .get("expressions")
+                .and_then(Value::as_array)
+                .filter(|values| !values.is_empty() && values.len() <= 32)
+                .ok_or(invalid("expressions", "must contain 1 to 32 expressions"))?;
+            let mut total = 0usize;
+            for expression in expressions {
+                let expression = expression
+                    .as_str()
+                    .filter(|value| !value.is_empty() && value.len() <= 1024)
+                    .ok_or(invalid("expressions", "contains an invalid expression"))?;
+                if expression.chars().any(char::is_control) {
+                    return Err(invalid(
+                        "expressions",
+                        "must not contain control characters",
+                    ));
+                }
+                total = total.saturating_add(expression.len());
+            }
+            if total > 8192 {
+                return Err(invalid(
+                    "expressions",
+                    "exceeds the 8192-byte aggregate bound",
+                ));
+            }
+            Ok(())
+        }
+        "process.peb" => exact_keys(object, &[], &[]),
+        "context.arguments" => {
+            exact_keys(object, &[], &["count", "calling_convention", "thread_id"])?;
+            optional_integer(object, "count", 1, 16)?;
+            if let Some(convention) = object.get("calling_convention")
+                && !matches!(
+                    convention.as_str(),
+                    Some("auto" | "windows_x64" | "cdecl" | "stdcall" | "fastcall" | "thiscall")
+                )
+            {
+                return Err(invalid(
+                    "calling_convention",
+                    "contains an unsupported convention",
+                ));
+            }
+            if object.contains_key("thread_id") {
+                validate_thread_id(object)?;
             }
             Ok(())
         }
@@ -1018,6 +1088,27 @@ fn build_catalog() -> Vec<Value> {
                     ),
                 ],
                 vec![],
+            ),
+        ),
+        read_tool(
+            "events.wait",
+            "Wait for the first callback event newer than after_sequence that matches one or more closed event types. The wait is bounded and never consumes the event ring.",
+            object(
+                vec![
+                    (
+                        "after_sequence",
+                        json!({"type":"integer","minimum":0,"maximum":9_007_199_254_740_991_i64}),
+                    ),
+                    (
+                        "types",
+                        json!({"type":"array","minItems":1,"maxItems":19,"uniqueItems":true,"items":{"type":"string","enum":EVENT_TYPES}}),
+                    ),
+                    (
+                        "timeout_ms",
+                        json!({"type":"integer","minimum":1,"maximum":9000,"default":5000}),
+                    ),
+                ],
+                vec!["after_sequence", "types"],
             ),
         ),
         read_tool(
@@ -1596,6 +1687,43 @@ fn build_catalog() -> Vec<Value> {
             ),
         ),
         read_tool(
+            "expressions.evaluate_batch",
+            "Evaluate 1-32 x64dbg expressions against one paused state generation. Each item reports its own success or evaluation error; no debugger command is executed.",
+            object(
+                vec![(
+                    "expressions",
+                    json!({"type":"array","minItems":1,"maxItems":32,"items":{"type":"string","minLength":1,"maxLength":1024}}),
+                )],
+                vec!["expressions"],
+            ),
+        ),
+        read_tool(
+            "process.peb",
+            "Read a bounded typed summary of stable PEB fields for the paused debuggee, including anti-debug-relevant flags and core process pointers.",
+            object(vec![], vec![]),
+        ),
+        read_tool(
+            "context.arguments",
+            "Read bounded ABI argument candidates from one paused thread. Values are exact register/stack reads, but their interpretation assumes the instruction pointer is at callee entry.",
+            object(
+                vec![
+                    (
+                        "count",
+                        json!({"type":"integer","minimum":1,"maximum":16,"default":8}),
+                    ),
+                    (
+                        "calling_convention",
+                        json!({"type":"string","enum":["auto","windows_x64","cdecl","stdcall","fastcall","thiscall"],"default":"auto"}),
+                    ),
+                    (
+                        "thread_id",
+                        json!({"type":"string","pattern":"^0x[0-9a-f]{1,8}$","minLength":3,"maxLength":10}),
+                    ),
+                ],
+                vec![],
+            ),
+        ),
+        read_tool(
             "symbols.search",
             "Search the current x64dbg symbol database in one loaded module. Results are bounded, paginated, generation-consistent, and known-only.",
             discovery_schema(),
@@ -2049,7 +2177,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 58);
+        assert_eq!(catalog().len(), 62);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -2090,6 +2218,20 @@ mod tests {
         assert!(
             validate_arguments("events.list", &json!({"types":["breakpoint","breakpoint"]}))
                 .is_err()
+        );
+        assert!(
+            validate_arguments(
+                "events.wait",
+                &json!({"after_sequence":12,"types":["exception","dll_loaded"],"timeout_ms":9000})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "events.wait",
+                &json!({"after_sequence":12,"types":[],"timeout_ms":9000})
+            )
+            .is_err()
         );
         assert!(
             validate_arguments(
@@ -2586,6 +2728,31 @@ mod tests {
         );
         assert!(
             validate_arguments("expression.evaluate", &json!({"expression":"cip\0junk"})).is_err()
+        );
+        assert!(
+            validate_arguments(
+                "expressions.evaluate_batch",
+                &json!({"expressions":["cip","csp","kernel32:CreateFileW"]})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments("expressions.evaluate_batch", &json!({"expressions":[]})).is_err()
+        );
+        assert!(validate_arguments("process.peb", &json!({})).is_ok());
+        assert!(
+            validate_arguments(
+                "context.arguments",
+                &json!({"count":16,"calling_convention":"windows_x64","thread_id":"0x1"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_arguments(
+                "context.arguments",
+                &json!({"count":17,"calling_convention":"pascal"})
+            )
+            .is_err()
         );
         assert!(
             validate_arguments(

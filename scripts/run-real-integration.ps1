@@ -263,6 +263,15 @@ try {
         $startupEventPageTwo.next_after_sequence -le $startupEventPageOne.next_after_sequence) {
         throw 'Debugger-event continuation did not preserve sequence order and filter semantics.'
     }
+    $startupEventWait = Invoke-Tool 'events.wait' @{
+        after_sequence = 0; types = $startupEventTypes; timeout_ms = 100
+    } 215
+    if (!$startupEventWait.event -or
+        $startupEventWait.event.type -notin $startupEventTypes -or
+        $startupEventWait.event.sequence -ne $startupEventPageOne.items[0].sequence -or
+        $startupEventWait.overflowed) {
+        throw 'Typed debugger-event wait did not return the first matching retained event.'
+    }
     Write-Verbose 'Debuggee is paused'
 
     $registers = Invoke-Tool 'registers.read' @{} 3
@@ -281,6 +290,37 @@ try {
         throw 'Exact-thread call-stack selection did not honor its bound.'
     }
     $expression = Invoke-Tool 'expression.evaluate' @{ expression = 'cip' } 4
+    $batchExpressions = Invoke-Tool 'expressions.evaluate_batch' @{
+        expressions = @('cip', 'csp', 'x64dbg_mcp_symbol_that_does_not_exist')
+    } 221
+    if ($batchExpressions.requested_count -ne 3 -or
+        $batchExpressions.success_count -ne 2 -or
+        @($batchExpressions.items).Count -ne 3 -or
+        !$batchExpressions.items[0].success -or !$batchExpressions.items[0].value -or
+        !$batchExpressions.items[1].success -or !$batchExpressions.items[1].value -or
+        $batchExpressions.items[2].success -or
+        $batchExpressions.items[2].error.code -ne 'INVALID_EXPRESSION' -or
+        $batchExpressions.state_generation -ne $state.state_generation) {
+        throw 'Batch expression evaluation did not preserve per-item results and generation.'
+    }
+    $peb = Invoke-Tool 'process.peb' @{} 222
+    if (!$peb.address -or !$peb.image_base -or !$peb.loader_data -or
+        !$peb.process_parameters -or !$peb.process_heap -or
+        $null -eq $peb.being_debugged -or !$peb.nt_global_flag -or
+        $peb.state_generation -ne $state.state_generation) {
+        throw 'Typed PEB summary was incomplete or generation-inconsistent.'
+    }
+    $arguments = Invoke-Tool 'context.arguments' @{ count = 6 } 223
+    $expectedConvention = if ($Backend -eq 'x64') { 'windows_x64' } else { 'cdecl' }
+    $expectedFirstSource = if ($Backend -eq 'x64') { 'rcx' } else { 'stack' }
+    if ($arguments.calling_convention -ne $expectedConvention -or
+        $arguments.assumption -ne 'paused_at_callee_entry' -or
+        @($arguments.items).Count -ne 6 -or
+        $arguments.items[0].source -ne $expectedFirstSource -or
+        !$arguments.return_address -or
+        $arguments.state_generation -ne $state.state_generation) {
+        throw 'ABI argument candidates were incomplete or misleadingly described.'
+    }
     $memory = Invoke-Tool 'memory.read' @{ address = $expression.value; length = 16 } 5
     $disassembly = Invoke-Tool 'disassembly.read' @{ address = $expression.value; count = 4 } 6
     $modules = Invoke-Tool 'modules.list' @{ limit = 256 } 7

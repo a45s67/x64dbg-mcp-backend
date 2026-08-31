@@ -82,7 +82,7 @@ bool ExerciseStateTool(const unsigned short port) {
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"debugger.state\",\"arguments\":{}}}";
     const std::string response = PostMcp(port, body);
     return response.starts_with("HTTP/1.1 200") &&
-           response.find("\\\"debuggee_state\\\":\\\"absent\\\"") != std::string::npos;
+           response.find("\"debuggee_state\":\"absent\"") != std::string::npos;
 }
 
 bool ExerciseActiveWaitShutdown(mcp::Runtime& runtime, const unsigned short port) {
@@ -224,8 +224,33 @@ bool ExerciseEventRingBoundary(mcp::Runtime& runtime, const unsigned short port)
                        response.find("\"overflowed\":true") != std::string::npos &&
                        response.find("\"has_more\":true") != std::string::npos &&
                        response.find("\"type\":\"resumed\"") != std::string::npos;
+    const std::string waitBody =
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{"
+        "\"name\":\"events.wait\",\"arguments\":{\"after_sequence\":" +
+        std::to_string(previousLatest + 299U) +
+        ",\"types\":[\"resumed\"],\"timeout_ms\":100}}}";
+    const std::string waitResponse = PostMcp(port, waitBody);
+    const bool waitValid = waitResponse.starts_with("HTTP/1.1 200") &&
+                           waitResponse.find("\"overflowed\":false") != std::string::npos &&
+                           waitResponse.find("\"type\":\"resumed\"") != std::string::npos &&
+                           waitResponse.find("\"event\":{") != std::string::npos;
+    const std::string futureWaitBody =
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{"
+        "\"name\":\"events.wait\",\"arguments\":{\"after_sequence\":" +
+        std::to_string(events.back().sequence) +
+        ",\"types\":[\"paused\"],\"timeout_ms\":1000}}}";
+    std::string futureWaitResponse;
+    std::thread futureWait([port, &futureWaitBody, &futureWaitResponse] {
+        futureWaitResponse = PostMcp(port, futureWaitBody);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    runtime.OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
+    futureWait.join();
+    const bool futureWaitValid =
+        futureWaitResponse.starts_with("HTTP/1.1 200") &&
+        futureWaitResponse.find("\"type\":\"paused\"") != std::string::npos;
     runtime.OnDebuggerEvent(CB_STOPDEBUG, nullptr);
-    return valid;
+    return valid && waitValid && futureWaitValid;
 }
 } // namespace
 

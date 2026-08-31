@@ -98,6 +98,18 @@ contains required integer `after_generation` and optional integer `timeout_ms`
 `process_created`, `system_breakpoint`, `breakpoint`, `exception`, `step`,
 `user_pause`, or `unknown`.
 
+`events.wait` waits for the first retained callback event newer than the required
+`after_sequence` that matches the required closed `types` array. `timeout_ms`
+defaults to 5,000 and is limited to 1-9,000. It does not consume the fixed event
+ring and reports whether the caller's sequence predates retained history.
+
+`expressions.evaluate_batch` evaluates 1-32 expressions, bounded to 8,192 input
+bytes in aggregate, against one paused generation. Evaluation failure is reported
+per item; a debugger state change rejects the complete snapshot. `process.peb`
+returns only fixed architecture-known PEB fields. `context.arguments` returns 1-16
+raw ABI argument candidates and explicitly records the callee-entry assumption;
+it never changes the selected debugger thread.
+
 `debugger.run_to_address` is a mutation whose payload contains one closed
 address reference and optional integer `timeout_ms` (default 9,000; range
 100-20,000). Its successful result explicitly distinguishes target completion,

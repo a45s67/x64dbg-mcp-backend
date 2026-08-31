@@ -98,12 +98,13 @@ transfer, process enumeration, or arbitrary debugger-command tool.
   `debuggee.attach`, `debuggee.detach`, `debugger.stop`.
 - Execution: `debugger.pause`, `debugger.resume`, `debugger.step_into`,
   `debugger.step_over`, `debugger.step_out`, `debugger.run_to_address`,
-  `debugger.wait_for_pause`.
-- Context: `debugger.snapshot`, `events.list`, `registers.read`,
-  `registers.write`, `threads.list`, `callstack.read`, `address.resolve`.
+  `debugger.wait_for_pause`, `events.wait`.
+- Context: `debugger.snapshot`, `events.list`, `context.arguments`,
+  `process.peb`, `registers.read`, `registers.write`, `threads.list`,
+  `callstack.read`, `address.resolve`.
 - Memory/code: `memory.read`, `memory.write`, `memory.map`, `memory.search`,
-  `disassembly.read`, `expression.evaluate`, `assembly.preview`,
-  `assembly.patch`, `patches.list`, `patches.restore`.
+  `disassembly.read`, `expression.evaluate`, `expressions.evaluate_batch`,
+  `assembly.preview`, `assembly.patch`, `patches.list`, `patches.restore`.
 - Breakpoints: `breakpoints.list`, `breakpoints.set`, `breakpoints.remove`,
   typed hardware/memory/conditional/exception set/remove, and
   `breakpoints.enable` / `breakpoints.disable`.

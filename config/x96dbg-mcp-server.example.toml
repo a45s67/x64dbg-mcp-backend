@@ -1,3 +1,5 @@
+# Template for one backend instance. The installer creates separate x32 and x64
+# runtime files with distinct ports and one shared generated bearer token.
 bind = "127.0.0.1"
 port = 43164
 bearer_token = "REPLACE_ME"

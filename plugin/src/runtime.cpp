@@ -2271,7 +2271,7 @@ bool Runtime::LaunchSidecar() {
         configured.resize(configuredLength);
         executable = configured;
     } else {
-        executable = ModuleDirectory() / L".." / L".." / L"server" / L"x64dbg-mcp-server.exe";
+        executable = ModuleDirectory() / L".." / L".." / L"mcp" / L"x96dbg-mcp-server.exe";
     }
     executable = std::filesystem::absolute(executable).lexically_normal();
     if (!std::filesystem::is_regular_file(executable)) {

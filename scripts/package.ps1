@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.18.1',
+    [string]$Version = '0.19.0',
     [string]$OutputDirectory
 )
 
@@ -25,9 +25,6 @@ try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass `
         -File (Join-Path $workspace 'scripts\test-install.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'Installer contract tests failed.' }
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-        -File (Join-Path $workspace 'scripts\test-skill.ps1')
-    if ($LASTEXITCODE -ne 0) { throw 'Codex skill contract tests failed.' }
     & cargo.exe test --offline --locked --workspace --all-targets
     if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
     & cargo.exe clippy --offline --locked --workspace --all-targets -- -D warnings
@@ -40,30 +37,28 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'x64 plugin build failed.' }
 
     New-Item -ItemType Directory -Path $stage | Out-Null
-    foreach ($relative in @('x32\plugins', 'x64\plugins', 'server', 'config', 'docs', 'docs\contracts', 'LICENSES', 'scripts', 'skills')) {
+    foreach ($relative in @('x32', 'x64', 'mcp', 'docs', 'docs\contracts', 'LICENSES', 'scripts')) {
         New-Item -ItemType Directory -Path (Join-Path $stage $relative) -Force | Out-Null
     }
     Copy-Item -LiteralPath 'build\windows-x86\x64dbg-mcp-backend.dp32' `
-        -Destination (Join-Path $stage 'x32\plugins')
+        -Destination (Join-Path $stage 'x32')
     Copy-Item -LiteralPath 'build\windows-x64\x64dbg-mcp-backend.dp64' `
-        -Destination (Join-Path $stage 'x64\plugins')
+        -Destination (Join-Path $stage 'x64')
     Copy-Item -LiteralPath 'target\release\x64dbg-mcp-server.exe' `
-        -Destination (Join-Path $stage 'server')
-    Copy-Item -Path 'config\*.toml' -Destination (Join-Path $stage 'config')
+        -Destination (Join-Path $stage 'mcp\x96dbg-mcp-server.exe')
+    Copy-Item -Path 'config\*.toml' -Destination (Join-Path $stage 'mcp')
     Copy-Item -LiteralPath 'LICENSE' -Destination (Join-Path $stage 'LICENSES\PROJECT-LICENSE.txt')
     Copy-Item -LiteralPath 'THIRD-PARTY-NOTICES.md' -Destination $stage
     Copy-Item -LiteralPath 'README.md' -Destination $stage
     Copy-Item -LiteralPath 'docs\contracts\ipc-v1.md' -Destination (Join-Path $stage 'docs\contracts')
     Copy-Item -LiteralPath 'scripts\install.ps1' -Destination (Join-Path $stage 'scripts')
     Copy-Item -LiteralPath 'scripts\verify-package.ps1' -Destination (Join-Path $stage 'scripts')
-    Copy-Item -LiteralPath 'skills\x64dbg-debugging' -Destination (Join-Path $stage 'skills') -Recurse
 
     @{
         name = 'x64dbg-mcp-backend'
         version = $Version
         mcp_protocol = '2025-06-18'
         ipc_protocol = @{ major = 1; minor = 1 }
-        skills = @{ 'x64dbg-debugging' = '0.18.1' }
         x64dbg_baseline = @{ release = '2026.05.27'; commit = '9c8ca1cae0b6d56cc44f31fddcb10e3b02ffbb87' }
         targets = @('x32dbg', 'x64dbg')
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stage 'version.json') -Encoding UTF8

@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $releaseRoot = Join-Path (Resolve-Path -LiteralPath $X64dbgRoot).Path 'release'
 $debugger = Join-Path $releaseRoot 'x64\x64dbg.exe'
-$configPath = Join-Path $releaseRoot 'server\x64dbg-mcp-server-x64.toml'
+$configPath = Join-Path $releaseRoot 'mcp\x64dbg-mcp-server-x64.toml'
 $sample = (Resolve-Path -LiteralPath $SamplePath).Path
 foreach ($required in @($debugger, $configPath, $sample)) {
     if (!(Test-Path -LiteralPath $required -PathType Leaf)) {

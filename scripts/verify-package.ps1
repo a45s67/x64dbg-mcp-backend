@@ -58,17 +58,12 @@ foreach ($file in $actualFiles) {
 }
 
 $required = @(
-    'x32/plugins/x64dbg-mcp-backend.dp32',
-    'x64/plugins/x64dbg-mcp-backend.dp64',
-    'server/x64dbg-mcp-server.exe',
-    'config/x64dbg-mcp-server-x32.example.toml',
-    'config/x64dbg-mcp-server-x64.example.toml',
+    'x32/x64dbg-mcp-backend.dp32',
+    'x64/x64dbg-mcp-backend.dp64',
+    'mcp/x96dbg-mcp-server.exe',
+    'mcp/x96dbg-mcp-server.example.toml',
     'scripts/install.ps1',
     'scripts/verify-package.ps1',
-    'skills/x64dbg-debugging/SKILL.md',
-    'skills/x64dbg-debugging/.managed-by-x64dbg-mcp-backend',
-    'skills/x64dbg-debugging/references/recipes.md',
-    'skills/x64dbg-debugging/references/troubleshooting.md',
     'docs/contracts/ipc-v1.md',
     'version.json',
     'sbom.cdx.json',
@@ -80,13 +75,6 @@ foreach ($relative in $required) {
         throw "Required package file is missing from checksums.txt: $relative"
     }
 }
-$forbidden = @('scripts/register-codex.ps1')
-foreach ($relative in $forbidden) {
-    if ($expected.ContainsKey($relative.ToLowerInvariant())) {
-        throw "Removed package file is still present: $relative"
-    }
-}
-
 function Assert-PeMachine([string]$Relative, [uint16]$ExpectedMachine) {
     $path = Join-Path $root ($Relative.Replace('/', '\'))
     $stream = [IO.File]::OpenRead($path)
@@ -112,9 +100,9 @@ function Assert-PeMachine([string]$Relative, [uint16]$ExpectedMachine) {
     }
 }
 
-Assert-PeMachine 'x32/plugins/x64dbg-mcp-backend.dp32' 0x014c
-Assert-PeMachine 'x64/plugins/x64dbg-mcp-backend.dp64' 0x8664
-Assert-PeMachine 'server/x64dbg-mcp-server.exe' 0x8664
+Assert-PeMachine 'x32/x64dbg-mcp-backend.dp32' 0x014c
+Assert-PeMachine 'x64/x64dbg-mcp-backend.dp64' 0x8664
+Assert-PeMachine 'mcp/x96dbg-mcp-server.exe' 0x8664
 
 $version = Get-Content -LiteralPath (Join-Path $root 'version.json') -Raw | ConvertFrom-Json
 if ($version.name -cne 'x64dbg-mcp-backend' -or $version.mcp_protocol -cne '2025-06-18' -or

@@ -22,30 +22,25 @@ try {
     $package = Join-Path $testRoot 'package'
     $debugger = Join-Path $testRoot 'debugger'
     foreach ($directory in @(
-        (Join-Path $package 'server'),
-        (Join-Path $package 'x32\plugins'),
-        (Join-Path $package 'x64\plugins'),
-        (Join-Path $package 'skills\x64dbg-debugging\references'),
+        (Join-Path $package 'mcp'),
+        (Join-Path $package 'x32'),
+        (Join-Path $package 'x64'),
         (Join-Path $debugger 'release\x32\plugins'),
         (Join-Path $debugger 'release\x64\plugins')
     )) {
         [IO.Directory]::CreateDirectory($directory) | Out-Null
     }
-    $serverSource = Join-Path $package 'server\x64dbg-mcp-server.exe'
-    $x32Source = Join-Path $package 'x32\plugins\x64dbg-mcp-backend.dp32'
-    $x64Source = Join-Path $package 'x64\plugins\x64dbg-mcp-backend.dp64'
+    $serverSource = Join-Path $package 'mcp\x96dbg-mcp-server.exe'
+    $x32Source = Join-Path $package 'x32\x64dbg-mcp-backend.dp32'
+    $x64Source = Join-Path $package 'x64\x64dbg-mcp-backend.dp64'
     [IO.File]::WriteAllText($serverSource, 'server-v1')
     [IO.File]::WriteAllText($x32Source, 'x32-v1')
     [IO.File]::WriteAllText($x64Source, 'x64-v1')
-    [IO.File]::WriteAllText((Join-Path $package 'skills\x64dbg-debugging\SKILL.md'), 'skill')
-    [IO.File]::WriteAllText((Join-Path $package 'skills\x64dbg-debugging\.managed-by-x64dbg-mcp-backend'), 'managed')
-    [IO.File]::WriteAllText((Join-Path $package 'skills\x64dbg-debugging\references\recipes.md'), 'recipes')
-    [IO.File]::WriteAllText((Join-Path $package 'skills\x64dbg-debugging\references\troubleshooting.md'), 'troubleshooting')
 
     $output = & $installer -X64dbgRoot $debugger -PackageRoot $package
-    $serverDirectory = Join-Path $debugger 'release\server'
-    $x32ConfigPath = Join-Path $serverDirectory 'x64dbg-mcp-server-x32.toml'
-    $x64ConfigPath = Join-Path $serverDirectory 'x64dbg-mcp-server-x64.toml'
+    $mcpDirectory = Join-Path $debugger 'release\mcp'
+    $x32ConfigPath = Join-Path $mcpDirectory 'x64dbg-mcp-server-x32.toml'
+    $x64ConfigPath = Join-Path $mcpDirectory 'x64dbg-mcp-server-x64.toml'
     $x32 = Read-TestConfig $x32ConfigPath
     $x64 = Read-TestConfig $x64ConfigPath
     Assert-True ($x32.Port -eq 43132 -and $x64.Port -eq 43164) 'first-install ports are incorrect'
@@ -58,8 +53,6 @@ try {
         $outputText.Contains('url = "http://127.0.0.1:43132/mcp"')) 'Codex endpoint URLs are incorrect'
     $authorization = 'http_headers = { Authorization = "Bearer ' + $x32.Token + '" }'
     Assert-True (([regex]::Matches($outputText, [regex]::Escape($authorization))).Count -eq 2) 'shared Authorization header was not printed exactly twice'
-    Assert-True ($outputText.Contains('skills\x64dbg-debugging') -and
-        $outputText.Contains('Copy-Item -Path')) 'complete packaged skill copy command is missing'
     Assert-True ($outputText.Contains('Restart Codex')) 'Codex restart instruction is missing'
     $firstToken = $x32.Token
 
@@ -70,7 +63,7 @@ try {
     $x32 = Read-TestConfig $x32ConfigPath
     $x64 = Read-TestConfig $x64ConfigPath
     Assert-True ($x32.Token -ceq $firstToken -and $x64.Token -ceq $firstToken) 'idempotent reinstall rotated the token'
-    Assert-True ([IO.File]::ReadAllText((Join-Path $serverDirectory 'x64dbg-mcp-server.exe')) -ceq 'server-v2') 'reinstall did not update the sidecar'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $mcpDirectory 'x96dbg-mcp-server.exe')) -ceq 'server-v2') 'reinstall did not update the sidecar'
 
     & $installer -X64dbgRoot $debugger -PackageRoot $package -X32Port 44132 -X64Port 44164 | Out-Null
     $x32 = Read-TestConfig $x32ConfigPath
@@ -101,7 +94,7 @@ try {
         $mismatchFailed = $_.Exception.Message -match 'tokens differ'
     }
     Assert-True $mismatchFailed 'mismatched installed tokens did not fail closed'
-    Assert-True ([IO.File]::ReadAllText((Join-Path $serverDirectory 'x64dbg-mcp-server.exe')) -ceq 'server-v2') 'mismatch failure partially copied binaries'
+    Assert-True ([IO.File]::ReadAllText((Join-Path $mcpDirectory 'x96dbg-mcp-server.exe')) -ceq 'server-v2') 'mismatch failure partially copied binaries'
 
     & $installer -X64dbgRoot $debugger -PackageRoot $package -RotateToken | Out-Null
     $x32 = Read-TestConfig $x32ConfigPath
@@ -113,7 +106,7 @@ try {
     [IO.Directory]::CreateDirectory((Join-Path $whatIfRoot 'release\x32\plugins')) | Out-Null
     [IO.Directory]::CreateDirectory((Join-Path $whatIfRoot 'release\x64\plugins')) | Out-Null
     & $installer -X64dbgRoot $whatIfRoot -PackageRoot $package -WhatIf | Out-Null
-    Assert-True (!(Test-Path -LiteralPath (Join-Path $whatIfRoot 'release\server'))) '-WhatIf wrote the server directory'
+    Assert-True (!(Test-Path -LiteralPath (Join-Path $whatIfRoot 'release\mcp'))) '-WhatIf wrote the MCP directory'
 
     $samePortFailed = $false
     try {

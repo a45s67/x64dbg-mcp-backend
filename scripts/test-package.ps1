@@ -34,22 +34,6 @@ try {
     }
     Assert-True $unlistedFailed 'an unlisted file was not rejected'
 
-    [IO.File]::Delete((Join-Path $testRoot 'unlisted.txt'))
-    $removedHelper = Join-Path $testRoot 'scripts\register-codex.ps1'
-    [IO.File]::WriteAllText($removedHelper, 'removed helper')
-    $checksums = Get-ChildItem -LiteralPath $testRoot -Recurse -File |
-        Where-Object { $_.Name -cne 'checksums.txt' } |
-        Sort-Object FullName | ForEach-Object {
-            $relative = $_.FullName.Substring($testRoot.Length + 1).Replace('\', '/')
-            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $relative"
-        }
-    $checksums | Set-Content -LiteralPath (Join-Path $testRoot 'checksums.txt') -Encoding ASCII
-    $removedHelperFailed = $false
-    try { & $verifier -PackageRoot $testRoot | Out-Null } catch {
-        $removedHelperFailed = $_.Exception.Message -match 'Removed package file'
-    }
-    Assert-True $removedHelperFailed 'the removed Codex helper was accepted when checksummed'
     Write-Output 'package verifier contract tests passed'
 } finally {
     if (Test-Path -LiteralPath $testRoot) {

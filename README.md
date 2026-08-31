@@ -18,15 +18,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
   -X64dbgRoot C:\tools\x64dbg
 ```
 
-The installer deploys both plugins and the shared sidecar:
+The release ZIP uses this compact binary/configuration layout:
 
 ```text
-x32\plugins\x64dbg-mcp-backend.dp32
-x64\plugins\x64dbg-mcp-backend.dp64
-server\x64dbg-mcp-server.exe
-server\x64dbg-mcp-server-x32.toml
-server\x64dbg-mcp-server-x64.toml
+x32\x64dbg-mcp-backend.dp32
+x64\x64dbg-mcp-backend.dp64
+mcp\x96dbg-mcp-server.exe
+mcp\x96dbg-mcp-server.example.toml
 ```
+
+The installer copies the plugins into the debugger's `x32\plugins` and
+`x64\plugins` directories, then creates `mcp\x96dbg-mcp-server.exe` plus
+separate `x64dbg-mcp-server-x32.toml` and `x64dbg-mcp-server-x64.toml` runtime
+files. The installer intentionally supports only this layout.
 
 Default endpoints are `http://127.0.0.1:43132/mcp` for x32dbg and
 `http://127.0.0.1:43164/mcp` for x64dbg. Use `-X32Port` and `-X64Port` for
@@ -62,16 +66,9 @@ url = "http://127.0.0.1:43132/mcp"
 http_headers = { Authorization = "Bearer <shared installed token>" }
 ```
 
-Install the complete version-matched workflow skill from the extracted release:
-
-```powershell
-New-Item -ItemType Directory -Force "$HOME\.codex\skills\x64dbg-debugging" | Out-Null
-Copy-Item -Path ".\skills\x64dbg-debugging\*" `
-  -Destination "$HOME\.codex\skills\x64dbg-debugging" -Recurse -Force
-```
-
 Restart Codex after editing the configuration. The installer never modifies
-Codex configuration, skills, or environment variables itself.
+Codex configuration or environment variables itself. A separate Codex skill is
+not required; MCP tool descriptions and schemas are authoritative.
 
 ## Dynamic Analysis Gateway
 
@@ -164,6 +161,7 @@ are authoritative in `crates/server/src/tools.rs`; native dispatch is in
 
 ## Uninstall
 
-Close both debuggers and remove only the five installed files listed in the
-Install section. Codex configuration and the optional skill are user-owned and
-must be removed separately if no longer wanted.
+Close both debuggers and remove the two installed plugins plus
+`mcp\x96dbg-mcp-server.exe`, `mcp\x64dbg-mcp-server-x32.toml`, and
+`mcp\x64dbg-mcp-server-x64.toml`. Codex configuration is user-owned and must be
+removed separately if no longer wanted.

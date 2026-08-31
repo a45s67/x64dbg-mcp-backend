@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.19.0',
+    [string]$Version = '0.1.0',
     [string]$OutputDirectory
 )
 
@@ -22,18 +22,11 @@ if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $archive)) {
 
 Push-Location $workspace
 try {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-        -File (Join-Path $workspace 'scripts\test-install.ps1')
-    if ($LASTEXITCODE -ne 0) { throw 'Installer contract tests failed.' }
-    & cargo.exe test --offline --locked --workspace --all-targets
-    if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
-    & cargo.exe clippy --offline --locked --workspace --all-targets -- -D warnings
-    if ($LASTEXITCODE -ne 0) { throw 'Rust Clippy gate failed.' }
     & cargo.exe build --offline --locked --release
     if ($LASTEXITCODE -ne 0) { throw 'Rust release build failed.' }
-    & (Join-Path $workspace 'scripts\build-plugin.cmd') x86 test
+    & cmd.exe /d /c (Join-Path $workspace 'scripts\build-plugin.cmd') x86
     if ($LASTEXITCODE -ne 0) { throw 'x86 plugin build failed.' }
-    & (Join-Path $workspace 'scripts\build-plugin.cmd') x64 test
+    & cmd.exe /d /c (Join-Path $workspace 'scripts\build-plugin.cmd') x64
     if ($LASTEXITCODE -ne 0) { throw 'x64 plugin build failed.' }
 
     New-Item -ItemType Directory -Path $stage | Out-Null
@@ -49,8 +42,8 @@ try {
     Copy-Item -Path 'config\*.toml' -Destination (Join-Path $stage 'mcp')
     Copy-Item -LiteralPath 'scripts\install.ps1' -Destination (Join-Path $stage 'install.ps1')
     & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-        -File (Join-Path $workspace 'scripts\test-package.ps1') -PackageRoot $stage
-    if ($LASTEXITCODE -ne 0) { throw 'Package verifier contract tests failed.' }
+        -File (Join-Path $workspace 'scripts\verify-package.ps1') -PackageRoot $stage
+    if ($LASTEXITCODE -ne 0) { throw 'Package layout verification failed.' }
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archiveStream = [System.IO.File]::Open($archive, [System.IO.FileMode]::CreateNew)

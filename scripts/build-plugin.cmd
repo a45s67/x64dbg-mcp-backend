@@ -13,6 +13,8 @@ if /I "%~1"=="x64" (
   echo Usage: scripts\build-plugin.cmd ^<x86^|x64^>
   exit /b 2
 )
+set "MCP_BUILD_TESTING=OFF"
+if /I "%~2"=="test" set "MCP_BUILD_TESTING=ON"
 
 if not defined X64DBG_ROOT set "X64DBG_ROOT=C:\tools\x64dbg"
 if not exist "%X64DBG_ROOT%\pluginsdk\_plugins.h" (
@@ -26,23 +28,21 @@ if not exist "%VSWHERE%" (
   exit /b 2
 )
 
-for /f "usebackq tokens=*" %%I in (`"%VSWHERE%" -latest -products Microsoft.VisualStudio.Product.BuildTools -property installationPath`) do set "VSINSTALL=%%I"
+for /f "usebackq tokens=*" %%I in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%I"
 if not defined VSINSTALL (
-  echo Visual Studio Build Tools was not found.
+  echo Visual Studio with the x86/x64 C++ toolchain was not found.
   exit /b 2
 )
 
 call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=%MCP_ARCH% -host_arch=x64 >nul
-if errorlevel 1 exit /b %errorlevel%
+if errorlevel 1 exit /b 1
 
-cmake --preset windows-%MCP_ARCH% --fresh
-if errorlevel 1 exit /b %errorlevel%
+cmake --preset windows-%MCP_ARCH% --fresh -DBUILD_TESTING=%MCP_BUILD_TESTING%
+if errorlevel 1 exit /b 1
 
 cmake --build --preset windows-%MCP_ARCH%-release
-if errorlevel 1 exit /b %errorlevel%
-if /I "%~2"=="test" (
-  ctest --test-dir "build\windows-%MCP_ARCH%" --output-on-failure
-  if errorlevel 1 exit /b 1
-  exit /b 0
-)
+if errorlevel 1 exit /b 1
+if /I not "%~2"=="test" exit /b 0
+ctest --test-dir "build\windows-%MCP_ARCH%" --output-on-failure
+if errorlevel 1 exit /b 1
 exit /b 0

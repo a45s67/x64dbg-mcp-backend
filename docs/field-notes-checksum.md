@@ -1218,3 +1218,50 @@ Authorization-header endpoints and installed skill 0.17.0. Installed Flare-On
 reversible workflow, then recorded trace `5eedb021-9de2-4127-bc7a-5cb33e823404`
 at exactly eight steps and nine points with exact start replay. Debugger stop,
 host exit, and both backend listener checks were clean.
+
+## 0.18.0 exact typed breakpoint transition qualification
+
+ADR 0039 added only `breakpoints.enable` and `breakpoints.disable`. Their closed
+selector covers plain software, hardware, memory, managed conditional, and
+managed exception breakpoints. Every mutation reads one exact native record,
+uses one fixed explicit-identity command and private queue fence when a state
+change is necessary, then proves the requested enabled state without changing
+configuration. Already-requested state is a verified `changed: false` result.
+Hardware identity is address/access/size; a disabled record reports `slot: null`
+and may acquire another slot when enabled.
+
+The 0.18.0 gate passed 52 Rust unit/contract tests, seven supervised sidecar
+shutdown tests, Clippy with warnings denied, and 16 native tests on each
+architecture. Fresh isolated x64dbg instance
+`f48e77e1-beba-43eb-9cd7-94d01bf3dfde` and x32dbg instance
+`6f0e1acc-7525-413f-96ec-6ac4228dc0ce` completed five-kind disable/enable
+cycles, hardware slot release/reacquisition, exact replay, changed-selector
+operation conflict, managed policy preservation, live breakpoint hits, and
+clean debugger-owned sidecar shutdown. One earlier x32 run completed all new
+breakpoint checks but encountered a retryable `BUSY` in the pre-existing late
+pause loop; a fresh complete rerun passed.
+
+The final release sidecar was then rerun through the updated workflow as x64
+instance `89e16145-68dc-4275-a209-1469573301c7` and x32 instance
+`c071577b-61ab-4c3f-9783-e0f7592a6e99`. Both explicitly proved the new
+already-enabled hardware path returns `changed: false`, all five transition
+kinds remain true, the changed-selector conflict remains rejected, and final
+debugger state is absent.
+
+The 61-file package passed installer, Codex registration, managed-skill,
+manifest, SBOM, checksum, and offline-verifier gates. Archive SHA-256 is
+`8c133215c69e23aa01a189e3df0b4ff5ec1e40b9cd9d10d5623d4b8c50ea6665`.
+Installed x32 plugin, x64 plugin, and sidecar hashes are respectively
+`cf04156fd472459bcafb549dfb170c5bfd67bdfda874645bc75a711050785b75`,
+`fe28140ad5b5d07c063ca294a162e4f494a4f6755ae79db58ea738ef1d8ed49e`,
+and `55bb9e54ee222130357a75205cdec3b1701af5d29b2f4e4600192a71a90c2a49`.
+
+Installed Flare-On `checksum.exe` instance
+`f888807e-a9c4-4119-97ce-ca5de361c3cc` resolved
+`CHECKSUM.EXE+0xa78a0` to `0x9b78a0` from ASLR base `0x910000`. Without leaving
+temporary state, it toggled all five breakpoint kinds, preserved conditional
+and exception managed identities, released/reacquired a hardware slot, hit the
+hardware and memory breakpoints, restored the tracked patch and register, ran
+the bounded trace, and stopped. The debugger, sidecar, ports 43132/43164, and
+temporary managed breakpoint state were all absent afterward. Both Codex
+endpoints retain static Authorization headers and the managed skill is 0.18.0.

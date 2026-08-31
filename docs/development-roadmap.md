@@ -507,10 +507,10 @@ bulk form or caller command. Managed conditional and exception ownership is
 preserved. Hardware identity excludes its transient debug-register slot, which
 may change across a disable/enable cycle.
 
-This stage is accepted but not yet implemented. Completion requires contract
-and native policy coverage, fresh x32/x64 lifecycle and replay qualification,
-shutdown coverage, an updated versioned workflow skill, offline package
-verification, and an installed non-destructive Flare-On smoke.
+Completed in 0.18.0. Closed schemas and native policy tests passed for all five
+kinds, followed by fresh x32/x64 lifecycle, replay/conflict, and shutdown
+qualification. The versioned workflow skill, offline-verified package, installed
+dual-plugin deployment, and non-destructive Flare-On checksum smoke all passed.
 
 ## Parked work
 
@@ -526,6 +526,10 @@ resumed:
 - file upload, unrestricted dump paths, and general shell integration; and
 - outbound reference enumeration until a precise bounded native source or index
   is available.
+
+No additional MCP tools are active candidates after Stage 11. New tools require
+a new concrete workflow and ADR; the rejected candidate list does not silently
+reopen.
 
 Parked work must not silently become a release requirement or be reported as
 completed by inference from adjacent tests.

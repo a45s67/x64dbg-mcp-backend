@@ -171,6 +171,17 @@ try {
         $mainPause.state_generation -le $launch.state_generation) {
         throw 'Main pause snapshot is missing generation-consistent breakpoint metadata.'
     }
+    $mainSelector = @{ kind = 'software'; address = $moduleRef }
+    $mainDisabled = Invoke-Tool 'breakpoints.disable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $mainSelector
+    } 140
+    $mainEnabled = Invoke-Tool 'breakpoints.enable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $mainSelector
+    } 141
+    if (!$mainDisabled.changed -or $mainDisabled.enabled -or
+        !$mainEnabled.changed -or !$mainEnabled.enabled) {
+        throw 'Installed plain software breakpoint transition was not exactly confirmed.'
+    }
     $registerSnapshot = Invoke-Tool 'registers.read' @{ names = @('rip', 'rsp') } 36
     $explicitThreadRegisters = Invoke-Tool 'registers.read' @{
         names = @('rip', 'rsp'); thread_id = $mainPause.active_thread_id
@@ -245,6 +256,22 @@ try {
         ($conditionalReplay | ConvertTo-Json -Compress -Depth 12)) {
         throw 'Installed conditional breakpoint was not listed or replay-safe.'
     }
+    $conditionalSelector = @{
+        kind = 'conditional'; address = $managedBreakpointTarget
+        managed_id = $conditionalSet.managed_id
+    }
+    $conditionalDisabled = Invoke-Tool 'breakpoints.disable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $conditionalSelector
+    } 142
+    $conditionalEnabled = Invoke-Tool 'breakpoints.enable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $conditionalSelector
+    } 143
+    if (!$conditionalDisabled.changed -or $conditionalDisabled.enabled -or
+        !$conditionalEnabled.changed -or !$conditionalEnabled.enabled -or
+        $conditionalEnabled.managed_id -ne $conditionalSet.managed_id -or
+        $conditionalEnabled.condition_expression -ne $conditionalSet.condition_expression) {
+        throw 'Installed conditional transition lost its managed condition policy.'
+    }
     $conditionalRemoveArguments = @{
         operation_id = [Guid]::NewGuid().ToString()
         address = $managedBreakpointTarget; managed_id = $conditionalSet.managed_id
@@ -272,6 +299,21 @@ try {
         ($exceptionSet | ConvertTo-Json -Compress -Depth 12) -ne
         ($exceptionReplay | ConvertTo-Json -Compress -Depth 12)) {
         throw 'Installed exception breakpoint was not listed or replay-safe.'
+    }
+    $exceptionSelector = @{
+        kind = 'exception'; code = '0xe0424343'; chance = 'first'
+        managed_id = $exceptionSet.managed_id
+    }
+    $exceptionDisabled = Invoke-Tool 'breakpoints.disable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $exceptionSelector
+    } 144
+    $exceptionEnabled = Invoke-Tool 'breakpoints.enable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $exceptionSelector
+    } 145
+    if (!$exceptionDisabled.changed -or $exceptionDisabled.enabled -or
+        !$exceptionEnabled.changed -or !$exceptionEnabled.enabled -or
+        $exceptionEnabled.managed_id -ne $exceptionSet.managed_id) {
+        throw 'Installed exception transition lost its managed policy.'
     }
     $exceptionRemoveArguments = @{
         operation_id = [Guid]::NewGuid().ToString()
@@ -468,6 +510,22 @@ try {
     }
     $hardwareSet = Invoke-Tool 'breakpoints.hardware.set' $hardwareArguments 100
     $hardwareSetReplay = Invoke-Tool 'breakpoints.hardware.set' $hardwareArguments 101
+    $hardwareSelector = @{
+        kind = 'hardware'; address = @{ absolute = $hardwareInstruction.address }
+        access = 'execute'; size = 1
+    }
+    $hardwareDisabled = Invoke-Tool 'breakpoints.disable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $hardwareSelector
+    } 146
+    $hardwareEnabled = Invoke-Tool 'breakpoints.enable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $hardwareSelector
+    } 147
+    if (!$hardwareDisabled.changed -or $hardwareDisabled.enabled -or
+        $null -ne $hardwareDisabled.slot -or !$hardwareEnabled.changed -or
+        !$hardwareEnabled.enabled -or $hardwareEnabled.slot -lt 0 -or
+        $hardwareEnabled.slot -gt 3) {
+        throw 'Installed hardware transition did not release and reacquire a slot.'
+    }
     $hardwareResume = Invoke-Tool 'debugger.resume' @{
         operation_id = [Guid]::NewGuid().ToString()
     } 102
@@ -502,6 +560,21 @@ try {
     }
     $memorySet = Invoke-Tool 'breakpoints.memory.set' $memoryArguments 106
     $memorySetReplay = Invoke-Tool 'breakpoints.memory.set' $memoryArguments 107
+    $memorySelector = @{
+        kind = 'memory'; address = @{ absolute = $memoryInstruction.address }
+        access = 'execute'; size = $memoryInstruction.size
+    }
+    $memoryDisabled = Invoke-Tool 'breakpoints.disable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $memorySelector
+    } 148
+    $memoryEnabled = Invoke-Tool 'breakpoints.enable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $memorySelector
+    } 149
+    if (!$memoryDisabled.changed -or $memoryDisabled.enabled -or
+        !$memoryEnabled.changed -or !$memoryEnabled.enabled -or
+        $memoryEnabled.size -ne $memoryInstruction.size) {
+        throw 'Installed memory transition did not preserve its exact range policy.'
+    }
     $memoryResume = Invoke-Tool 'debugger.resume' @{
         operation_id = [Guid]::NewGuid().ToString()
     } 108
@@ -636,15 +709,20 @@ try {
         patch_restored_bytes_equal = $true
         hardware_breakpoint_address = $hardwarePause.instruction_pointer
         hardware_breakpoint_replay_equal = $true
+        breakpoint_transition_software = $true
+        breakpoint_transition_hardware = $true
         memory_breakpoint_address = $memoryPause.instruction_pointer
         memory_breakpoint_size = $memorySet.size
         memory_breakpoint_replay_equal = $true
+        breakpoint_transition_memory = $true
         conditional_breakpoint_managed = $conditionalSet.managed_id
         conditional_breakpoint_replay_equal = $true
         conditional_breakpoint_removed = !$conditionalRemove.present
+        breakpoint_transition_conditional = $true
         exception_breakpoint_managed = $exceptionSet.managed_id
         exception_breakpoint_replay_equal = $true
         exception_breakpoint_removed = !$exceptionRemove.present
+        breakpoint_transition_exception = $true
         run_to_target = $runToInstruction.address
         run_to_completed = $runTo.completed
         run_to_interruption = $runTo.interruption

@@ -44,6 +44,7 @@ evidence, not a substitute for the release gate.
 | Typed architecture-matched DLL launch | ADR 0037, bounded PE policy tests, deterministic x32/x64 DLL entry workflows, exact replay/conflict checks, and generated-loader cleanup |
 | Owned bounded trace sessions | ADR 0038, closed MCP schemas, native trace policy tests, dual-architecture completion/cancel/timeout/interruption workflows, immutable pagination, and active-trace unload tests |
 | Typed conditional and exception breakpoint ownership | ADRs 0034/0035, closed-schema compiler tests, callback-correlation regression, dual-architecture live hits, and installed non-resuming Flare-On lifecycle smoke |
+| Exact typed breakpoint enable/disable | ADR 0039, closed selector contracts, native configuration-invariant tests, x32/x64 five-kind transitions, replay/conflict/no-op checks, nullable hardware-slot observation, and installed Flare-On smoke |
 | Owned threads/processes and graceful unload | supervised shutdown matrix, native lifecycle tests, and finite integration soak |
 | Explicit state and structured errors | MCP golden/handler tests and actionable diagnostic contracts |
 | Bounded input, output, concurrency, operations, and discovery | Rust/native deterministic robustness corpus and bounded tool contracts |

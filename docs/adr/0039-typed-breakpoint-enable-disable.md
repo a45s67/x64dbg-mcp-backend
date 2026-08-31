@@ -1,6 +1,6 @@
 # ADR 0039: Exact typed breakpoint enable and disable transitions
 
-Status: Accepted for implementation on 2026-08-31.
+Status: Implemented and qualified in 0.18.0 on 2026-08-31.
 
 ## Context
 

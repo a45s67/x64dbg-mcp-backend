@@ -1,8 +1,5 @@
 [CmdletBinding()]
-param(
-    [Parameter(Mandatory)]
-    [string]$PackageRoot
-)
+param([Parameter(Mandatory)][string]$PackageRoot)
 
 $ErrorActionPreference = 'Stop'
 $verifier = Join-Path $PSScriptRoot 'verify-package.ps1'
@@ -18,22 +15,29 @@ try {
     & $verifier -PackageRoot $source | Out-Null
     Copy-Item -LiteralPath $source -Destination $testRoot -Recurse
 
-    $readme = Join-Path $testRoot 'README.md'
-    [IO.File]::AppendAllText($readme, "`ntampered")
-    $tamperFailed = $false
+    $config = Join-Path $testRoot 'mcp\x96dbg-mcp-server.example.toml'
+    [IO.File]::AppendAllText($config, "`nmax_inflight = 8")
+    $nonMinimalFailed = $false
     try { & $verifier -PackageRoot $testRoot | Out-Null } catch {
-        $tamperFailed = $_.Exception.Message -match 'Checksum mismatch'
+        $nonMinimalFailed = $_.Exception.Message -match 'only bind, port, and bearer_token'
     }
-    Assert-True $tamperFailed 'content tampering was not rejected'
+    Assert-True $nonMinimalFailed 'a non-minimal config was accepted'
 
-    Copy-Item -LiteralPath (Join-Path $source 'README.md') -Destination $readme -Force
+    Copy-Item -LiteralPath (Join-Path $source 'mcp\x96dbg-mcp-server.example.toml') -Destination $config -Force
     [IO.File]::WriteAllText((Join-Path $testRoot 'unlisted.txt'), 'unexpected')
     $unlistedFailed = $false
     try { & $verifier -PackageRoot $testRoot | Out-Null } catch {
-        $unlistedFailed = $_.Exception.Message -match 'file count|Unlisted'
+        $unlistedFailed = $_.Exception.Message -match 'exactly'
     }
-    Assert-True $unlistedFailed 'an unlisted file was not rejected'
+    Assert-True $unlistedFailed 'an unlisted file was accepted'
 
+    [IO.File]::Delete((Join-Path $testRoot 'unlisted.txt'))
+    [IO.File]::Delete((Join-Path $testRoot 'x32\x64dbg-mcp-backend.dp32'))
+    $missingFailed = $false
+    try { & $verifier -PackageRoot $testRoot | Out-Null } catch {
+        $missingFailed = $_.Exception.Message -match 'exactly'
+    }
+    Assert-True $missingFailed 'a missing plugin was accepted'
     Write-Output 'package verifier contract tests passed'
 } finally {
     if (Test-Path -LiteralPath $testRoot) {

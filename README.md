@@ -14,7 +14,7 @@ names remain local.
 Download and extract the release ZIP, then run from its top-level directory:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 `
   -X64dbgRoot C:\tools\x64dbg
 ```
 
@@ -25,25 +25,21 @@ x32\x64dbg-mcp-backend.dp32
 x64\x64dbg-mcp-backend.dp64
 mcp\x96dbg-mcp-server.exe
 mcp\x96dbg-mcp-server.example.toml
+install.ps1
 ```
 
 The installer copies the plugins into the debugger's `x32\plugins` and
 `x64\plugins` directories, then creates `mcp\x96dbg-mcp-server.exe` plus
 separate `x64dbg-mcp-server-x32.toml` and `x64dbg-mcp-server-x64.toml` runtime
-files. The installer intentionally supports only this layout.
+files. Server limits and timeouts use built-in defaults; the generated config
+contains only the bind address, port, and bearer token. The installer
+intentionally supports only this layout.
 
 Default endpoints are `http://127.0.0.1:43132/mcp` for x32dbg and
 `http://127.0.0.1:43164/mcp` for x64dbg. Use `-X32Port` and `-X64Port` for
 different non-equal ports. Reinstall preserves valid ports and the shared token;
 `-RotateToken` deliberately creates a new credential. The installer output
 contains the token and must be treated as secret.
-
-Verify an extracted release before installing:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\scripts\verify-package.ps1
-```
 
 ## Codex
 

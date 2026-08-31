@@ -100,16 +100,6 @@ if ($PSCmdlet.ShouldProcess($debuggerRoot, 'Install x64dbg MCP backend')) {
 bind = "127.0.0.1"
 port = $($entry[1])
 bearer_token = "$token"
-request_timeout_ms = 10000
-mutation_timeout_ms = 30000
-shutdown_timeout_ms = 10000
-max_inflight = 8
-max_header_count = 64
-max_header_bytes = 32768
-max_requests_per_second = 100
-max_body_bytes = 1048576
-max_output_bytes = 1048576
-allowed_origins = []
 "@ | Set-Content -LiteralPath $configPath -Encoding ASCII -NoNewline
     }
     $tokenAction = if ($tokenWasGenerated) { 'generated' } else { 'preserved' }

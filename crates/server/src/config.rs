@@ -312,6 +312,22 @@ mod tests {
     use super::FileConfig;
 
     #[test]
+    fn minimal_installed_toml_uses_optional_server_defaults() {
+        let parsed: FileConfig = toml::from_str(
+            r#"
+                bind = "127.0.0.1"
+                port = 43164
+                bearer_token = "0123456789abcdef0123456789abcdef"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(parsed.port, Some(43164));
+        assert!(parsed.max_inflight.is_none());
+        assert!(parsed.request_timeout_ms.is_none());
+        assert!(parsed.allowed_origins.is_none());
+    }
+
+    #[test]
     fn toml_schema_accepts_documented_fields_and_rejects_unknown_ones() {
         let parsed: FileConfig = toml::from_str(
             r#"

@@ -17,6 +17,13 @@ function Read-TestConfig([string]$Path) {
     [pscustomobject]@{ Port = [int]$port; Token = $token }
 }
 
+function Assert-MinimalConfig([string]$Path) {
+    $settings = @([IO.File]::ReadAllLines($Path) | Where-Object { $_ -match '^[a-z_]+\s*=' })
+    Assert-True ($settings.Count -eq 3) "runtime config is not minimal: $Path"
+    Assert-True ($settings[0] -match '^bind = ' -and $settings[1] -match '^port = ' -and
+        $settings[2] -match '^bearer_token = ') "runtime config keys are incorrect: $Path"
+}
+
 try {
     [IO.Directory]::CreateDirectory($testRoot) | Out-Null
     $package = Join-Path $testRoot 'package'
@@ -43,6 +50,8 @@ try {
     $x64ConfigPath = Join-Path $mcpDirectory 'x64dbg-mcp-server-x64.toml'
     $x32 = Read-TestConfig $x32ConfigPath
     $x64 = Read-TestConfig $x64ConfigPath
+    Assert-MinimalConfig $x32ConfigPath
+    Assert-MinimalConfig $x64ConfigPath
     Assert-True ($x32.Port -eq 43132 -and $x64.Port -eq 43164) 'first-install ports are incorrect'
     Assert-True ($x32.Token -ceq $x64.Token -and $x32.Token.Length -ge 32) 'first-install token is not shared and bounded'
     $outputText = $output -join "`n"

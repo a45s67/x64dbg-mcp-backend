@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing tag to publish, for example v0.1.0
+        description: Existing tag to publish, for example v0.1.1
         required: false
         type: string
 
@@ -59,8 +59,8 @@ jobs:
         if: github.ref_type == 'tag' || inputs.release_tag != ''
         uses: actions/upload-artifact@v4
         with:
-          name: x64dbg-mcp-backend-0.1.0
-          path: dist/x64dbg-mcp-backend-0.1.0.zip
+          name: x64dbg-mcp-backend-0.1.1
+          path: dist/x64dbg-mcp-backend-0.1.1.zip
           if-no-files-found: error
           compression-level: 0
 
@@ -72,7 +72,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           gh release create $env:RELEASE_TAG `
-            './dist/x64dbg-mcp-backend-0.1.0.zip#x64dbg-mcp-backend-0.1.0.zip' `
+            './dist/x64dbg-mcp-backend-0.1.1.zip#x64dbg-mcp-backend-0.1.1.zip' `
             --verify-tag `
-            --title 'x64dbg-mcp-backend 0.1.0' `
+            --title 'x64dbg-mcp-backend 0.1.1' `
             --notes-from-tag

@@ -1265,3 +1265,29 @@ hardware and memory breakpoints, restored the tracked patch and register, ran
 the bounded trace, and stopped. The debugger, sidecar, ports 43132/43164, and
 temporary managed breakpoint state were all absent afterward. Both Codex
 endpoints retain static Authorization headers and the managed skill is 0.18.0.
+
+## 0.18.1 manual Codex setup qualification
+
+ADR 0040 removed the stateful `register-codex.ps1` helper. The debugger
+installer remains responsible only for the x32/x64 plugins, shared sidecar, and
+server configuration. After a successful write it now prints exact
+`mcp_servers.x64dbg` and `mcp_servers.x32dbg` TOML using the effective ports and
+shared static Authorization value, plus offline commands that copy the complete
+version-matched skill from the verified package. The output explicitly treats
+the displayed token as secret. It never modifies Codex configuration, skills,
+or environment variables.
+
+The installer contract passed first install, idempotent reinstall, custom ports,
+partial repair, explicit rotation, token mismatch fail-closed behavior, and
+`-WhatIf`. It additionally proved both ready-to-paste tables, the token appearing
+in exactly two Authorization headers, the correct `config.toml` path, the full
+skill copy instruction, and the restart warning. Skill validation, 52 Rust
+unit/contract tests, seven supervised shutdown tests, Clippy with warnings
+denied, and all 16 native tests on each architecture passed.
+
+The offline verifier accepted the 0.18.1 package (61 manifest entries plus the
+manifest) and proved the removed helper is absent while all four required skill
+files are checksummed. Archive SHA-256 is
+`ea7c8ba1512128346192b6b3b718a23bbb3508555dd2a8348afa03b88c228fb5`.
+No debugger field rerun was required because the backend tool, IPC, threading,
+and lifecycle implementations did not change in this patch release.

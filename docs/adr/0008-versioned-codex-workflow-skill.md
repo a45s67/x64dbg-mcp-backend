@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted before implementation on 2026-08-29.
+Accepted before implementation on 2026-08-29. The automatic registration
+mechanism below was superseded by ADR 0040 on 2026-08-31; the skill design and
+package ownership marker remain in force.
 
 ## Context
 
@@ -29,12 +31,9 @@ The skill names backend-local dotted tools. Direct Codex registrations select th
 backend-local suffix. The skill never contains bearer tokens, ports, user paths, target-specific
 addresses, or authorization to launch or mutate a target.
 
-`register-codex.ps1` installs the packaged skill into
-`<CodexHome>/skills/x64dbg-debugging` together with the two MCP registrations. A package marker
-identifies ownership. Registration refuses to overwrite an existing same-named directory that
-lacks that marker, preserving user-authored skills. Re-registration updates only the managed
-copy, does not print credentials, and remains idempotent. `install.ps1` remains debugger-only, so
-Gateway deployments do not modify Codex state.
+The package contains the complete skill under `skills/x64dbg-debugging`. A package marker
+identifies ownership. Under ADR 0040, `install.ps1` prints explicit offline copy commands and MCP
+configuration tables but does not modify Codex state. Gateway deployments may ignore that output.
 
 ## Skill behavior
 
@@ -63,8 +62,8 @@ Gateway deployments do not modify Codex state.
 ## Verification
 
 - Run the skill creator's structural validator.
-- Contract-test new, repeated, and unmanaged-conflict Codex registrations in an isolated temp
-  home, including proof that no token enters skill files or command output.
+- Contract-test that installer output contains exact version-matched skill-copy commands and both
+  MCP tables while no token enters skill files.
 - Verify the packaged skill checksums and installed file equality.
 - Use the installed skill guidance with the deployed backend on a Flare-On sample, exercising a
   module/RVA breakpoint, callback wait, generation-consistent reads, bounded discovery, and clean

@@ -7,9 +7,9 @@
 - `/health/live` proves only that the HTTP process exists. Authenticated `/health/ready` also
   requires the plugin IPC connection; `debugger_state: absent` is healthy and means no target is
   loaded. Retain its `instance_id` and confirm that `debugger.state` reports the same value.
-- An authentication error means the client registration and installed server config disagree.
-  Re-run the Codex registration helper after reinstalling; never place the bearer token in a skill
-  or prompt.
+- An authentication error means the client configuration and installed server config disagree.
+  Re-run the backend installer and replace both manually configured Codex Authorization values
+  with the newly printed shared value; never place the bearer token in a skill or prompt.
 - Select x32dbg for 32-bit targets and x64dbg for 64-bit targets. The two endpoints and processes
   are independent.
 

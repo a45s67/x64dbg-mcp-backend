@@ -29,7 +29,14 @@ if (!(Test-Path -LiteralPath (Join-Path $debuggerRoot 'x32\plugins')) -or
 $serverSource = Join-Path $package 'server\x64dbg-mcp-server.exe'
 $x32Source = Join-Path $package 'x32\plugins\x64dbg-mcp-backend.dp32'
 $x64Source = Join-Path $package 'x64\plugins\x64dbg-mcp-backend.dp64'
-foreach ($required in @($serverSource, $x32Source, $x64Source)) {
+$skillSource = Join-Path $package 'skills\x64dbg-debugging'
+$skillFiles = @(
+    (Join-Path $skillSource 'SKILL.md'),
+    (Join-Path $skillSource '.managed-by-x64dbg-mcp-backend'),
+    (Join-Path $skillSource 'references\recipes.md'),
+    (Join-Path $skillSource 'references\troubleshooting.md')
+)
+foreach ($required in @($serverSource, $x32Source, $x64Source) + $skillFiles) {
     if (!(Test-Path -LiteralPath $required)) { throw "Package file is missing: $required" }
 }
 
@@ -116,4 +123,23 @@ allowed_origins = []
     Write-Output "Installed backend. Bearer token $tokenAction and stored in the two server config files."
     Write-Output "x32 endpoint: http://127.0.0.1:$effectiveX32Port/mcp"
     Write-Output "x64 endpoint: http://127.0.0.1:$effectiveX64Port/mcp"
+    Write-Output ''
+    Write-Output 'Codex setup is manual. Treat the Authorization value below as a secret.'
+    Write-Output 'Do not paste this output into an issue, chat, or build log.'
+    Write-Output 'Open the Codex configuration:'
+    Write-Output 'notepad.exe "$HOME\.codex\config.toml"'
+    Write-Output ''
+    Write-Output '[mcp_servers.x64dbg]'
+    Write-Output "url = `"http://127.0.0.1:$effectiveX64Port/mcp`""
+    Write-Output "http_headers = { Authorization = `"Bearer $token`" }"
+    Write-Output ''
+    Write-Output '[mcp_servers.x32dbg]'
+    Write-Output "url = `"http://127.0.0.1:$effectiveX32Port/mcp`""
+    Write-Output "http_headers = { Authorization = `"Bearer $token`" }"
+    Write-Output ''
+    Write-Output 'Install the complete version-matched workflow skill:'
+    Write-Output 'New-Item -ItemType Directory -Force "$HOME\.codex\skills\x64dbg-debugging" | Out-Null'
+    $escapedSkillGlob = ((Join-Path $skillSource '*').Replace("'", "''"))
+    Write-Output "Copy-Item -Path '$escapedSkillGlob' -Destination `"`$HOME\.codex\skills\x64dbg-debugging`" -Recurse -Force"
+    Write-Output 'Restart Codex after saving the configuration and copying the skill.'
 }

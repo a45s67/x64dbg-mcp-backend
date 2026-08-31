@@ -136,9 +136,11 @@ paginated, and mapped through the start-time module snapshot. Breakpoints,
 exceptions, user pause, timeout, cancellation, process exit, and backend unload
 remain explicit terminal reasons rather than being reported as completion.
 
-Codex registration also installs the versioned `x64dbg-debugging` workflow skill.
-It provides state-aware, ASLR-safe, no-blind-retry recipes without placing bearer
-tokens or machine-specific target data in instruction files.
+After installation, the installer prints the exact manual Codex MCP tables and
+offline commands for copying the version-matched `x64dbg-debugging` workflow
+skill. It provides state-aware, ASLR-safe, no-blind-retry recipes without placing
+bearer tokens or machine-specific target data in instruction files. The installer
+does not edit Codex-owned files.
 
 Build a release with `powershell -File scripts/package.ps1`, then follow the
 [installation and client setup guide](docs/install.md). The installed package

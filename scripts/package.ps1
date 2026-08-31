@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.18.0',
+    [string]$Version = '0.18.1',
     [string]$OutputDirectory
 )
 
@@ -28,9 +28,6 @@ try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass `
         -File (Join-Path $workspace 'scripts\test-skill.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'Codex skill contract tests failed.' }
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-        -File (Join-Path $workspace 'scripts\test-register-codex.ps1')
-    if ($LASTEXITCODE -ne 0) { throw 'Codex registration contract tests failed.' }
     & cargo.exe test --offline --locked --workspace --all-targets
     if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
     & cargo.exe clippy --offline --locked --workspace --all-targets -- -D warnings
@@ -63,7 +60,6 @@ try {
     Copy-Item -LiteralPath 'docs\native-api-audit.md' -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath 'docs\release-readiness.md' -Destination (Join-Path $stage 'docs')
     Copy-Item -LiteralPath 'scripts\install.ps1' -Destination (Join-Path $stage 'scripts')
-    Copy-Item -LiteralPath 'scripts\register-codex.ps1' -Destination (Join-Path $stage 'scripts')
     Copy-Item -LiteralPath 'scripts\verify-package.ps1' -Destination (Join-Path $stage 'scripts')
     Copy-Item -LiteralPath 'skills\x64dbg-debugging' -Destination (Join-Path $stage 'skills') -Recurse
 
@@ -72,7 +68,7 @@ try {
         version = $Version
         mcp_protocol = '2025-06-18'
         ipc_protocol = @{ major = 1; minor = 1 }
-        skills = @{ 'x64dbg-debugging' = '0.18.0' }
+        skills = @{ 'x64dbg-debugging' = '0.18.1' }
         x64dbg_baseline = @{ release = '2026.05.27'; commit = '9c8ca1cae0b6d56cc44f31fddcb10e3b02ffbb87' }
         targets = @('x32dbg', 'x64dbg')
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stage 'version.json') -Encoding UTF8

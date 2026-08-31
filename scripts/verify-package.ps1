@@ -64,8 +64,11 @@ $required = @(
     'config/x64dbg-mcp-server-x32.example.toml',
     'config/x64dbg-mcp-server-x64.example.toml',
     'scripts/install.ps1',
-    'scripts/register-codex.ps1',
     'scripts/verify-package.ps1',
+    'skills/x64dbg-debugging/SKILL.md',
+    'skills/x64dbg-debugging/.managed-by-x64dbg-mcp-backend',
+    'skills/x64dbg-debugging/references/recipes.md',
+    'skills/x64dbg-debugging/references/troubleshooting.md',
     'docs/install.md',
     'docs/contracts/ipc-v1.md',
     'version.json',
@@ -76,6 +79,12 @@ $required = @(
 foreach ($relative in $required) {
     if (!$expected.ContainsKey($relative.ToLowerInvariant())) {
         throw "Required package file is missing from checksums.txt: $relative"
+    }
+}
+$forbidden = @('scripts/register-codex.ps1')
+foreach ($relative in $forbidden) {
+    if ($expected.ContainsKey($relative.ToLowerInvariant())) {
+        throw "Removed package file is still present: $relative"
     }
 }
 

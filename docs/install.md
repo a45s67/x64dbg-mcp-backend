@@ -12,11 +12,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
 The installer verifies that both x32 and x64 debugger directories exist, copies
 the matching `.dp32` and `.dp64` plugins, installs the shared static sidecar, and
 creates two TOML configuration files. A first install generates one
-cryptographically random 48-byte bearer secret and stores it only in those
+cryptographically random 48-byte bearer secret and stores it in those
 configuration files. A normal reinstall preserves the existing shared secret and
 any port not explicitly supplied, so an update does not silently break registered
-clients. The installer does not print the secret; do not put it in source control
-or command-line arguments.
+clients. The installer also prints ready-to-paste manual Codex configuration, so
+its terminal output contains the secret. Do not put that output, the secret, or
+the configuration files in source control, issues, chats, or build logs.
 
 If the two installed configurations contain different tokens, installation fails
 before copying files. Reconcile the files or deliberately create a new shared
@@ -84,28 +85,43 @@ a second x64dbg/x32dbg process is not a target-handoff mechanism.
 
 ## Codex direct connection
 
-Register both installed Streamable HTTP endpoints with one command. The helper
-reads and validates the installed x32/x64 configuration, stores the Authorization
-header directly in the user-level Codex `config.toml`, installs the versioned
-`x64dbg-debugging` workflow skill, and replaces existing managed entries with the
-same names. No token environment variable is required:
+`install.ps1` prints exact tables using the effective installed ports and shared
+token. Open the user-level Codex configuration:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\scripts\register-codex.ps1 -X64dbgRoot C:\tools\x64dbg
-codex mcp list
+notepad.exe "$HOME\.codex\config.toml"
 ```
 
-The debugger installer and Codex registration are intentionally separate. For a
-Gateway-only installation, run only `install.ps1`.
+Remove or update any existing tables with these names, then paste the values
+printed by the installer. Their shape is:
+
+```toml
+[mcp_servers.x64dbg]
+url = "http://127.0.0.1:43164/mcp"
+http_headers = { Authorization = "Bearer <shared installed token>" }
+
+[mcp_servers.x32dbg]
+url = "http://127.0.0.1:43132/mcp"
+http_headers = { Authorization = "Bearer <shared installed token>" }
+```
+
+Install the complete version-matched skill from the extracted release instead
+of downloading only `SKILL.md`, which would omit referenced guidance:
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.codex\skills\x64dbg-debugging" | Out-Null
+Copy-Item -Path ".\skills\x64dbg-debugging\*" `
+  -Destination "$HOME\.codex\skills\x64dbg-debugging" -Recurse -Force
+```
 
 Restart an already-running Codex process after changing its configuration. Opening
 x64dbg/x32dbg is what starts the backend; Codex connects to the selected endpoint
 afterward.
 
-The helper refuses to overwrite an existing `x64dbg-debugging` skill unless it has
-this package's ownership marker. Pass `-SkipSkill` when only the MCP registrations
-should be changed.
+The installer itself does not edit Codex configuration or skill storage. A
+Gateway-only installation may ignore the printed Codex instructions. If the
+destination skill directory is user-authored rather than an earlier packaged
+copy, inspect it before running the copy command.
 
 ## Dynamic Analysis Gateway
 

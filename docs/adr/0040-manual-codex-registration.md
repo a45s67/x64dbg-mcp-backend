@@ -1,6 +1,6 @@
 # ADR 0040: Manual Codex registration from installer output
 
-Status: Accepted for implementation on 2026-08-31.
+Status: Implemented in 0.18.1 on 2026-08-31.
 
 ## Context
 

@@ -16,7 +16,7 @@ Release acceptance has three explicit layers:
 
 1. The repository package gate builds from locked inputs, runs Rust unit and MCP
    contract tests, Clippy, the supervised shutdown matrix, x86/x64 native tests,
-   installer and Codex-registration contracts, emits the SBOM/checksum manifest,
+   installer/manual-Codex-output and skill contracts, emits the SBOM/checksum manifest,
    and verifies the staged package offline.
 2. The local real-debugger gate prepares isolated x32dbg and x64dbg trees that
    contain only this plugin, runs the bounded integration soak, and proves each
@@ -55,4 +55,3 @@ that permanent corpus.
   an integration copy as a clean-machine test.
 - The generated report identifies the exact archive and SHA-256 digest that was
   exercised.
-

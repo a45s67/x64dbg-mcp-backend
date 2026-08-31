@@ -35,8 +35,9 @@ explicit rotation, and failure-without-partial-writes behavior.
 - Installation remains a simple file copy plus TOML write. It does not modify
   ACLs, environment variables, other plugins, or Codex configuration.
 
-Token rotation and Codex/Gateway registration remain separate operations. After
-an explicit rotation, clients must be refreshed intentionally.
+Token rotation and client configuration remain separate operations. After an
+explicit rotation, clients must be refreshed intentionally using the new manual
+Codex output or the Gateway's secret facility (ADR 0040).
 
 ### Offline release verification
 

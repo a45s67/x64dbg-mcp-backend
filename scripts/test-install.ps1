@@ -25,6 +25,7 @@ try {
         (Join-Path $package 'server'),
         (Join-Path $package 'x32\plugins'),
         (Join-Path $package 'x64\plugins'),
+        (Join-Path $package 'skills\x64dbg-debugging\references'),
         (Join-Path $debugger 'release\x32\plugins'),
         (Join-Path $debugger 'release\x64\plugins')
     )) {
@@ -36,6 +37,10 @@ try {
     [IO.File]::WriteAllText($serverSource, 'server-v1')
     [IO.File]::WriteAllText($x32Source, 'x32-v1')
     [IO.File]::WriteAllText($x64Source, 'x64-v1')
+    [IO.File]::WriteAllText((Join-Path $package 'skills\x64dbg-debugging\SKILL.md'), 'skill')
+    [IO.File]::WriteAllText((Join-Path $package 'skills\x64dbg-debugging\.managed-by-x64dbg-mcp-backend'), 'managed')
+    [IO.File]::WriteAllText((Join-Path $package 'skills\x64dbg-debugging\references\recipes.md'), 'recipes')
+    [IO.File]::WriteAllText((Join-Path $package 'skills\x64dbg-debugging\references\troubleshooting.md'), 'troubleshooting')
 
     $output = & $installer -X64dbgRoot $debugger -PackageRoot $package
     $serverDirectory = Join-Path $debugger 'release\server'
@@ -45,7 +50,17 @@ try {
     $x64 = Read-TestConfig $x64ConfigPath
     Assert-True ($x32.Port -eq 43132 -and $x64.Port -eq 43164) 'first-install ports are incorrect'
     Assert-True ($x32.Token -ceq $x64.Token -and $x32.Token.Length -ge 32) 'first-install token is not shared and bounded'
-    Assert-True (($output -join "`n") -notmatch [regex]::Escape($x32.Token)) 'installer output disclosed the token'
+    $outputText = $output -join "`n"
+    Assert-True ($outputText.Contains('notepad.exe "$HOME\.codex\config.toml"')) 'Codex config command is missing'
+    Assert-True ($outputText.Contains('[mcp_servers.x64dbg]') -and
+        $outputText.Contains('[mcp_servers.x32dbg]')) 'Codex MCP tables are missing'
+    Assert-True ($outputText.Contains('url = "http://127.0.0.1:43164/mcp"') -and
+        $outputText.Contains('url = "http://127.0.0.1:43132/mcp"')) 'Codex endpoint URLs are incorrect'
+    $authorization = 'http_headers = { Authorization = "Bearer ' + $x32.Token + '" }'
+    Assert-True (([regex]::Matches($outputText, [regex]::Escape($authorization))).Count -eq 2) 'shared Authorization header was not printed exactly twice'
+    Assert-True ($outputText.Contains('skills\x64dbg-debugging') -and
+        $outputText.Contains('Copy-Item -Path')) 'complete packaged skill copy command is missing'
+    Assert-True ($outputText.Contains('Restart Codex')) 'Codex restart instruction is missing'
     $firstToken = $x32.Token
 
     [IO.File]::WriteAllText($serverSource, 'server-v2')
@@ -62,6 +77,11 @@ try {
     $x64 = Read-TestConfig $x64ConfigPath
     Assert-True ($x32.Port -eq 44132 -and $x64.Port -eq 44164) 'explicit ports were not installed'
     Assert-True ($x32.Token -ceq $firstToken -and $x64.Token -ceq $firstToken) 'port update rotated the token'
+
+    $customOutput = & $installer -X64dbgRoot $debugger -PackageRoot $package -X32Port 44132 -X64Port 44164
+    $customOutputText = $customOutput -join "`n"
+    Assert-True ($customOutputText.Contains('url = "http://127.0.0.1:44132/mcp"') -and
+        $customOutputText.Contains('url = "http://127.0.0.1:44164/mcp"')) 'manual config did not use effective custom ports'
 
     [IO.File]::Delete($x64ConfigPath)
     & $installer -X64dbgRoot $debugger -PackageRoot $package | Out-Null

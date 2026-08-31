@@ -499,6 +499,19 @@ ownership, cancellation, timeout, and breakpoint interruption. The installed
 Flare-On checksum workflow also qualified a short non-destructive trace and
 clean debugger-owned sidecar shutdown.
 
+### Stage 11: exact typed breakpoint enable and disable
+
+ADR 0039 admits only `breakpoints.enable` and `breakpoints.disable`. Each uses
+a closed kind-specific selector and exact native read-back; it never exposes a
+bulk form or caller command. Managed conditional and exception ownership is
+preserved. Hardware identity excludes its transient debug-register slot, which
+may change across a disable/enable cycle.
+
+This stage is accepted but not yet implemented. Completion requires contract
+and native policy coverage, fresh x32/x64 lifecycle and replay qualification,
+shutdown coverage, an updated versioned workflow skill, offline package
+verification, and an installed non-destructive Flare-On smoke.
+
 ## Parked work
 
 The following are intentionally outside the active roadmap until explicitly

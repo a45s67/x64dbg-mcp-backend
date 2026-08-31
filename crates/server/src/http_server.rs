@@ -700,7 +700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_call_returns_text_and_matching_structured_content() {
+    async fn tools_call_returns_summary_and_structured_content() {
         let value = mcp_request(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"debugger.state","arguments":{}}}"#,
         )
@@ -708,9 +708,7 @@ mod tests {
         let result = &value["result"];
         assert_eq!(result["isError"], false);
         assert_eq!(result["structuredContent"]["debuggee_state"], "paused");
-        let text: Value =
-            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(text, result["structuredContent"]);
+        assert!(result["content"][0]["text"].as_str().unwrap().len() < 256);
     }
 
     #[tokio::test]

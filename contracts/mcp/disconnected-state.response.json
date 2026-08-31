@@ -5,7 +5,7 @@
     "content": [
       {
         "type": "text",
-        "text": "{\"error\":{\"code\":\"PLUGIN_UNAVAILABLE\",\"details\":{},\"message\":\"x64dbg plugin is not connected\",\"retryable\":true},\"ok\":false}"
+        "text": "debugger.state failed: PLUGIN_UNAVAILABLE: x64dbg plugin is not connected; retryable=true."
       }
     ],
     "structuredContent": {

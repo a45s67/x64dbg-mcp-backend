@@ -115,12 +115,15 @@ async fn call_tool(
         return Err((-32602, "Tool arguments must be an object"));
     }
     if let Err(error) = tools::validate_arguments(name, arguments) {
-        return Ok(tool_failure(ToolError {
-            code: "INVALID_ARGUMENT",
-            message: error.message,
-            retryable: false,
-            details: json!({ "field": error.field }),
-        }));
+        return Ok(tool_failure(
+            name,
+            ToolError {
+                code: "INVALID_ARGUMENT",
+                message: error.message,
+                retryable: false,
+                details: json!({ "field": error.field }),
+            },
+        ));
     }
     let mut dispatched_arguments = arguments.clone();
     if tools::is_mutation(name) {
@@ -130,18 +133,21 @@ async fn call_tool(
             .and_then(|value| Uuid::parse_str(value).ok())
             .expect("validated mutation instance_id must be a UUID");
         if supplied != instance_id {
-            return Ok(tool_failure(ToolError {
-                code: "BACKEND_RESTARTED",
-                message: "backend instance changed; mutation was not dispatched",
-                retryable: false,
-                details: json!({
-                    "outcome": "unknown",
-                    "expected_instance_id": supplied,
-                    "current_instance_id": instance_id,
-                    "diagnostic_code": "REFRESH_BACKEND_STATE",
-                    "next_actions": [{ "code": "CALL_DEBUGGER_STATE", "tool": "debugger.state" }]
-                }),
-            }));
+            return Ok(tool_failure(
+                name,
+                ToolError {
+                    code: "BACKEND_RESTARTED",
+                    message: "backend instance changed; mutation was not dispatched",
+                    retryable: false,
+                    details: json!({
+                        "outcome": "unknown",
+                        "expected_instance_id": supplied,
+                        "current_instance_id": instance_id,
+                        "diagnostic_code": "REFRESH_BACKEND_STATE",
+                        "next_actions": [{ "code": "CALL_DEBUGGER_STATE", "tool": "debugger.state" }]
+                    }),
+                },
+            ));
         }
         dispatched_arguments
             .as_object_mut()
@@ -155,20 +161,35 @@ async fn call_tool(
                 && value.get("instance_id").and_then(Value::as_str)
                     != Some(expected_instance_id.as_str()) =>
         {
-            tool_failure(ToolError {
-                code: "BACKEND_IDENTITY_MISMATCH",
-                message: "plugin and sidecar instance identities do not match",
-                retryable: false,
-                details: json!({ "instance_id": instance_id }),
-            })
+            tool_failure(
+                name,
+                ToolError {
+                    code: "BACKEND_IDENTITY_MISMATCH",
+                    message: "plugin and sidecar instance identities do not match",
+                    retryable: false,
+                    details: json!({ "instance_id": instance_id }),
+                },
+            )
         }
-        Ok(value) => tool_success(value),
-        Err(error) => tool_failure(error),
+        Ok(value) => tool_success(name, value),
+        Err(error) => tool_failure(name, error),
     })
 }
 
-fn tool_success(value: Value) -> Value {
-    let text = serde_json::to_string(&value).expect("serializing a JSON value cannot fail");
+fn tool_success(name: &str, value: Value) -> Value {
+    let text = if let Some(items) = value.get("items").and_then(Value::as_array) {
+        let next_page = value
+            .get("next_cursor")
+            .is_some_and(|cursor| !cursor.is_null());
+        format!(
+            "{name} completed: {} items; next_page={next_page}.",
+            items.len()
+        )
+    } else if let Some(state) = value.get("debuggee_state").and_then(Value::as_str) {
+        format!("{name} completed: debuggee_state={state}.")
+    } else {
+        format!("{name} completed.")
+    };
     json!({
         "content": [{ "type": "text", "text": text }],
         "structuredContent": value,
@@ -176,7 +197,11 @@ fn tool_success(value: Value) -> Value {
     })
 }
 
-fn tool_failure(error: ToolError) -> Value {
+fn tool_failure(name: &str, error: ToolError) -> Value {
+    let text = format!(
+        "{name} failed: {}: {}; retryable={}.",
+        error.code, error.message, error.retryable
+    );
     let value = json!({
         "ok": false,
         "error": {
@@ -186,7 +211,6 @@ fn tool_failure(error: ToolError) -> Value {
             "details": error.details
         }
     });
-    let text = serde_json::to_string(&value).expect("serializing a JSON value cannot fail");
     json!({
         "content": [{ "type": "text", "text": text }],
         "structuredContent": value,

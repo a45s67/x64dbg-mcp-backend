@@ -394,10 +394,10 @@ try {
 
     $moduleName = [System.IO.Path]::GetFileName($sample).ToUpperInvariant()
     $defaultImports = Invoke-Tool 'imports.list' @{ module = $moduleName } 47
-    $expectedDefaultImports = [Math]::Min(32, [int]$defaultImports.native_count)
+    $expectedDefaultImports = [Math]::Min(100, [int]$defaultImports.native_count)
     if (@($defaultImports.items).Count -ne $expectedDefaultImports -or
-        ($defaultImports.native_count -gt 32 -and !$defaultImports.next_cursor)) {
-        throw 'Installed imports.list did not apply its compact default page size.'
+        ($defaultImports.native_count -gt 100 -and !$defaultImports.next_cursor)) {
+        throw 'Installed imports.list did not apply its default page size.'
     }
     $defaultImportsBytes = [Text.Encoding]::UTF8.GetByteCount(
         ($defaultImports | ConvertTo-Json -Compress -Depth 12))

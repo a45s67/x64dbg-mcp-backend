@@ -74,15 +74,18 @@ installed bearer token in the Gateway secret facility. MCP uses protocol
 `2025-06-18`, endpoint `/mcp`, and `Authorization: Bearer <token>`. Do not retry
 mutating tools blindly; preserve `instance_id` and `operation_id` semantics.
 
-The optional host lifecycle command stays in each existing backend entry; it
-does not require a separate configuration section. A Gateway configuration may
-use flat fields such as:
+When host lifecycle support is added to the Dynamic Analysis Gateway, its
+optional command belongs in each existing backend entry; it does not require a
+separate configuration section. The intended flat fields are:
 
 ```toml
 [x64dbg]
 lifecycleCommand = 'C:\tools\x64dbg\release\mcp\x96dbg-mcp-control.exe'
 lifecycleArgs = ['--backend', 'x64', '--root', 'C:\tools\x64dbg']
 ```
+
+The current Gateway release does not accept these fields yet. Until its schema
+and management tool are updated, invoke the controller directly.
 
 The controller supports `status`, `start`, `stop`, and `restart`, emits one
 bounded JSON result, waits for authenticated MCP readiness, and closes the

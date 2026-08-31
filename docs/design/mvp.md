@@ -40,7 +40,7 @@ arguments are inspectable.
 |---|---|---:|---|
 | bind address | `X64DBG_MCP_BIND` | `127.0.0.1` | MVP accepts loopback addresses only |
 | port | `X64DBG_MCP_PORT` | none | Required, 1-65535; no fallback scan |
-| bearer token | `X64DBG_MCP_TOKEN` | none | Required; secret reference/file preferred |
+| bearer token | `X64DBG_MCP_TOKEN` | installed TOML | Required; environment is the canonical service interface for both x64dbg and x32dbg |
 | backend type | `X64DBG_MCP_BACKEND` | inferred by plugin handshake | `x32dbg` or `x64dbg` |
 | request timeout | `X64DBG_MCP_REQUEST_TIMEOUT_MS` | 10000 | capped at 30000 |
 | mutation timeout | `X64DBG_MCP_MUTATION_TIMEOUT_MS` | 30000 | capped at 120000 |

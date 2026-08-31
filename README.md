@@ -142,9 +142,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\package.ps1
 ```
 
 GitHub Actions uses the pinned Windows/Visual Studio runner to compile the Rust
-sidecar and both native plugins. A `v*` tag also uploads the minimal release ZIP
-as a workflow artifact. The more extensive test suites remain available for
-local release validation.
+sidecar and both native plugins. A `v*` tag publishes the minimal ZIP as a
+GitHub Release asset and also retains it as a workflow artifact. The more
+extensive test suites remain available for local release validation.
 
 Run the full local release gate, optionally including the installed Flare-On
 sample:

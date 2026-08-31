@@ -1064,6 +1064,10 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         json_t* cursor = json_object_get(payload, "cursor");
         json_t* address = json_object_get(payload, "address");
         const bool references = methodValue == "references.to";
+        if (methodValue == "imports.list" || methodValue == "exports.list" ||
+            methodValue == "sections.list") {
+            pageLimit = 32U;
+        }
         const std::size_t expectedFields = 1U + (queryValue ? 1U : 0U) +
                                            (encoding ? 1U : 0U) + (minimum ? 1U : 0U) +
                                            (context ? 1U : 0U) +

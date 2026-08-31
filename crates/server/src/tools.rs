@@ -1738,7 +1738,7 @@ fn linkage_schema() -> Value {
             ),
             (
                 "limit",
-                json!({"type":"integer","minimum":1,"maximum":256,"default":100}),
+                json!({"type":"integer","minimum":1,"maximum":256,"default":32}),
             ),
             (
                 "cursor",
@@ -2063,6 +2063,17 @@ mod tests {
                 assert!(required.contains(&json!("operation_id")));
                 assert!(required.contains(&json!("instance_id")));
             }
+        }
+    }
+
+    #[test]
+    fn linkage_tools_default_to_compact_pages() {
+        for name in ["imports.list", "exports.list", "sections.list"] {
+            let tool = catalog()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("linkage tool must be present");
+            assert_eq!(tool["inputSchema"]["properties"]["limit"]["default"], 32);
         }
     }
 

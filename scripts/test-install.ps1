@@ -43,8 +43,10 @@ try {
     [IO.File]::WriteAllText($serverSource, 'server-v1')
     [IO.File]::WriteAllText($x32Source, 'x32-v1')
     [IO.File]::WriteAllText($x64Source, 'x64-v1')
+    $packagedInstaller = Join-Path $package 'install.ps1'
+    [IO.File]::Copy($installer, $packagedInstaller)
 
-    $output = & $installer -X64dbgRoot $debugger -PackageRoot $package
+    $output = & $packagedInstaller -X64dbgRoot $debugger
     $mcpDirectory = Join-Path $debugger 'release\mcp'
     $x32ConfigPath = Join-Path $mcpDirectory 'x64dbg-mcp-server-x32.toml'
     $x64ConfigPath = Join-Path $mcpDirectory 'x64dbg-mcp-server-x64.toml'

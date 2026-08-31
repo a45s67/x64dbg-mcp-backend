@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
-    $PackageRoot = Join-Path $PSScriptRoot '..'
+    $PackageRoot = $PSScriptRoot
 }
 $package = (Resolve-Path -LiteralPath $PackageRoot).Path
 $root = (Resolve-Path -LiteralPath $X64dbgRoot).Path

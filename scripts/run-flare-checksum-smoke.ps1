@@ -393,6 +393,14 @@ try {
     }
 
     $moduleName = [System.IO.Path]::GetFileName($sample).ToUpperInvariant()
+    $defaultImports = Invoke-Tool 'imports.list' @{ module = $moduleName } 47
+    $expectedDefaultImports = [Math]::Min(32, [int]$defaultImports.native_count)
+    if (@($defaultImports.items).Count -ne $expectedDefaultImports -or
+        ($defaultImports.native_count -gt 32 -and !$defaultImports.next_cursor)) {
+        throw 'Installed imports.list did not apply its compact default page size.'
+    }
+    $defaultImportsBytes = [Text.Encoding]::UTF8.GetByteCount(
+        ($defaultImports | ConvertTo-Json -Compress -Depth 12))
     $mainSymbols = Invoke-Tool 'symbols.search' @{
         module = $moduleName; query = 'main.main'; limit = 32
     } 50
@@ -696,6 +704,8 @@ try {
         explicit_thread_context_read = $explicitThreadRegisters.thread_id
         explicit_thread_snapshot_instructions = @($explicitThreadSnapshot.disassembly).Count
         filtered_executable_regions = @($filteredMap.items).Count
+        default_import_page_items = @($defaultImports.items).Count
+        default_import_page_json_bytes = $defaultImportsBytes
         main_symbols = @($mainSymbols.items).Count
         main_functions = @($mainFunctions.items).Count
         callstack_frames = @($callstackSnapshot.frames).Count

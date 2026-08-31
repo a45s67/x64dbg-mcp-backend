@@ -52,6 +52,7 @@ $published = @(
     'breakpoints.memory.set', 'breakpoints.memory.remove',
     'breakpoints.conditional.set', 'breakpoints.conditional.remove',
     'breakpoints.exception.set', 'breakpoints.exception.remove',
+    'breakpoints.enable', 'breakpoints.disable',
     'assembly.preview', 'assembly.patch', 'patches.restore', 'patches.list',
     'disassembly.read', 'expression.evaluate', 'symbols.search',
     'functions.list', 'functions.at', 'callstack.read', 'symbols.resolve', 'imports.list', 'exports.list',

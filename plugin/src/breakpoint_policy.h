@@ -18,6 +18,7 @@ enum class ConditionalMode { all, any };
 enum class ConditionalSource { registerValue, threadId, hitCount };
 enum class ConditionalOperator { equal, notEqual, less, lessEqual, greater, greaterEqual,
                                  multipleOf };
+enum class BreakpointTransitionKind { software, hardware, memory, conditional, exception };
 
 struct ConditionalPredicate {
     ConditionalSource source{ConditionalSource::hitCount};
@@ -70,6 +71,10 @@ ParseExceptionChance(std::string_view value) noexcept;
                                               std::uint32_t code,
                                               ExceptionChance chance,
                                               std::string_view managedId) noexcept;
+[[nodiscard]] bool ExceptionBreakpointOwned(const BRIDGEBP& breakpoint,
+                                            std::uint32_t code,
+                                            ExceptionChance chance,
+                                            std::string_view managedId) noexcept;
 
 [[nodiscard]] std::optional<ConditionalOperator>
 ParseConditionalOperator(std::string_view value) noexcept;
@@ -87,6 +92,15 @@ ManagedBreakpointId(const BRIDGEBP& breakpoint, std::string_view family);
 [[nodiscard]] bool ConditionalBreakpointOwned(const BRIDGEBP& breakpoint,
                                               duint address,
                                               std::string_view managedId) noexcept;
+
+[[nodiscard]] bool PlainSoftwareBreakpointSelectable(const BRIDGEBP& breakpoint,
+                                                     duint address);
+[[nodiscard]] bool BreakpointConfigurationUnchanged(const BRIDGEBP& before,
+                                                    const BRIDGEBP& after,
+                                                    bool allowSlotChange) noexcept;
+[[nodiscard]] std::string BreakpointToggleCommand(BreakpointTransitionKind kind,
+                                                  duint identity,
+                                                  bool enable);
 
 [[nodiscard]] std::string RunToBreakpointName(std::string_view operationId);
 [[nodiscard]] std::string RunToBreakpointSetCommand(duint target,

@@ -426,6 +426,10 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             validate_address_ref(object, "address")?;
             validate_uuid_field(object, "managed_id")
         }
+        "breakpoints.enable" | "breakpoints.disable" => {
+            operation(object, &["selector"])?;
+            validate_breakpoint_selector(object)
+        }
         "assembly.preview" => {
             exact_keys(object, &["address", "instruction"], &[])?;
             validate_address_ref(object, "address")?;
@@ -670,6 +674,52 @@ fn validate_conditional_spec(
         }
     }
     Ok(())
+}
+
+fn validate_breakpoint_selector(
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<(), ValidationError> {
+    let selector = arguments
+        .get("selector")
+        .and_then(Value::as_object)
+        .ok_or(invalid(
+            "selector",
+            "must be a typed breakpoint selector object",
+        ))?;
+    let kind = selector
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or(invalid("selector", "must contain a supported kind"))?;
+    match kind {
+        "software" => {
+            exact_keys(selector, &["kind", "address"], &[])?;
+            validate_address_ref(selector, "address")
+        }
+        "hardware" => {
+            exact_keys(selector, &["kind", "address", "access", "size"], &[])?;
+            validate_address_ref(selector, "address")?;
+            one_of(selector, "access", &["execute", "write", "read_write"])?;
+            one_of_integer(selector, "size", &[1, 2, 4, 8])
+        }
+        "memory" => {
+            exact_keys(selector, &["kind", "address", "access", "size"], &[])?;
+            validate_address_ref(selector, "address")?;
+            one_of(selector, "access", &["access", "read", "write", "execute"])?;
+            integer(selector, "size", 1, 65_536)
+        }
+        "conditional" => {
+            exact_keys(selector, &["kind", "address", "managed_id"], &[])?;
+            validate_address_ref(selector, "address")?;
+            validate_uuid_field(selector, "managed_id")
+        }
+        "exception" => {
+            exact_keys(selector, &["kind", "code", "chance", "managed_id"], &[])?;
+            validate_exception_code(selector)?;
+            one_of(selector, "chance", &["first", "second", "both"])?;
+            validate_uuid_field(selector, "managed_id")
+        }
+        _ => Err(invalid("selector", "must contain a supported kind")),
+    }
 }
 
 fn validate_bounded_hex_field(
@@ -1470,6 +1520,18 @@ fn build_catalog() -> Vec<Value> {
             ]),
             true,
         ),
+        mutation_tool(
+            "breakpoints.enable",
+            "Enable one exact typed breakpoint while paused. The closed selector preserves managed conditional/exception ownership; hardware identity excludes its transient slot. Already enabled is a verified no-op.",
+            operation_schema(vec![("selector", breakpoint_selector_schema())]),
+            false,
+        ),
+        mutation_tool(
+            "breakpoints.disable",
+            "Disable one exact typed breakpoint while paused without deleting its configuration or managed ownership. Bulk disable and caller debugger commands are unavailable. Already disabled is a verified no-op.",
+            operation_schema(vec![("selector", breakpoint_selector_schema())]),
+            false,
+        ),
         read_tool(
             "assembly.preview",
             "Assemble exactly one printable ASCII instruction at a paused runtime address and return at most 16 bytes without changing memory.",
@@ -1838,6 +1900,55 @@ fn conditional_schema() -> Value {
     )
 }
 
+fn breakpoint_selector_schema() -> Value {
+    json!({
+        "oneOf": [
+            object(
+                vec![
+                    ("kind", json!({"type":"string","const":"software"})),
+                    ("address", address_ref()),
+                ],
+                vec!["kind", "address"],
+            ),
+            object(
+                vec![
+                    ("kind", json!({"type":"string","const":"hardware"})),
+                    ("address", address_ref()),
+                    ("access", json!({"type":"string","enum":["execute","write","read_write"]})),
+                    ("size", json!({"type":"integer","enum":[1,2,4,8]})),
+                ],
+                vec!["kind", "address", "access", "size"],
+            ),
+            object(
+                vec![
+                    ("kind", json!({"type":"string","const":"memory"})),
+                    ("address", address_ref()),
+                    ("access", json!({"type":"string","enum":["access","read","write","execute"]})),
+                    ("size", json!({"type":"integer","minimum":1,"maximum":65536})),
+                ],
+                vec!["kind", "address", "access", "size"],
+            ),
+            object(
+                vec![
+                    ("kind", json!({"type":"string","const":"conditional"})),
+                    ("address", address_ref()),
+                    ("managed_id", uuid_schema()),
+                ],
+                vec!["kind", "address", "managed_id"],
+            ),
+            object(
+                vec![
+                    ("kind", json!({"type":"string","const":"exception"})),
+                    ("code", json!({"type":"string","pattern":"^0x[0-9a-f]{1,8}$","minLength":3,"maxLength":10})),
+                    ("chance", json!({"type":"string","enum":["first","second","both"]})),
+                    ("managed_id", uuid_schema()),
+                ],
+                vec!["kind", "code", "chance", "managed_id"],
+            ),
+        ]
+    })
+}
+
 fn operation_schema(mut properties: Vec<(&'static str, Value)>) -> Value {
     properties.insert(0, ("instance_id", uuid_schema()));
     properties.insert(0, ("operation_id", uuid_schema()));
@@ -1938,7 +2049,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 56);
+        assert_eq!(catalog().len(), 58);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -2276,6 +2387,43 @@ mod tests {
             )
             .is_ok()
         );
+        for selector in [
+            json!({"kind":"software","address":"0x1000"}),
+            json!({"kind":"hardware","address":{"module":"sample.exe","rva":"0x1000"},"access":"write","size":4}),
+            json!({"kind":"memory","address":"0x2000","access":"execute","size":4096}),
+            json!({"kind":"conditional","address":"0x3000","managed_id":"01234567-89ab-4cde-8fab-0123456789ab"}),
+            json!({"kind":"exception","code":"0xe0424242","chance":"both","managed_id":"01234567-89ab-4cde-8fab-0123456789ab"}),
+        ] {
+            assert!(
+                validate_arguments(
+                    "breakpoints.enable",
+                    &json!({
+                        "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                        "selector":selector
+                    })
+                )
+                .is_ok()
+            );
+        }
+        for selector in [
+            json!({"kind":"software","address":"0x1000","managed_id":"01234567-89ab-4cde-8fab-0123456789ab"}),
+            json!({"kind":"hardware","address":"0x1000","access":"read","size":4}),
+            json!({"kind":"memory","address":"0x1000","access":"write","size":65537}),
+            json!({"kind":"conditional","address":"0x1000"}),
+            json!({"kind":"exception","code":"0xe0424242","chance":"all","managed_id":"01234567-89ab-4cde-8fab-0123456789ab"}),
+            json!({"kind":"unknown","address":"0x1000"}),
+        ] {
+            assert!(
+                validate_arguments(
+                    "breakpoints.disable",
+                    &json!({
+                        "operation_id":"83db0d7d-df01-40ac-bdfc-87bac1e60813",
+                        "selector":selector
+                    })
+                )
+                .is_err()
+            );
+        }
         assert!(
             validate_arguments("memory.read", &json!({"address":"0X1000","length":1})).is_err()
         );

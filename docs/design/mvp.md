@@ -105,7 +105,7 @@ Otherwise HTTP 503. Response is bounded and contains no target path or token:
   "diagnostic_code":null,
   "next_actions":[],
   "protocol_version":"2025-06-18",
-  "version":"0.17.0"
+  "version":"0.18.0"
 }
 ```
 
@@ -204,6 +204,8 @@ output is truncated only at item boundaries and reports `next_cursor`.
 | `breakpoints.conditional.remove` | mutate | paused | Remove only the exact address and managed identity; refuse foreign or renamed records |
 | `breakpoints.exception.set` | mutate | paused | Exact 32-bit code and first/second/both chance policy; managed identity and exact typed read-back |
 | `breakpoints.exception.remove` | mutate | paused | Remove only the exact code/chance/managed identity; never invoke delete-all |
+| `breakpoints.enable` | mutate | paused | Enable one exact closed-selector software/hardware/memory/conditional/exception breakpoint; preserve configuration and managed ownership |
+| `breakpoints.disable` | mutate | paused | Disable one exact closed-selector breakpoint without deletion or any bulk form; preserve configuration and managed ownership |
 | `assembly.preview` | read | paused | Assemble one instruction at its runtime address without changing memory |
 | `assembly.patch` | destructive mutate | paused | Compare-before-write one 1-16 byte instruction span and verify patch metadata |
 | `patches.restore` | destructive mutate | paused | Restore an exact tracked span only when memory and patch metadata match |

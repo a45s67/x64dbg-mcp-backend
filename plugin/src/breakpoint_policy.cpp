@@ -277,9 +277,17 @@ bool ExceptionBreakpointMatches(const BRIDGEBP& breakpoint,
                                 const std::uint32_t code,
                                 const ExceptionChance chance,
                                 const std::string_view managedId) noexcept {
+    return breakpoint.enabled &&
+           ExceptionBreakpointOwned(breakpoint, code, chance, managedId);
+}
+
+bool ExceptionBreakpointOwned(const BRIDGEBP& breakpoint,
+                              const std::uint32_t code,
+                              const ExceptionChance chance,
+                              const std::string_view managedId) noexcept {
     const std::string expectedName = ManagedBreakpointName("exception", managedId);
     return !expectedName.empty() && breakpoint.type == bp_exception &&
-           breakpoint.addr == static_cast<duint>(code) && breakpoint.enabled &&
+           breakpoint.addr == static_cast<duint>(code) &&
            breakpoint.typeEx == static_cast<unsigned char>(NativeExceptionChance(chance)) &&
            BoundedFieldEquals(breakpoint.name, sizeof(breakpoint.name), expectedName) &&
            breakpoint.breakCondition[0] == '\0' && EmptyActionFields(breakpoint);
@@ -368,6 +376,62 @@ bool ConditionalBreakpointMatches(const BRIDGEBP& breakpoint,
            BoundedFieldEquals(breakpoint.breakCondition, sizeof(breakpoint.breakCondition),
                               expression) &&
            EmptyActionFields(breakpoint);
+}
+
+bool PlainSoftwareBreakpointSelectable(const BRIDGEBP& breakpoint,
+                                       const duint address) {
+    return breakpoint.type == bp_normal && breakpoint.addr == address &&
+           !breakpoint.singleshoot && !breakpoint.fastResume && !breakpoint.silent &&
+           breakpoint.breakCondition[0] == '\0' && EmptyActionFields(breakpoint) &&
+           !ManagedBreakpointId(breakpoint, "conditional");
+}
+
+bool BreakpointConfigurationUnchanged(const BRIDGEBP& before,
+                                      const BRIDGEBP& after,
+                                      const bool allowSlotChange) noexcept {
+    const auto sameField = [](const char* left, const std::size_t leftCapacity,
+                              const char* right, const std::size_t rightCapacity) {
+        const std::size_t leftLength = strnlen_s(left, leftCapacity);
+        const std::size_t rightLength = strnlen_s(right, rightCapacity);
+        return leftLength < leftCapacity && rightLength < rightCapacity &&
+               leftLength == rightLength &&
+               std::string_view(left, leftLength) == std::string_view(right, rightLength);
+    };
+    return before.type == after.type && before.addr == after.addr &&
+           before.singleshoot == after.singleshoot && before.active == after.active &&
+           (allowSlotChange || before.slot == after.slot) && before.typeEx == after.typeEx &&
+           before.hwSize == after.hwSize && before.hitCount == after.hitCount &&
+           before.fastResume == after.fastResume && before.silent == after.silent &&
+           sameField(before.name, sizeof(before.name), after.name, sizeof(after.name)) &&
+           sameField(before.mod, sizeof(before.mod), after.mod, sizeof(after.mod)) &&
+           sameField(before.breakCondition, sizeof(before.breakCondition), after.breakCondition,
+                     sizeof(after.breakCondition)) &&
+           sameField(before.logText, sizeof(before.logText), after.logText,
+                     sizeof(after.logText)) &&
+           sameField(before.logCondition, sizeof(before.logCondition), after.logCondition,
+                     sizeof(after.logCondition)) &&
+           sameField(before.commandText, sizeof(before.commandText), after.commandText,
+                     sizeof(after.commandText)) &&
+           sameField(before.commandCondition, sizeof(before.commandCondition),
+                     after.commandCondition, sizeof(after.commandCondition));
+}
+
+std::string BreakpointToggleCommand(const BreakpointTransitionKind kind,
+                                    const duint identity,
+                                    const bool enable) {
+    const char* command = nullptr;
+    switch (kind) {
+    case BreakpointTransitionKind::software:
+    case BreakpointTransitionKind::conditional: command = enable ? "bpe " : "bpd "; break;
+    case BreakpointTransitionKind::hardware: command = enable ? "bphwe " : "bphwd "; break;
+    case BreakpointTransitionKind::memory: command = enable ? "bpme " : "bpmd "; break;
+    case BreakpointTransitionKind::exception:
+        command = enable ? "EnableExceptionBPX " : "DisableExceptionBPX ";
+        break;
+    }
+    std::ostringstream result;
+    result << command << "0x" << std::hex << std::nouppercase << identity;
+    return result.str();
 }
 
 std::string RunToBreakpointName(const std::string_view operationId) {

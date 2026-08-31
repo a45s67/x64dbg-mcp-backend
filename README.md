@@ -42,6 +42,7 @@ users normally launch only x32dbg or x64dbg. Durable decisions are recorded in:
 - [`docs/adr/0033-bounded-memory-pattern-search.md`](docs/adr/0033-bounded-memory-pattern-search.md)
 - [`docs/adr/0034-owned-exception-breakpoints.md`](docs/adr/0034-owned-exception-breakpoints.md)
 - [`docs/adr/0035-closed-conditional-software-breakpoints.md`](docs/adr/0035-closed-conditional-software-breakpoints.md)
+- [`docs/adr/0039-typed-breakpoint-enable-disable.md`](docs/adr/0039-typed-breakpoint-enable-disable.md)
 - [`docs/adr/0036-thread-scoped-context-reads.md`](docs/adr/0036-thread-scoped-context-reads.md)
 - [`docs/adr/0037-typed-dll-launch.md`](docs/adr/0037-typed-dll-launch.md)
 - [`docs/adr/0038-bounded-trace-sessions.md`](docs/adr/0038-bounded-trace-sessions.md)

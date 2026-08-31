@@ -39,6 +39,12 @@ noisy; prefer them only when a software or hardware breakpoint cannot observe th
 For either typed kind, remove with the same address, access, and size. A mismatch is a conflict to
 inspect, not permission to delete by address.
 
+To temporarily silence one breakpoint, call `breakpoints.disable` with a closed selector copied
+from its typed creation result or current list record. Restore it with `breakpoints.enable` and a
+different operation ID. Conditional and exception selectors include the exact `managed_id`;
+hardware selectors use address/access/size, never the transient slot. Confirm `enabled` and
+`changed`; a successful `changed: false` means the requested state was already verified.
+
 For a loop that should stop on a bounded occurrence, use
 `breakpoints.conditional.set` with a `hit_count` predicate and retain its returned
 `managed_id`. `fast_resume` skips nonmatching hits without creating MCP pause events. Register

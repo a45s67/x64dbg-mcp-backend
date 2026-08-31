@@ -204,5 +204,45 @@ int main() {
         std::cerr << "conditional fast-resume policy failed\n";
         return 9;
     }
+    BRIDGEBP plain{};
+    plain.type = bp_normal;
+    plain.addr = 0x4567U;
+    plain.enabled = true;
+    plain.active = true;
+    memcpy_s(plain.name, sizeof(plain.name), "user-name", 9U);
+    if (!mcp::PlainSoftwareBreakpointSelectable(plain, 0x4567U) ||
+        mcp::PlainSoftwareBreakpointSelectable(conditional, 0x1234U)) {
+        std::cerr << "plain software transition policy failed\n";
+        return 10;
+    }
+    BRIDGEBP toggled = plain;
+    toggled.enabled = false;
+    if (!mcp::BreakpointConfigurationUnchanged(plain, toggled, false)) {
+        std::cerr << "enabled-only invariant policy failed\n";
+        return 10;
+    }
+    toggled.commandText[0] = 'x';
+    if (mcp::BreakpointConfigurationUnchanged(plain, toggled, false)) {
+        std::cerr << "configuration mutation was not detected\n";
+        return 10;
+    }
+    BRIDGEBP hardwareAfter = hardware;
+    hardwareAfter.slot = 1U;
+    if (!mcp::BreakpointConfigurationUnchanged(hardware, hardwareAfter, true) ||
+        mcp::BreakpointConfigurationUnchanged(hardware, hardwareAfter, false)) {
+        std::cerr << "hardware slot churn policy failed\n";
+        return 10;
+    }
+    if (mcp::BreakpointToggleCommand(mcp::BreakpointTransitionKind::software, 0x1234U, true) !=
+            "bpe 0x1234" ||
+        mcp::BreakpointToggleCommand(mcp::BreakpointTransitionKind::hardware, 0x1234U, false) !=
+            "bphwd 0x1234" ||
+        mcp::BreakpointToggleCommand(mcp::BreakpointTransitionKind::memory, 0x1234U, true) !=
+            "bpme 0x1234" ||
+        mcp::BreakpointToggleCommand(mcp::BreakpointTransitionKind::exception, 0xe0424242U,
+                                     false) != "DisableExceptionBPX 0xe0424242") {
+        std::cerr << "fixed toggle command policy failed\n";
+        return 10;
+    }
     return 0;
 }

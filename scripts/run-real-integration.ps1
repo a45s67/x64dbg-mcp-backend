@@ -995,6 +995,46 @@ try {
         ($hardwareSetReplay | ConvertTo-Json -Compress -Depth 10)) {
         throw 'Typed hardware breakpoint was not exactly listed or replay-safe.'
     }
+    $hardwareSelector = @{
+        kind = 'hardware'; address = $analysisRef; access = 'execute'; size = 1
+    }
+    $hardwareDisableArguments = @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $hardwareSelector
+    }
+    $hardwareDisabled = Invoke-Tool 'breakpoints.disable' $hardwareDisableArguments 320
+    $hardwareDisabledReplay = Invoke-Tool 'breakpoints.disable' $hardwareDisableArguments 321
+    $disabledHardwareList = Invoke-Tool 'breakpoints.list' @{ limit = 256 } 322
+    $listedDisabledHardware = @($disabledHardwareList.items | Where-Object {
+        $_.address -eq $analysis.requested_location.address -and $_.type -eq 'hardware'
+    })[0]
+    if (!$hardwareDisabled.changed -or $hardwareDisabled.enabled -or
+        $null -ne $hardwareDisabled.slot -or !$listedDisabledHardware -or
+        $listedDisabledHardware.enabled -or $null -ne $listedDisabledHardware.slot -or
+        ($hardwareDisabled | ConvertTo-Json -Compress -Depth 12) -ne
+        ($hardwareDisabledReplay | ConvertTo-Json -Compress -Depth 12)) {
+        throw 'Hardware disable did not preserve exact typed identity or replay safely.'
+    }
+    $hardwareChangedReplay = Invoke-Mcp 'tools/call' @{
+        name = 'breakpoints.disable'; arguments = @{
+            operation_id = $hardwareDisableArguments.operation_id
+            selector = @{ kind = 'hardware'; address = $analysisRef; access = 'write'; size = 1 }
+        }
+    } 323
+    if (!$hardwareChangedReplay.isError -or
+        $hardwareChangedReplay.structuredContent.error.code -ne 'OPERATION_ID_CONFLICT') {
+        throw 'Breakpoint transition operation replay accepted changed selector arguments.'
+    }
+    $hardwareEnabled = Invoke-Tool 'breakpoints.enable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $hardwareSelector
+    } 324
+    $hardwareEnableNoop = Invoke-Tool 'breakpoints.enable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $hardwareSelector
+    } 333
+    if (!$hardwareEnabled.changed -or !$hardwareEnabled.enabled -or
+        $hardwareEnabled.slot -lt 0 -or $hardwareEnabled.slot -gt 3 -or
+        $hardwareEnableNoop.changed -or !$hardwareEnableNoop.enabled) {
+        throw 'Hardware enable did not reacquire and verify a current debug-register slot.'
+    }
     $hardwareMismatch = Invoke-Mcp 'tools/call' @{
         name = 'breakpoints.hardware.remove'; arguments = @{
             operation_id = [Guid]::NewGuid().ToString()
@@ -1049,6 +1089,19 @@ try {
         operation_id = [Guid]::NewGuid().ToString()
         address = @{ absolute = $stepOutInterruptInstruction.address }
     } 102
+    $softwareSelector = @{
+        kind = 'software'; address = @{ absolute = $stepOutInterruptInstruction.address }
+    }
+    $softwareDisabled = Invoke-Tool 'breakpoints.disable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $softwareSelector
+    } 325
+    $softwareEnabled = Invoke-Tool 'breakpoints.enable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $softwareSelector
+    } 326
+    if (!$softwareDisabled.changed -or $softwareDisabled.enabled -or
+        !$softwareEnabled.changed -or !$softwareEnabled.enabled) {
+        throw 'Plain software breakpoint transition was not exactly confirmed.'
+    }
     $interruptedStepOutArguments = @{ operation_id = [Guid]::NewGuid().ToString() }
     $interruptedStepOut = Invoke-Tool 'debugger.step_out' $interruptedStepOutArguments 103
     $interruptedStepOutReplay = Invoke-Tool 'debugger.step_out' $interruptedStepOutArguments 104
@@ -1134,6 +1187,20 @@ try {
         ($memoryBreakpointReplay | ConvertTo-Json -Compress -Depth 10)) {
         throw 'Typed memory breakpoint was not exactly listed or replay-safe.'
     }
+    $memorySelector = @{
+        kind = 'memory'; address = $markerRef; access = 'read'; size = 4
+    }
+    $memoryDisabled = Invoke-Tool 'breakpoints.disable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $memorySelector
+    } 327
+    $memoryEnabled = Invoke-Tool 'breakpoints.enable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $memorySelector
+    } 328
+    if (!$memoryDisabled.changed -or $memoryDisabled.enabled -or
+        !$memoryEnabled.changed -or !$memoryEnabled.enabled -or
+        $memoryEnabled.access -ne 'read' -or $memoryEnabled.size -ne 4) {
+        throw 'Memory breakpoint transition did not preserve its exact range policy.'
+    }
     $memoryMismatch = Invoke-Mcp 'tools/call' @{
         name = 'breakpoints.memory.remove'; arguments = @{
             operation_id = [Guid]::NewGuid().ToString()
@@ -1191,6 +1258,22 @@ try {
         ($conditionalSetReplay | ConvertTo-Json -Compress -Depth 12)) {
         throw 'Typed conditional breakpoint was not exactly listed or replay-safe.'
     }
+    $conditionalSelector = @{
+        kind = 'conditional'; address = $runToInterrupterRef
+        managed_id = $conditionalSet.managed_id
+    }
+    $conditionalDisabled = Invoke-Tool 'breakpoints.disable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $conditionalSelector
+    } 329
+    $conditionalEnabled = Invoke-Tool 'breakpoints.enable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $conditionalSelector
+    } 330
+    if (!$conditionalDisabled.changed -or $conditionalDisabled.enabled -or
+        !$conditionalEnabled.changed -or !$conditionalEnabled.enabled -or
+        !$conditionalEnabled.fast_resume -or
+        $conditionalEnabled.condition_expression -ne $conditionalSet.condition_expression) {
+        throw 'Conditional breakpoint transition lost its managed condition policy.'
+    }
     $conditionalForeignRemove = Invoke-Mcp 'tools/call' @{
         name = 'breakpoints.conditional.remove'; arguments = @{
             operation_id = [Guid]::NewGuid().ToString()
@@ -1245,6 +1328,22 @@ try {
         ($exceptionSet | ConvertTo-Json -Compress -Depth 12) -ne
         ($exceptionSetReplay | ConvertTo-Json -Compress -Depth 12)) {
         throw 'Typed exception breakpoint was not exactly listed or replay-safe.'
+    }
+    $exceptionSelector = @{
+        kind = 'exception'; code = '0xe0424242'; chance = 'first'
+        managed_id = $exceptionSet.managed_id
+    }
+    $exceptionDisabled = Invoke-Tool 'breakpoints.disable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $exceptionSelector
+    } 331
+    $exceptionEnabled = Invoke-Tool 'breakpoints.enable' @{
+        operation_id = [Guid]::NewGuid().ToString(); selector = $exceptionSelector
+    } 332
+    if (!$exceptionDisabled.changed -or $exceptionDisabled.enabled -or
+        !$exceptionEnabled.changed -or !$exceptionEnabled.enabled -or
+        $exceptionEnabled.chance -ne 'first' -or
+        $exceptionEnabled.managed_id -ne $exceptionSet.managed_id) {
+        throw 'Exception breakpoint transition lost its exact managed policy.'
     }
     $exceptionForeignRemove = Invoke-Mcp 'tools/call' @{
         name = 'breakpoints.exception.remove'; arguments = @{
@@ -1827,17 +1926,22 @@ try {
         hardware_breakpoint_slot = $hardwareSet.slot
         hardware_breakpoint_replay_equal = $true
         hardware_breakpoint_mismatch_rejected = $true
+        breakpoint_transition_hardware = $true
+        breakpoint_transition_hardware_noop = !$hardwareEnableNoop.changed
+        breakpoint_transition_software = $true
         memory_breakpoint_hit = $true
         memory_cross_region_rejected = $true
         memory_breakpoint_size = $memoryBreakpoint.size
         memory_breakpoint_replay_equal = $true
         memory_breakpoint_mismatch_rejected = $true
+        breakpoint_transition_memory = $true
         conditional_breakpoint_hit_count = $conditionalPause.pause_reason.hit_count
         conditional_breakpoint_managed = $conditionalSet.managed_id
         conditional_breakpoint_listed = $true
         conditional_breakpoint_replay_equal = $true
         conditional_breakpoint_foreign_remove_rejected = $true
         conditional_breakpoint_removed = !$conditionalRemove.present
+        breakpoint_transition_conditional = $true
         exception_breakpoint_code = $exceptionPause.pause_reason.code
         exception_breakpoint_chance = $exceptionSet.chance
         exception_breakpoint_managed = $exceptionSet.managed_id
@@ -1845,6 +1949,8 @@ try {
         exception_breakpoint_replay_equal = $true
         exception_breakpoint_foreign_remove_rejected = $true
         exception_breakpoint_removed = !$exceptionRemove.present
+        breakpoint_transition_exception = $true
+        breakpoint_transition_conflict_rejected = $true
         selected_thread_context_equal = $selectedMapsEqual
         noncurrent_thread_context_read = $workerThread.thread_id
         noncurrent_snapshot_instructions = @($workerSnapshot.disassembly).Count

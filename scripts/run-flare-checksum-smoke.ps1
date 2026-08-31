@@ -191,6 +191,12 @@ try {
     } 35
     $memorySnapshot = Invoke-Tool 'memory.read' @{ address = $moduleRef; length = 16 } 37
     $disassemblySnapshot = Invoke-Tool 'disassembly.read' @{ address = $moduleRef; count = 4 } 38
+    $mainPatternSearch = Invoke-Tool 'memory.search' @{
+        scope = @{ module = [System.IO.Path]::GetFileName($sample).ToUpperInvariant() }
+        pattern_hex = $memorySnapshot.data_hex.Substring(0, 16)
+        mask = 'xxxxxxxx'
+        limit = 1
+    } 42
     $compactSnapshot = Invoke-Tool 'debugger.snapshot' @{} 39
     $explicitThreadSnapshot = Invoke-Tool 'debugger.snapshot' @{
         registers = @('rip', 'rsp'); disassembly_count = 2
@@ -210,6 +216,10 @@ try {
         $explicitThreadRegisters.thread_id -ne $mainPause.active_thread_id -or
         $explicitThreadSnapshot.thread_id -ne $mainPause.active_thread_id -or
         $explicitThreadSnapshot.active_thread_id -ne $mainPause.active_thread_id -or
+        $mainPatternSearch.read_completeness -ne 'complete' -or
+        $mainPatternSearch.PSObject.Properties.Name -contains 'completeness' -or
+        $mainPatternSearch.scan_complete -or
+        @($mainPatternSearch.items).Count -ne 1 -or
         $explicitThreadRegisters.registers.rip -ne $resolved.address -or
         $explicitThreadSnapshot.instruction_pointer.address -ne $resolved.address -or
         @($explicitThreadSnapshot.disassembly).Count -ne 2 -or
@@ -651,6 +661,16 @@ try {
         throw "Installed bounded trace was incomplete: $($traceStatus | ConvertTo-Json -Compress)"
     }
 
+    $stepInto = Invoke-Tool 'debugger.step_into' @{
+        operation_id = [Guid]::NewGuid().ToString()
+    } 150
+    if ($stepInto.debuggee_state -ne 'paused' -or
+        $stepInto.pause_reason.kind -ne 'step' -or
+        !$stepInto.instruction_pointer -or !$stepInto.active_thread_id -or
+        $stepInto.state_generation -le $traceStatus.state_generation) {
+        throw "Installed step did not directly return its confirmed landing state: $($stepInto | ConvertTo-Json -Compress)"
+    }
+
     $stopSubmitted = $true
     $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 40
     [ordered]@{
@@ -668,6 +688,8 @@ try {
         bootstrap_launch_action_advertised = $true
         registers_generation = $registerSnapshot.state_generation
         memory_generation = $memorySnapshot.state_generation
+        memory_search_read_completeness = $mainPatternSearch.read_completeness
+        memory_search_scan_complete = $mainPatternSearch.scan_complete
         disassembly_generation = $disassemblySnapshot.state_generation
         snapshot_generations_equal = $true
         compact_snapshot_instructions = @($compactSnapshot.disassembly).Count
@@ -733,6 +755,8 @@ try {
         trace_steps = $traceStatus.steps_executed
         trace_points = @($traceResults.items).Count
         trace_replay_equal = $true
+        step_into_address = $stepInto.instruction_pointer
+        step_into_reason = $stepInto.pause_reason.kind
         stopped = $stop.debuggee_state -eq 'absent'
     } | ConvertTo-Json -Depth 5
 } finally {

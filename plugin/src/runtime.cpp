@@ -3331,7 +3331,7 @@ void Runtime::Worker() noexcept {
                            ",\"mask\":" + JsonString(mask) + ",\"items\":" + items +
                            ",\"next_cursor\":" + next +
                            ",\"scan_complete\":" + (scanComplete ? "true" : "false") +
-                           ",\"completeness\":" +
+                           ",\"read_completeness\":" +
                            JsonString(unreadableBytes == 0U ? "complete"
                                                             : "partial_unreadable") +
                            ",\"bytes_scanned\":" +
@@ -4371,6 +4371,36 @@ void Runtime::Worker() noexcept {
                                              true);
                     }
                     const std::uint64_t confirmed = ObservedGeneration(expected);
+                    if (isStep) {
+                        REGDUMP_AVX512 dump{};
+                        if (!DbgGetRegDumpEx(&dump, sizeof(dump))) {
+                            return ErrorResponse(*parsed, "INTERNAL",
+                                                 "step register snapshot is unavailable", true,
+                                                 false);
+                        }
+                        PauseObservation pause;
+                        std::uint32_t threadId = 0U;
+                        {
+                            std::lock_guard lock(stateMutex_);
+                            if (generation_.load() != confirmed ||
+                                debuggeeState_.load() != DebuggeeState::paused) {
+                                return ErrorResponse(*parsed, "BUSY",
+                                                     "debugger changed after the confirmed step",
+                                                     true, false);
+                            }
+                            pause = latestPause_;
+                            threadId = activeThreadId_.load();
+                        }
+                        return "{\"request_id\":" + JsonString(parsed->requestId) +
+                               ",\"state_generation\":" + std::to_string(confirmed) +
+                               ",\"status\":\"ok\",\"result\":{\"debuggee_state\":\"paused\"" +
+                               ",\"active_thread_id\":" +
+                               (threadId == 0U ? "null" : JsonString(HexValue(threadId))) +
+                               ",\"instruction_pointer\":" +
+                               JsonString(HexValue(dump.regcontext.cip)) +
+                               ",\"pause_reason\":" + PauseReasonJson(pause) +
+                               ",\"state_generation\":" + std::to_string(confirmed) + "}}";
+                    }
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
                            ",\"state_generation\":" + std::to_string(confirmed) +
                            ",\"status\":\"ok\",\"result\":{\"debuggee_state\":" +

@@ -1273,7 +1273,7 @@ fn build_catalog() -> Vec<Value> {
         ),
         read_tool(
             "memory.search",
-            "Search at most 1 MiB of candidate runtime addresses per request for one explicit 1-64 byte pattern and byte mask. Scope is one loaded module up to 128 MiB or one explicit range up to 16 MiB; results are generation-consistent and paginated.",
+            "Search at most 1 MiB of candidate runtime addresses per request for one explicit 1-64 byte pattern and byte mask. Scope is one loaded module up to 128 MiB or one explicit range up to 16 MiB; scan_complete reports scope pagination while read_completeness reports unreadable memory.",
             object(
                 vec![
                     (

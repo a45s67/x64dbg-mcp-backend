@@ -473,7 +473,7 @@ try {
         scope = @{ start = '0x1'; length = 4096 }
         pattern_hex = '4d5a'; mask = 'xx'; limit = 8
     } 232
-    if ($unreadableSearch.completeness -ne 'partial_unreadable' -or
+    if ($unreadableSearch.read_completeness -ne 'partial_unreadable' -or
         $unreadableSearch.unreadable_bytes -lt 1 -or
         @($unreadableSearch.items).Count -ne 0 -or !$unreadableSearch.scan_complete) {
         throw 'Unreadable memory search did not report a bounded partial result.'
@@ -1691,7 +1691,9 @@ try {
         after_generation = $pause.state_generation; timeout_ms = 1500
     } 50
     if ($stepIntoObservation.state_generation -ne $stepInto.state_generation -or
-        $stepIntoObservation.pause_reason.kind -ne 'step') {
+        $stepIntoObservation.pause_reason.kind -ne 'step' -or
+        $stepInto.pause_reason.kind -ne 'step' -or !$stepInto.instruction_pointer -or
+        !$stepInto.active_thread_id) {
         throw 'Step-into callback reason or generation was not retained.'
     }
     $staleCursor = Invoke-Mcp 'tools/call' @{
@@ -1727,7 +1729,9 @@ try {
         after_generation = $stepInto.state_generation; timeout_ms = 1500
     } 51
     if ($stepOverObservation.state_generation -ne $stepOver.state_generation -or
-        $stepOverObservation.pause_reason.kind -ne 'step') {
+        $stepOverObservation.pause_reason.kind -ne 'step' -or
+        $stepOver.pause_reason.kind -ne 'step' -or !$stepOver.instruction_pointer -or
+        !$stepOver.active_thread_id) {
         throw 'Step-over callback reason or generation was not retained.'
     }
     $breakpointSet = Invoke-Tool 'breakpoints.set' @{

@@ -4416,9 +4416,9 @@ void Runtime::Worker() noexcept {
                         if (!dllLaunch && HasPifExtension(*executable)) {
                             return ErrorResponse(
                                 *parsed, "TIMEOUT",
-                                "known x32dbg .PIF launch issue: x32dbg can treat the path as a "
-                                "shortcut and resolve it to an empty target; create a hash-identical "
-                                ".exe-named analysis copy, record its provenance, and retry",
+                                "x32dbg handles .PIF with ResolveShortcut before CreateProcessW; "
+                                "rename a hash-identical analysis copy to .exe, record its "
+                                "provenance, and try again",
                                 false, true);
                         }
 #endif

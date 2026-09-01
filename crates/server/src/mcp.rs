@@ -372,7 +372,7 @@ mod contract_tests {
                 message: "debugger rejected the operation",
                 retryable: false,
                 details: json!({
-                    "debugger_message": "known x32dbg .PIF launch issue: shortcut resolution failed",
+                    "debugger_message": "x32dbg handles .PIF with ResolveShortcut before CreateProcessW; rename and try again",
                     "outcome": "unknown"
                 }),
             },
@@ -381,7 +381,7 @@ mod contract_tests {
             result["content"][0]["text"]
                 .as_str()
                 .unwrap()
-                .contains("known x32dbg .PIF launch issue")
+                .contains("ResolveShortcut before CreateProcessW")
         );
     }
 

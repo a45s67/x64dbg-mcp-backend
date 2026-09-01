@@ -165,15 +165,12 @@ where
 
         let outcome = match response.outcome {
             IpcOutcome::Ok { result } => Ok(result),
-            IpcOutcome::Error { error } => {
-                let code = stable_error_code(&error.code);
-                Err(ToolError {
-                    code,
-                    message: stable_error_message(code),
-                    retryable: error.retryable,
-                    details: error.details,
-                })
-            }
+            IpcOutcome::Error { error } => Err(ToolError {
+                code: stable_error_code(&error.code),
+                message: "debugger rejected the operation",
+                retryable: error.retryable,
+                details: error.details,
+            }),
         };
         if let Some(id) = operation_id {
             let recorded = encode_recorded(&outcome);
@@ -226,17 +223,7 @@ fn stable_error_code(code: &str) -> &'static str {
         "PROFILE_NOT_FOUND" => "PROFILE_NOT_FOUND",
         "CONFIG_GENERATION_MISMATCH" => "CONFIG_GENERATION_MISMATCH",
         "PROFILE_WRITE_FAILED" => "PROFILE_WRITE_FAILED",
-        "UNSUPPORTED_FILE_EXTENSION" => "UNSUPPORTED_FILE_EXTENSION",
         _ => "INTERNAL",
-    }
-}
-
-fn stable_error_message(code: &str) -> &'static str {
-    match code {
-        "UNSUPPORTED_FILE_EXTENSION" => {
-            "valid PE uses an extension unsupported by the bounded launch tool"
-        }
-        _ => "debugger rejected the operation",
     }
 }
 
@@ -277,10 +264,9 @@ fn decode_recorded(value: Value) -> Result<Value, ToolError> {
     if value["ok"] == true {
         return Ok(value["result"].clone());
     }
-    let code = stable_error_code(value["error"]["code"].as_str().unwrap_or("INTERNAL"));
     Err(ToolError {
-        code,
-        message: stable_error_message(code),
+        code: stable_error_code(value["error"]["code"].as_str().unwrap_or("INTERNAL")),
+        message: "replayed debugger operation result",
         retryable: value["error"]["retryable"].as_bool().unwrap_or(false),
         details: value["error"]["details"].clone(),
     })
@@ -329,10 +315,6 @@ mod tests {
         );
         assert_eq!(stable_error_code("ALREADY_EXISTS"), "ALREADY_EXISTS");
         assert_eq!(stable_error_code("CONFLICT"), "CONFLICT");
-        assert_eq!(
-            stable_error_code("UNSUPPORTED_FILE_EXTENSION"),
-            "UNSUPPORTED_FILE_EXTENSION"
-        );
         assert_eq!(
             stable_error_code("RESOURCE_EXHAUSTED"),
             "RESOURCE_EXHAUSTED"

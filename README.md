@@ -137,12 +137,6 @@ arithmetic where an address schema accepts module/RVA input. Every mutation
 requires the current backend `instance_id` and a fresh lowercase UUID
 `operation_id`.
 
-`debuggee.launch` accepts an architecture-matched PE at an `.exe` path, while
-`debuggee.launch_dll` requires `.dll`. A valid PE with another extension is
-rejected before dispatch with `UNSUPPORTED_FILE_EXTENSION`; structured details
-identify the detected PE format, architecture, extension, and the
-provenance-preserving analysis-copy next step.
-
 ## Build and test
 
 Pinned baseline:

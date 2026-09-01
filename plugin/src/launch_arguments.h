@@ -20,6 +20,7 @@ constexpr std::size_t kX64dbgCommandBufferBytes = 1024U;
 [[nodiscard]] std::optional<std::string>
 RenderWindowsArguments(std::span<const std::string> arguments);
 [[nodiscard]] std::string EscapeX64dbgCommandArgument(std::string_view value);
+[[nodiscard]] bool HasPifExtension(std::string_view path) noexcept;
 [[nodiscard]] std::optional<std::string>
 BuildInitCommand(std::string_view executable, std::string_view commandLine,
                  std::string_view workingDirectory);

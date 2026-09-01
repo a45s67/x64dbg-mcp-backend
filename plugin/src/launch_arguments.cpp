@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <cctype>
 #include <limits>
 
 namespace mcp {
@@ -79,6 +80,20 @@ std::string EscapeX64dbgCommandArgument(const std::string_view value) {
         result.push_back(character);
     }
     return result;
+}
+
+bool HasPifExtension(const std::string_view path) noexcept {
+    const std::size_t separator = path.find_last_of("/\\");
+    const std::size_t dot = path.find_last_of('.');
+    if (dot == std::string_view::npos ||
+        (separator != std::string_view::npos && dot < separator)) {
+        return false;
+    }
+    const std::string_view extension = path.substr(dot);
+    return extension.size() == 4U && extension[0] == '.' &&
+           std::tolower(static_cast<unsigned char>(extension[1])) == 'p' &&
+           std::tolower(static_cast<unsigned char>(extension[2])) == 'i' &&
+           std::tolower(static_cast<unsigned char>(extension[3])) == 'f';
 }
 
 std::optional<std::string>

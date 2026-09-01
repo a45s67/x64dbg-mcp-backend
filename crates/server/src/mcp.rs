@@ -208,9 +208,24 @@ fn tool_success(name: &str, value: Value) -> Value {
 }
 
 fn tool_failure(name: &str, error: ToolError) -> Value {
-    let text = format!(
-        "{name} failed: {}: {}; retryable={}.",
-        error.code, error.message, error.retryable
+    let debugger_message = error
+        .details
+        .get("debugger_message")
+        .and_then(Value::as_str)
+        .filter(|message| message.len() <= 512 && !message.chars().any(char::is_control));
+    let text = debugger_message.map_or_else(
+        || {
+            format!(
+                "{name} failed: {}: {}; retryable={}.",
+                error.code, error.message, error.retryable
+            )
+        },
+        |message| {
+            format!(
+                "{name} failed: {}: {message}; retryable={}.",
+                error.code, error.retryable
+            )
+        },
     );
     let value = json!({
         "ok": false,
@@ -258,7 +273,7 @@ mod contract_tests {
     use axum::body::to_bytes;
     use serde_json::{Value, json};
 
-    use super::handle;
+    use super::{handle, tool_failure};
     use crate::adapter::{DebuggerAdapter, DisconnectedAdapter, ToolError};
 
     fn instance_id() -> uuid::Uuid {
@@ -346,6 +361,28 @@ mod contract_tests {
             include_str!("../../../contracts/mcp/disconnected-state.response.json"),
         )
         .await;
+    }
+
+    #[test]
+    fn bounded_debugger_diagnostic_is_included_in_content() {
+        let result = tool_failure(
+            "debuggee.launch",
+            ToolError {
+                code: "TIMEOUT",
+                message: "debugger rejected the operation",
+                retryable: false,
+                details: json!({
+                    "debugger_message": "known x32dbg .PIF launch issue: shortcut resolution failed",
+                    "outcome": "unknown"
+                }),
+            },
+        );
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("known x32dbg .PIF launch issue")
+        );
     }
 
     #[tokio::test]

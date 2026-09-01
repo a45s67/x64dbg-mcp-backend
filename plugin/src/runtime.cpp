@@ -4412,6 +4412,16 @@ void Runtime::Worker() noexcept {
                             ? requestDeadline - std::chrono::milliseconds(500)
                             : requestDeadline;
                     if (!WaitForActionableLaunchPause(before, launchDeadline)) {
+#ifndef _WIN64
+                        if (!dllLaunch && HasPifExtension(*executable)) {
+                            return ErrorResponse(
+                                *parsed, "TIMEOUT",
+                                "known x32dbg .PIF launch issue: x32dbg can treat the path as a "
+                                "shortcut and resolve it to an empty target; create a hash-identical "
+                                ".exe-named analysis copy, record its provenance, and retry",
+                                false, true);
+                        }
+#endif
                         return ErrorResponse(
                             *parsed, "TIMEOUT",
                             "x64dbg accepted the launch command, but no debug session or "

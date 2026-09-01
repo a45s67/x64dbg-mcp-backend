@@ -25,6 +25,10 @@ int main() {
         std::string(256U, 'a'), std::string(256U, 'b'), "c"};
     assert(!RenderWindowsArguments(oversized));
     assert(EscapeX64dbgCommandArgument("a\\b\"c") == "a\\\\b\\\"c");
+    assert(HasPifExtension("C:/samples/test.pif"));
+    assert(HasPifExtension("C:\\samples\\test.PIF"));
+    assert(!HasPifExtension("C:/samples/test.pif.exe"));
+    assert(!HasPifExtension("C:/samples.pif/test.exe"));
     const auto command = BuildInitCommand("C:/a.exe", *rendered, "C:/work");
     assert(command && command->starts_with("scriptcmd init \"C:/a.exe\", \""));
     assert(command->size() < kX64dbgCommandBufferBytes);

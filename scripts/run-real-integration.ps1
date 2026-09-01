@@ -174,7 +174,7 @@ try {
     Write-Verbose 'Sidecar is ready'
 
     $null = Invoke-Mcp 'initialize' @{
-        protocolVersion = '2025-06-18'; capabilities = @{}; clientInfo = @{ name = 'real-integration'; version = '1' }
+        protocolVersion = '2025-11-25'; capabilities = @{}; clientInfo = @{ name = 'real-integration'; version = '1' }
     } 1
     $beforeLaunch = Invoke-Tool 'debugger.state' @{} 2
     if ($beforeLaunch.instance_id -ne $script:InstanceId) {

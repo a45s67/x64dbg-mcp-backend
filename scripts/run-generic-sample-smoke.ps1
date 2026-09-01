@@ -136,7 +136,7 @@ try {
     }
     $script:instanceId = ([Guid]::Parse([string]$ready.instance_id)).ToString()
     $null = Invoke-Mcp 'initialize' @{
-        protocolVersion = '2025-06-18'
+        protocolVersion = '2025-11-25'
         capabilities = @{}
         clientInfo = @{ name = 'generic-sample-smoke'; version = '1' }
     }

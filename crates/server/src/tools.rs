@@ -1315,7 +1315,7 @@ fn build_catalog() -> Vec<Value> {
         ),
         mutation_tool(
             "debuggee.launch",
-            "Load an existing executable into this debugger instance and wait for a callback-confirmed initial pause. Requires no current debuggee and never accepts arbitrary debugger commands.",
+            "Load an existing architecture-matched PE from an .exe path and wait for a callback-confirmed initial pause. Requires no current debuggee and never accepts arbitrary debugger commands. A valid PE with another extension is rejected before dispatch with an actionable, provenance-preserving analysis-copy recommendation.",
             operation_schema_with_optional(
                 vec![(
                     "path",

@@ -4332,6 +4332,50 @@ void Runtime::Worker() noexcept {
                                 : "path must name an architecture-matched PE executable",
                             false, false);
                     }
+                    const std::u8string extensionEncoded = executablePath.extension().u8string();
+                    std::string extension(
+                        reinterpret_cast<const char*>(extensionEncoded.data()),
+                        extensionEncoded.size());
+                    std::transform(extension.begin(), extension.end(), extension.begin(),
+                                   [](const unsigned char value) {
+                                       return static_cast<char>(std::tolower(value));
+                                   });
+                    const std::string_view expectedExtension = dllLaunch ? ".dll" : ".exe";
+                    const bool conventionalExtension = extension == expectedExtension;
+                    const auto extensionFailureDetails = [&]() {
+                        std::error_code sizeError;
+                        const std::uintmax_t fileSize =
+                            std::filesystem::file_size(executablePath, sizeError);
+                        const std::string_view peFormat =
+                            pe->optionalMagic == 0x010bU ? "PE32" :
+                            pe->optionalMagic == 0x020bU ? "PE32+" : "unknown";
+#ifdef _WIN64
+                        constexpr std::string_view backendArchitecture = "x64";
+#else
+                        constexpr std::string_view backendArchitecture = "x86";
+#endif
+                        return std::string("{\"phase\":\"preflight\"") +
+                               ",\"file_opened\":true,\"file_size\":" +
+                               (sizeError ? "null" : std::to_string(fileSize)) +
+                               ",\"pe_valid\":true,\"pe_format\":" +
+                               JsonString(peFormat) + ",\"machine\":" +
+                               JsonString(HexValue(pe->machine)) +
+                               ",\"backend_architecture\":" +
+                               JsonString(backendArchitecture) + ",\"extension\":" +
+                               JsonString(extension) + ",\"expected_extension\":" +
+                               JsonString(expectedExtension) +
+                               ",\"conventional_extension\":false,"
+                               "\"likely_reason\":\"unsupported_executable_extension\","
+                               "\"dispatch_started\":false,"
+                               "\"next_actions\":[{\"code\":\"CREATE_ANALYSIS_COPY\","
+                               "\"message\":\"Create a byte-identical analysis copy with the expected extension, record both hashes, and retry that copy.\"}]}";
+                    };
+                    if (!conventionalExtension) {
+                        return ErrorResponseWithDetails(
+                            *parsed, "UNSUPPORTED_FILE_EXTENSION",
+                            "the path contains a valid architecture-matched PE but does not use the extension required by this bounded launch tool",
+                            false, extensionFailureDetails());
+                    }
                     if (dllLaunch) {
                         const int dllPathLength = MultiByteToWideChar(
                             CP_UTF8, MB_ERR_INVALID_CHARS, executable->data(),

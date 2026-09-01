@@ -108,7 +108,7 @@ try {
     }
 
     $null = Invoke-Mcp 'initialize' @{
-        protocolVersion = '2025-06-18'
+        protocolVersion = '2025-11-25'
         capabilities = @{}
         clientInfo = @{ name = 'flare-checksum-smoke'; version = '1' }
     } 1

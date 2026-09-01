@@ -71,7 +71,7 @@ not required; MCP tool descriptions and schemas are authoritative.
 
 Register x32dbg and x64dbg as separate Streamable HTTP backends. Store the same
 installed bearer token in the Gateway secret facility. MCP uses protocol
-`2025-11-25` or `2025-06-18`, endpoint `/mcp`, and `Authorization: Bearer <token>`. Do not retry
+`2025-11-25`, endpoint `/mcp`, and `Authorization: Bearer <token>`. Do not retry
 mutating tools blindly; preserve `instance_id` and `operation_id` semantics.
 
 The Dynamic Analysis Gateway keeps each optional host command in the existing
@@ -136,6 +136,12 @@ Use `{ "module": "sample.exe", "rva": "0x1000" }` instead of manual ASLR
 arithmetic where an address schema accepts module/RVA input. Every mutation
 requires the current backend `instance_id` and a fresh lowercase UUID
 `operation_id`.
+
+`debuggee.launch` accepts an architecture-matched PE at an `.exe` path, while
+`debuggee.launch_dll` requires `.dll`. A valid PE with another extension is
+rejected before dispatch with `UNSUPPORTED_FILE_EXTENSION`; structured details
+identify the detected PE format, architecture, extension, and the
+provenance-preserving analysis-copy next step.
 
 ## Build and test
 

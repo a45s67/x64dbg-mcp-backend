@@ -12,8 +12,7 @@ use crate::{
     tools,
 };
 
-pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[LATEST_PROTOCOL_VERSION, "2025-06-18"];
+pub const PROTOCOL_VERSION: &str = "2025-11-25";
 const MAX_JSON_DEPTH: usize = 32;
 const MAX_JSON_STRING_BYTES: usize = 8_192;
 const MAX_JSON_CONTAINER_ITEMS: usize = 512;
@@ -231,12 +230,11 @@ fn tool_failure(name: &str, error: ToolError) -> Value {
 
 fn initialize(params: &Value, instance_id: Uuid) -> Result<Value, (i32, &'static str)> {
     let requested = params.get("protocolVersion").and_then(Value::as_str);
-    if requested.is_none_or(|version| !SUPPORTED_PROTOCOL_VERSIONS.contains(&version)) {
+    if requested != Some(PROTOCOL_VERSION) {
         return Err((-32602, "Unsupported protocol version"));
     }
-    let negotiated = requested.expect("supported protocol version is present");
     Ok(json!({
-        "protocolVersion": negotiated,
+        "protocolVersion": PROTOCOL_VERSION,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "x64dbg-mcp-backend", "version": env!("CARGO_PKG_VERSION") },
         "_meta": { "x64dbg-mcp-backend/instance_id": instance_id }

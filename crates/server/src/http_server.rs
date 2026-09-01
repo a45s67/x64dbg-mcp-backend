@@ -183,8 +183,7 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Result<Resp
         "session_origin": snapshot.get("session_origin").cloned().unwrap_or(serde_json::Value::Null),
         "diagnostic_code": diagnostic_code,
         "next_actions": next_actions,
-        "protocol_version": mcp::LATEST_PROTOCOL_VERSION,
-        "protocol_versions": mcp::SUPPORTED_PROTOCOL_VERSIONS,
+        "protocol_version": mcp::PROTOCOL_VERSION,
         "version": env!("CARGO_PKG_VERSION")
     }))
     .into_response();
@@ -261,7 +260,7 @@ fn require_protocol_version(headers: &HeaderMap) -> Result<(), HttpError> {
     let valid = headers.get("mcp-protocol-version").is_none_or(|value| {
         value
             .to_str()
-            .is_ok_and(|version| mcp::SUPPORTED_PROTOCOL_VERSIONS.contains(&version))
+            .is_ok_and(|version| version == mcp::PROTOCOL_VERSION)
     });
     valid.then_some(()).ok_or_else(|| {
         HttpError::new(
@@ -269,7 +268,7 @@ fn require_protocol_version(headers: &HeaderMap) -> Result<(), HttpError> {
             "INVALID_PROTOCOL_VERSION",
             "unsupported MCP protocol version",
         )
-        .with_details(json!({ "supported_versions": mcp::SUPPORTED_PROTOCOL_VERSIONS }))
+        .with_details(json!({ "supported_version": mcp::PROTOCOL_VERSION }))
     })
 }
 
@@ -591,8 +590,8 @@ mod tests {
             serde_json::from_slice(&to_bytes(invalid_version.into_body(), 4096).await.unwrap())
                 .unwrap();
         assert_eq!(
-            value["error"]["details"]["supported_versions"],
-            serde_json::json!(["2025-11-25", "2025-06-18"])
+            value["error"]["details"]["supported_version"],
+            serde_json::json!("2025-11-25")
         );
     }
 
@@ -620,7 +619,7 @@ mod tests {
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCEPT, "application/json, text/event-stream")
             .body(Body::from(
-                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
             ))
             .unwrap();
         let response = app().oneshot(request).await.unwrap();
@@ -630,7 +629,7 @@ mod tests {
         let value: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["jsonrpc"], "2.0");
         assert_eq!(value["id"], 1);
-        assert_eq!(value["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(value["result"]["protocolVersion"], "2025-11-25");
         assert_eq!(value["result"]["serverInfo"]["name"], "x64dbg-mcp-backend");
         assert_eq!(
             value["result"]["_meta"]["x64dbg-mcp-backend/instance_id"],

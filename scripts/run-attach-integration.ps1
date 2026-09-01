@@ -105,7 +105,7 @@ try {
     $script:InstanceId = ([Guid]::Parse([string]$ready.instance_id)).ToString()
 
     $null = Invoke-Mcp 'initialize' @{
-        protocolVersion = '2025-06-18'; capabilities = @{}
+        protocolVersion = '2025-11-25'; capabilities = @{}
         clientInfo = @{ name = 'attach-integration'; version = '1' }
     } 1
     $before = Invoke-Tool 'debugger.state' @{} 2

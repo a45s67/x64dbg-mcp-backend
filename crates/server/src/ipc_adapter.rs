@@ -70,7 +70,7 @@ where
     }
 
     async fn call(&self, name: &str, arguments: &Value) -> Result<Value, ToolError> {
-        let mutation = tools::is_mutation(name);
+        let mutation = tools::is_mutation_call(name, arguments);
         let operation_timeout = if mutation {
             self.mutation_timeout
         } else {
@@ -218,6 +218,11 @@ fn stable_error_code(code: &str) -> &'static str {
         "OUTPUT_LIMIT_EXCEEDED" => "OUTPUT_LIMIT_EXCEEDED",
         "CANCELLED" => "CANCELLED",
         "UNSUPPORTED" => "UNSUPPORTED",
+        "SCYLLAHIDE_NOT_INSTALLED" => "SCYLLAHIDE_NOT_INSTALLED",
+        "SCYLLAHIDE_CONFIG_INVALID" => "SCYLLAHIDE_CONFIG_INVALID",
+        "PROFILE_NOT_FOUND" => "PROFILE_NOT_FOUND",
+        "CONFIG_GENERATION_MISMATCH" => "CONFIG_GENERATION_MISMATCH",
+        "PROFILE_WRITE_FAILED" => "PROFILE_WRITE_FAILED",
         _ => "INTERNAL",
     }
 }

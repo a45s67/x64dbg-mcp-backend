@@ -1,5 +1,6 @@
 #include "runtime.h"
 #include "utf8.h"
+#include "control_policy.h"
 
 #include <bcrypt.h>
 #include <sddl.h>
@@ -12,6 +13,7 @@
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -205,6 +207,9 @@ struct Request {
     std::vector<std::string> expressions;
     std::string callingConvention{"auto"};
     std::size_t argumentCount{8U};
+    std::string scyllaAction;
+    std::string scyllaProfile;
+    std::string expectedConfigGeneration;
 };
 
 bool IsMutation(const std::string_view method) {
@@ -517,7 +522,13 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         json_integer_value(deadline) <= 0) {
         return std::nullopt;
     }
-    const bool mutation = IsMutation(methodValue);
+    bool mutation = IsMutation(methodValue);
+    if (methodValue == "scyllahide.profile") {
+        json_t* action = json_object_get(payload, "action");
+        mutation = json_is_string(action) &&
+                   std::string_view(json_string_value(action), json_string_length(action)) ==
+                       "set";
+    }
     std::string operationIdValue;
     if (json_is_string(operationId)) {
         const std::string_view operationValue(json_string_value(operationId),
@@ -587,7 +598,40 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::vector<std::string> expressions;
     std::string callingConvention = "auto";
     std::size_t argumentCount = 8U;
-    if (methodValue == "debugger.state") {
+    std::string scyllaAction;
+    std::string scyllaProfile;
+    std::string expectedConfigGeneration;
+    if (methodValue == "scyllahide.profile") {
+        json_t* action = json_object_get(payload, "action");
+        if (!json_is_string(action)) return std::nullopt;
+        scyllaAction.assign(json_string_value(action), json_string_length(action));
+        if (scyllaAction == "get") {
+            if (json_object_size(payload) != 1U) return std::nullopt;
+        } else if (scyllaAction == "set") {
+            json_t* profile = json_object_get(payload, "profile");
+            json_t* generation = json_object_get(payload, "expected_config_generation");
+            json_t* payloadOperationId = json_object_get(payload, "operation_id");
+            if (json_object_size(payload) != 4U || !json_is_string(profile) ||
+                !json_is_string(generation) || !json_is_string(payloadOperationId) ||
+                json_string_length(profile) < 1U || json_string_length(profile) > 128U ||
+                json_string_length(generation) != 71U) {
+                return std::nullopt;
+            }
+            scyllaProfile.assign(json_string_value(profile), json_string_length(profile));
+            expectedConfigGeneration.assign(json_string_value(generation),
+                                            json_string_length(generation));
+            if (!expectedConfigGeneration.starts_with("sha256:") ||
+                !std::all_of(expectedConfigGeneration.begin() + 7,
+                             expectedConfigGeneration.end(), [](const unsigned char byte) {
+                                 return (byte >= '0' && byte <= '9') ||
+                                        (byte >= 'a' && byte <= 'f');
+                             })) {
+                return std::nullopt;
+            }
+        } else {
+            return std::nullopt;
+        }
+    } else if (methodValue == "debugger.state") {
         if (json_object_size(payload) != 0U) {
             return std::nullopt;
         }
@@ -1578,7 +1622,9 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(conditionalExpression), conditionalInvalid,
                    std::move(traceId), std::move(traceMode), traceMaxSteps,
                    traceTimeoutMs, traceCursorInvalid, std::move(expressions),
-                   std::move(callingConvention), argumentCount};
+                   std::move(callingConvention), argumentCount,
+                   std::move(scyllaAction), std::move(scyllaProfile),
+                   std::move(expectedConfigGeneration)};
 }
 
 bool IsCanonicalUuid(const std::string_view value) {
@@ -2261,6 +2307,59 @@ std::filesystem::path ModuleDirectory() {
     path.resize(length);
     return std::filesystem::path(path).parent_path();
 }
+
+std::filesystem::path ScyllaHideConfigPath() {
+    return ModuleDirectory() / L"scylla_hide.ini";
+}
+
+std::optional<std::string> ReadScyllaHideConfig() {
+    const std::filesystem::path path = ScyllaHideConfigPath();
+    std::error_code error;
+    const std::uintmax_t size = std::filesystem::file_size(path, error);
+    if (error || size == 0U || size > 1024U * 1024U) return std::nullopt;
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return std::nullopt;
+    std::string text(static_cast<std::size_t>(size), '\0');
+    input.read(text.data(), static_cast<std::streamsize>(text.size()));
+    if (!input || input.gcount() != static_cast<std::streamsize>(text.size())) return std::nullopt;
+    return text;
+}
+
+std::optional<std::string> ConfigGeneration(const std::string_view text) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0U) < 0) {
+        return std::nullopt;
+    }
+    std::array<unsigned char, 32> digest{};
+    const NTSTATUS status = BCryptHash(
+        algorithm, nullptr, 0U,
+        reinterpret_cast<PUCHAR>(const_cast<char*>(text.data())),
+        static_cast<ULONG>(text.size()), digest.data(), static_cast<ULONG>(digest.size()));
+    BCryptCloseAlgorithmProvider(algorithm, 0U);
+    if (status < 0) return std::nullopt;
+    return "sha256:" + Hex(digest);
+}
+
+bool AtomicReplaceScyllaHideConfig(const std::string_view text) {
+    const std::filesystem::path path = ScyllaHideConfigPath();
+    const std::filesystem::path temporary =
+        path.parent_path() /
+        (L".scylla-hide-mcp-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+         std::to_wstring(GetTickCount64()) + L".tmp");
+    HANDLE output = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0U, nullptr, CREATE_NEW,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (output == INVALID_HANDLE_VALUE) return false;
+    const bool writeOk = text.size() <= std::numeric_limits<DWORD>::max() &&
+                         WriteAll(output, text.data(), static_cast<DWORD>(text.size())) &&
+                         FlushFileBuffers(output) != FALSE;
+    CloseHandle(output);
+    if (!writeOk || MoveFileExW(temporary.c_str(), path.c_str(),
+                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == FALSE) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
 } // namespace
 
 Runtime::~Runtime() { Stop(); }
@@ -2322,6 +2421,15 @@ bool Runtime::Start() {
     PluginState expected = PluginState::stopped;
     if (!pluginState_.compare_exchange_strong(expected, PluginState::starting)) {
         return false;
+    }
+    startupScyllaGeneration_.clear();
+    startupScyllaProfile_.clear();
+    if (const auto text = ReadScyllaHideConfig()) {
+        startupScyllaGeneration_ = ConfigGeneration(*text).value_or("");
+        std::string error;
+        if (const auto config = control::ParseScyllaHideConfig(*text, error)) {
+            startupScyllaProfile_ = config->currentProfile;
+        }
     }
     std::wstring mutexName = std::wstring(L"Local\\x64dbg-mcp-backend-") + kBackend;
 #ifdef MCP_LIFECYCLE_HARNESS
@@ -2518,6 +2626,17 @@ void Runtime::Worker() noexcept {
             break;
         }
         const auto requestDeadline = SteadyDeadline(parsed->deadlineUnixMs);
+        if (parsed->method == "scyllahide.profile") {
+            const std::string response =
+                std::chrono::steady_clock::now() >= requestDeadline
+                    ? ErrorResponse(*parsed, "TIMEOUT", "operation deadline elapsed",
+                                    !parsed->mutation, false)
+                    : ScyllaHideProfileResponse(
+                          parsed->requestId, parsed->operationId, parsed->scyllaAction,
+                          parsed->scyllaProfile, parsed->expectedConfigGeneration);
+            if (!WriteFrame(pipe_, response)) break;
+            continue;
+        }
         const ExecutionResult execution = executor_.Execute(
             [this, parsed, requestDeadline] {
                 const auto submitFencedCommand = [this, requestDeadline](
@@ -7263,6 +7382,93 @@ void Runtime::Worker() noexcept {
         std::lock_guard lock(stateMutex_);
         generation_.fetch_add(1U);
     }
+}
+
+std::string Runtime::ScyllaHideProfileResponse(
+    const std::string& requestId, const std::string& operationId, const std::string& action,
+    const std::string& profile, const std::string& expectedGeneration) {
+    const auto errorResponse = [&requestId](const std::string_view code,
+                                            const std::string_view message,
+                                            const bool retryable,
+                                            const std::string_view details = "{}") {
+        return "{\"request_id\":" + JsonString(requestId) +
+               ",\"state_generation\":0,\"status\":\"error\",\"error\":{\"code\":" +
+               JsonString(code) + ",\"message\":" + JsonString(message) +
+               ",\"retryable\":" + (retryable ? "true" : "false") +
+               ",\"details\":" + std::string(details) + "}}";
+    };
+    const auto originalText = ReadScyllaHideConfig();
+    if (!originalText) {
+        return errorResponse("SCYLLAHIDE_NOT_INSTALLED",
+                             "plugins/scylla_hide.ini is unavailable", false);
+    }
+    const auto originalGeneration = ConfigGeneration(*originalText);
+    if (!originalGeneration) {
+        return errorResponse("INTERNAL", "ScyllaHide config could not be hashed", false);
+    }
+    std::string policyError;
+    auto config = control::ParseScyllaHideConfig(*originalText, policyError);
+    if (!config) {
+        return errorResponse("SCYLLAHIDE_CONFIG_INVALID", policyError, false);
+    }
+    bool changed = false;
+    std::string currentGeneration = *originalGeneration;
+    if (action == "set") {
+        if (expectedGeneration != *originalGeneration) {
+            const std::string details =
+                "{\"expected_config_generation\":" + JsonString(expectedGeneration) +
+                ",\"current_config_generation\":" + JsonString(*originalGeneration) + "}";
+            return errorResponse("CONFIG_GENERATION_MISMATCH",
+                                 "ScyllaHide config changed since it was read", false, details);
+        }
+        const auto update = control::SetScyllaHideProfile(*originalText, profile, policyError);
+        if (!update) {
+            return errorResponse("PROFILE_NOT_FOUND", policyError, false);
+        }
+        changed = update->text != *originalText;
+        if (changed && !AtomicReplaceScyllaHideConfig(update->text)) {
+            return errorResponse("PROFILE_WRITE_FAILED",
+                                 "ScyllaHide config replacement failed", true,
+                                 "{\"outcome\":\"unknown\"}");
+        }
+        const auto verifiedText = ReadScyllaHideConfig();
+        if (!verifiedText) {
+            return errorResponse("PROFILE_WRITE_FAILED",
+                                 "ScyllaHide config could not be verified", true,
+                                 "{\"outcome\":\"unknown\"}");
+        }
+        currentGeneration = ConfigGeneration(*verifiedText).value_or("");
+        config = control::ParseScyllaHideConfig(*verifiedText, policyError);
+        if (currentGeneration.empty() || !config ||
+            config->currentProfile != update->canonicalProfile) {
+            return errorResponse("PROFILE_WRITE_FAILED",
+                                 "ScyllaHide config verification failed", true,
+                                 "{\"outcome\":\"unknown\"}");
+        }
+    }
+    const bool restartRequired = startupScyllaGeneration_ != currentGeneration;
+    std::string profiles = "[";
+    for (std::size_t index = 0U; index < config->availableProfiles.size(); ++index) {
+        if (index != 0U) profiles.push_back(',');
+        profiles += JsonString(config->availableProfiles[index]);
+    }
+    profiles.push_back(']');
+    const std::string nextActions =
+        restartRequired
+            ? "[{\"code\":\"RESTART_DEBUGGER_TO_APPLY\",\"tool\":\"gateway.debugger_restart\",\"reason\":\"The config file differs from the version observed when x64dbg started.\"}]"
+            : "[]";
+    return "{\"request_id\":" + JsonString(requestId) +
+           ",\"state_generation\":0,\"status\":\"ok\",\"result\":{\"backend\":" +
+           JsonString(kBackendUtf8) + ",\"action\":" + JsonString(action) +
+           (operationId.empty() ? "" : ",\"operation_id\":" + JsonString(operationId)) +
+           ",\"configured_profile\":" + JsonString(config->currentProfile) +
+           ",\"startup_observed_profile\":" +
+           (startupScyllaProfile_.empty() ? "null" : JsonString(startupScyllaProfile_)) +
+           ",\"available_profiles\":" + profiles +
+           ",\"config_generation\":" + JsonString(currentGeneration) +
+           ",\"changed\":" + (changed ? "true" : "false") +
+           ",\"restart_required\":" + (restartRequired ? "true" : "false") +
+           ",\"next_actions\":" + nextActions + "}}";
 }
 
 std::string Runtime::StateResponse(const std::string& requestId) {

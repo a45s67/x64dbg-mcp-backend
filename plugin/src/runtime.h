@@ -107,6 +107,11 @@ private:
     void TraceSupervisor() noexcept;
     void CloseHandleValue(HANDLE& handle) noexcept;
     std::string StateResponse(const std::string& requestId);
+    std::string ScyllaHideProfileResponse(const std::string& requestId,
+                                          const std::string& operationId,
+                                          const std::string& action,
+                                          const std::string& profile,
+                                          const std::string& expectedGeneration);
     bool WaitForState(DebuggeeState expected, std::uint64_t afterGeneration,
                       std::chrono::steady_clock::time_point deadline) noexcept;
     bool WaitForPauseReason(PauseReasonKind reason, std::uint64_t afterGeneration,
@@ -165,6 +170,8 @@ private:
     std::wstring pipeName_;
     std::string nonce_;
     std::string instanceId_;
+    std::string startupScyllaGeneration_;
+    std::string startupScyllaProfile_;
 };
 
 } // namespace mcp

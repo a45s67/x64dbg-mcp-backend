@@ -40,6 +40,7 @@ if(BUILD_TESTING)
     /W4 /WX /permissive- /EHsc /utf-8 /UNDEBUG)
 
   add_executable(x64dbg_mcp_lifecycle_test
+    controller/src/control_policy.cpp
     plugin/tests/lifecycle_harness.cpp
     plugin/src/breakpoint_policy.cpp
     plugin/src/command_fence.cpp
@@ -54,7 +55,7 @@ if(BUILD_TESTING)
     plugin/src/utf8.cpp
   )
   target_compile_features(x64dbg_mcp_lifecycle_test PRIVATE cxx_std_20)
-  target_include_directories(x64dbg_mcp_lifecycle_test PRIVATE plugin/src)
+  target_include_directories(x64dbg_mcp_lifecycle_test PRIVATE plugin/src controller/src)
   target_include_directories(x64dbg_mcp_lifecycle_test SYSTEM PRIVATE "${X64DBG_ROOT}/pluginsdk")
   target_compile_definitions(x64dbg_mcp_lifecycle_test PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX MCP_LIFECYCLE_HARNESS)
@@ -218,6 +219,7 @@ if(BUILD_TESTING)
 endif()
 
 add_library(x64dbg_mcp_plugin SHARED
+  controller/src/control_policy.cpp
   plugin/src/breakpoint_policy.cpp
   plugin/src/command_fence.cpp
   plugin/src/debugger_executor.cpp
@@ -233,6 +235,7 @@ add_library(x64dbg_mcp_plugin SHARED
   plugin/src/utf8.cpp
 )
 target_compile_features(x64dbg_mcp_plugin PRIVATE cxx_std_20)
+target_include_directories(x64dbg_mcp_plugin PRIVATE controller/src)
 target_include_directories(x64dbg_mcp_plugin SYSTEM PRIVATE "${X64DBG_ROOT}/pluginsdk")
 target_compile_definitions(x64dbg_mcp_plugin PRIVATE
   UNICODE

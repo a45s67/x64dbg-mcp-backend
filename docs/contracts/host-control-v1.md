@@ -31,12 +31,13 @@ Credentials and full configuration contents are never emitted.
 - `start` creates only the selected debugger executable, then waits for its
   authenticated `/health/ready`. An already-ready exact-path host is idempotent.
 - `stop` posts `WM_CLOSE` to the selected exact-path host and waits on its process
-  handle. It never calls `TerminateProcess`.
+  handle. With explicit `--force`, it may terminate only that resolved exact-path
+  process if no top-level window can close or graceful close exceeds the deadline.
 - `restart` is `stop` followed by `start`; it waits for actual process exit and
   readiness rather than sleeping for a fixed interval.
 - `stop` and `restart` require a ready backend whose debuggee state is `absent`.
-  `--force` explicitly permits an active or unobservable backend, but still uses
-  graceful close and the same deadline.
+  `--force` explicitly permits an active or unobservable backend and the bounded
+  exact-process fallback described above.
 - Successful `start` and `restart` return the new `instance_id`. A timeout never
   claims that the final outcome is known.
 

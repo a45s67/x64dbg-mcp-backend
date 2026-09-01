@@ -191,6 +191,56 @@ std::optional<ProfileUpdate> SetScyllaHideProfile(const std::string_view text,
     return ProfileUpdate{std::move(updated), std::move(*canonicalProfile)};
 }
 
+std::optional<ScyllaHideConfig> ParseScyllaHideConfig(const std::string_view text,
+                                                       std::string& error) {
+    error.clear();
+    if (text.empty() || text.size() > 1024U * 1024U || text.find('\0') != std::string_view::npos) {
+        error = "ScyllaHide config is empty or exceeds its bound";
+        return std::nullopt;
+    }
+    std::string currentSection;
+    std::optional<std::string> currentProfile;
+    std::vector<std::string> profiles;
+    for (const Line line : Lines(text)) {
+        const std::string_view content = Trim(text.substr(line.begin, line.contentEnd - line.begin));
+        if (content.size() >= 2U && content.front() == '[' && content.back() == ']') {
+            currentSection.assign(content.substr(1U, content.size() - 2U));
+            if (!EqualInsensitive(currentSection, "SETTINGS")) {
+                if (currentSection.empty() || currentSection.size() > 128U ||
+                    profiles.size() >= 128U || HasControl(currentSection)) {
+                    error = "ScyllaHide profile catalog exceeds its bound";
+                    return std::nullopt;
+                }
+                profiles.push_back(currentSection);
+            }
+            continue;
+        }
+        if (EqualInsensitive(currentSection, "SETTINGS")) {
+            const std::size_t separator = content.find('=');
+            if (separator != std::string_view::npos &&
+                EqualInsensitive(Trim(content.substr(0U, separator)), "CurrentProfile")) {
+                if (currentProfile) {
+                    error = "ScyllaHide config repeats CurrentProfile";
+                    return std::nullopt;
+                }
+                currentProfile = std::string(Trim(content.substr(separator + 1U)));
+            }
+        }
+    }
+    if (!currentProfile || currentProfile->empty()) {
+        error = "ScyllaHide SETTINGS.CurrentProfile is missing";
+        return std::nullopt;
+    }
+    const auto selected = std::find_if(profiles.begin(), profiles.end(), [&](const auto& profile) {
+        return EqualInsensitive(profile, *currentProfile);
+    });
+    if (selected == profiles.end()) {
+        error = "ScyllaHide CurrentProfile does not name an available profile";
+        return std::nullopt;
+    }
+    return ScyllaHideConfig{*selected, std::move(profiles)};
+}
+
 bool IsCanonicalUuid(const std::string_view value) noexcept {
     if (value.size() != 36U) return false;
     for (std::size_t index = 0U; index < value.size(); ++index) {

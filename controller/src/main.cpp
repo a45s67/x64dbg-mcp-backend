@@ -484,8 +484,7 @@ BOOL CALLBACK FindMainWindow(HWND window, LPARAM parameter) {
     auto* search = reinterpret_cast<WindowSearch*>(parameter);
     DWORD processId = 0U;
     GetWindowThreadProcessId(window, &processId);
-    if (processId == search->processId && IsWindowVisible(window) != FALSE &&
-        GetWindow(window, GW_OWNER) == nullptr) {
+    if (processId == search->processId && GetWindow(window, GW_OWNER) == nullptr) {
         search->window = window;
         return FALSE;
     }
@@ -559,6 +558,8 @@ StartResult StartHost(const Paths& paths,
     mutableCommand.push_back(L'\0');
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_SHOWNORMAL;
     PROCESS_INFORMATION process{};
     const std::wstring workingDirectory = paths.host.parent_path().native();
     if (CreateProcessW(paths.host.c_str(), mutableCommand.data(), nullptr, nullptr, FALSE, 0U,
@@ -620,13 +621,35 @@ StopResult StopHost(const Paths& paths, const mcp::control::ServerConfig& config
         }
     }
     WindowSearch search{host.id, nullptr};
-    EnumWindows(FindMainWindow, reinterpret_cast<LPARAM>(&search));
-    if (search.window == nullptr ||
-        PostMessageW(search.window, WM_CLOSE, 0U, 0) == FALSE) {
+    const Clock::time_point windowDeadline =
+        (std::min)(deadline, Clock::now() + std::chrono::seconds(2));
+    while (search.window == nullptr && Clock::now() < windowDeadline) {
+        EnumWindows(FindMainWindow, reinterpret_cast<LPARAM>(&search));
+        if (search.window == nullptr) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    if (search.window == nullptr || PostMessageW(search.window, WM_CLOSE, 0U, 0) == FALSE) {
+        if (force) {
+            Handle terminator(OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, host.id));
+            if (terminator &&
+                TerminateProcess(terminator.get(), ERROR_PROCESS_ABORTED) != FALSE &&
+                WaitForSingleObject(host.handle.get(), RemainingMs(deadline)) == WAIT_OBJECT_0) {
+                return {0, host.id, false};
+            }
+        }
         return {Error(3, "NO_MAIN_WINDOW", "debugger main window could not be closed", false)};
     }
-    const DWORD wait = WaitForSingleObject(host.handle.get(), RemainingMs(deadline));
+    DWORD wait = WaitForSingleObject(host.handle.get(), RemainingMs(deadline));
     if (wait == WAIT_TIMEOUT) {
+        if (force) {
+            Handle terminator(OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, host.id));
+            if (terminator &&
+                TerminateProcess(terminator.get(), ERROR_PROCESS_ABORTED) != FALSE) {
+                wait = WaitForSingleObject(host.handle.get(), 2'000U);
+                if (wait == WAIT_OBJECT_0) return {0, host.id, false};
+            }
+        }
         return {Error(4, "STOP_TIMEOUT",
                       "debugger did not exit before the deadline; outcome is unknown", true)};
     }

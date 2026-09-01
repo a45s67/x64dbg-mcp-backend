@@ -12,7 +12,8 @@ use crate::{
     tools,
 };
 
-const PROTOCOL_VERSION: &str = "2025-06-18";
+pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[LATEST_PROTOCOL_VERSION, "2025-06-18"];
 const MAX_JSON_DEPTH: usize = 32;
 const MAX_JSON_STRING_BYTES: usize = 8_192;
 const MAX_JSON_CONTAINER_ITEMS: usize = 512;
@@ -126,7 +127,7 @@ async fn call_tool(
         ));
     }
     let mut dispatched_arguments = arguments.clone();
-    if tools::is_mutation(name) {
+    if tools::is_mutation_call(name, arguments) {
         let supplied = arguments
             .get("instance_id")
             .and_then(Value::as_str)
@@ -177,7 +178,17 @@ async fn call_tool(
 }
 
 fn tool_success(name: &str, value: Value) -> Value {
-    let text = if let Some(items) = value.get("items").and_then(Value::as_array) {
+    let text = if name == "scyllahide.profile" {
+        let profile = value
+            .get("configured_profile")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if value.get("restart_required").and_then(Value::as_bool) == Some(true) {
+            format!("ScyllaHide profile is {profile}; restart x64dbg before continuing analysis.")
+        } else {
+            format!("ScyllaHide profile is {profile}; no restart is required.")
+        }
+    } else if let Some(items) = value.get("items").and_then(Value::as_array) {
         let next_page = value
             .get("next_cursor")
             .is_some_and(|cursor| !cursor.is_null());
@@ -220,11 +231,12 @@ fn tool_failure(name: &str, error: ToolError) -> Value {
 
 fn initialize(params: &Value, instance_id: Uuid) -> Result<Value, (i32, &'static str)> {
     let requested = params.get("protocolVersion").and_then(Value::as_str);
-    if requested != Some(PROTOCOL_VERSION) {
+    if requested.is_none_or(|version| !SUPPORTED_PROTOCOL_VERSIONS.contains(&version)) {
         return Err((-32602, "Unsupported protocol version"));
     }
+    let negotiated = requested.expect("supported protocol version is present");
     Ok(json!({
-        "protocolVersion": PROTOCOL_VERSION,
+        "protocolVersion": negotiated,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "x64dbg-mcp-backend", "version": env!("CARGO_PKG_VERSION") },
         "_meta": { "x64dbg-mcp-backend/instance_id": instance_id }

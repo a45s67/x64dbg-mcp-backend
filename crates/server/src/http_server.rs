@@ -183,7 +183,8 @@ async fn ready(State(state): State<AppState>, headers: HeaderMap) -> Result<Resp
         "session_origin": snapshot.get("session_origin").cloned().unwrap_or(serde_json::Value::Null),
         "diagnostic_code": diagnostic_code,
         "next_actions": next_actions,
-        "protocol_version": "2025-06-18",
+        "protocol_version": mcp::LATEST_PROTOCOL_VERSION,
+        "protocol_versions": mcp::SUPPORTED_PROTOCOL_VERSIONS,
         "version": env!("CARGO_PKG_VERSION")
     }))
     .into_response();
@@ -257,16 +258,18 @@ fn set_json_utf8(response: &mut Response) {
 }
 
 fn require_protocol_version(headers: &HeaderMap) -> Result<(), HttpError> {
-    let valid = headers
-        .get("mcp-protocol-version")
-        .is_none_or(|value| value.as_bytes() == b"2025-06-18");
+    let valid = headers.get("mcp-protocol-version").is_none_or(|value| {
+        value
+            .to_str()
+            .is_ok_and(|version| mcp::SUPPORTED_PROTOCOL_VERSIONS.contains(&version))
+    });
     valid.then_some(()).ok_or_else(|| {
         HttpError::new(
             StatusCode::BAD_REQUEST,
             "INVALID_PROTOCOL_VERSION",
             "unsupported MCP protocol version",
         )
-        .with_details(json!({ "supported_versions": ["2025-06-18"] }))
+        .with_details(json!({ "supported_versions": mcp::SUPPORTED_PROTOCOL_VERSIONS }))
     })
 }
 
@@ -589,7 +592,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             value["error"]["details"]["supported_versions"],
-            serde_json::json!(["2025-06-18"])
+            serde_json::json!(["2025-11-25", "2025-06-18"])
         );
     }
 
@@ -640,7 +643,7 @@ mod tests {
         let value =
             mcp_request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#).await;
         let tools = value["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 62);
+        assert_eq!(tools.len(), 63);
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.state"));
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.snapshot"));
         assert!(tools.iter().any(|tool| tool["name"] == "trace.start"));

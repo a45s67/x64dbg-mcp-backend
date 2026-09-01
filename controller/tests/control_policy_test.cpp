@@ -22,6 +22,10 @@ int main() {
     constexpr std::string_view ini =
         "[SETTINGS]\r\nCurrentProfile=Basic\r\n[Basic]\r\nPebBeingDebugged=1\r\n"
         "[VMProtect x86/x64]\r\nPebBeingDebugged=1\r\n";
+    const auto parsed = mcp::control::ParseScyllaHideConfig(ini, error);
+    assert(parsed);
+    assert(parsed->currentProfile == "Basic");
+    assert(parsed->availableProfiles.size() == 2U);
     const auto updated =
         mcp::control::SetScyllaHideProfile(ini, "vmprotect x86/x64", error);
     assert(updated);

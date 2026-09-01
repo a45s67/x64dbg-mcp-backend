@@ -42,6 +42,13 @@ pub fn is_mutation(name: &str) -> bool {
         .is_some_and(|tool| tool["annotations"]["readOnlyHint"] == false)
 }
 
+pub fn is_mutation_call(name: &str, arguments: &Value) -> bool {
+    if name == "scyllahide.profile" {
+        return arguments.get("action").and_then(Value::as_str) == Some("set");
+    }
+    is_mutation(name)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct ValidationError {
     pub field: &'static str,
@@ -229,6 +236,40 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             exact_keys(object, &["trace_id"], &["limit", "cursor"])?;
             validate_uuid_field(object, "trace_id")?;
             discovery_page(object)
+        }
+        "scyllahide.profile" => {
+            let action = string(object, "action", 3, 3)?;
+            if action == "get" {
+                exact_keys(object, &["action"], &[])
+            } else if action == "set" {
+                exact_keys(
+                    object,
+                    &[
+                        "action",
+                        "profile",
+                        "expected_config_generation",
+                        "operation_id",
+                        "instance_id",
+                    ],
+                    &[],
+                )?;
+                string(object, "profile", 1, 128)?;
+                let generation = string(object, "expected_config_generation", 71, 71)?;
+                if !generation.starts_with("sha256:")
+                    || !generation[7..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                {
+                    return Err(invalid(
+                        "expected_config_generation",
+                        "must be sha256 followed by 64 lowercase hexadecimal characters",
+                    ));
+                }
+                validate_operation_id(object)?;
+                validate_instance_id(object)
+            } else {
+                Err(invalid("action", "must be get or set"))
+            }
         }
         "registers.read" => {
             exact_keys(object, &[], &["names", "thread_id"])?;
@@ -1242,6 +1283,36 @@ fn build_catalog() -> Vec<Value> {
                 vec!["trace_id"],
             ),
         ),
+        mixed_tool(
+            "scyllahide.profile",
+            "Read or atomically select a ScyllaHide profile for this debugger installation. A changed profile requires a Gateway-owned debugger restart before further analysis.",
+            json!({
+                "type": "object",
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"action": {"const": "get"}},
+                        "required": ["action"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {"const": "set"},
+                            "profile": {"type":"string","minLength":1,"maxLength":128},
+                            "expected_config_generation": {
+                                "type":"string",
+                                "pattern":"^sha256:[0-9a-f]{64}$"
+                            },
+                            "operation_id": uuid_schema(),
+                            "instance_id": uuid_schema()
+                        },
+                        "required": ["action","profile","expected_config_generation","operation_id","instance_id"],
+                        "additionalProperties": false
+                    }
+                ]
+            }),
+        ),
         mutation_tool(
             "debuggee.launch",
             "Load an existing executable into this debugger instance and wait for a callback-confirmed initial pause. Requires no current debuggee and never accepts arbitrary debugger commands.",
@@ -1905,6 +1976,20 @@ fn mutation_tool(name: &str, description: &str, input_schema: Value, destructive
     })
 }
 
+fn mixed_tool(name: &str, description: &str, input_schema: Value) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": input_schema,
+        "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": false
+        }
+    })
+}
+
 fn canonical_hex() -> Value {
     json!({ "type": "string", "pattern": "^0x[0-9a-f]+$", "minLength": 3, "maxLength": 34 })
 }
@@ -2118,7 +2203,7 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{catalog, is_mutation, validate_arguments as validate_raw};
+    use super::{catalog, is_mutation, is_mutation_call, validate_arguments as validate_raw};
 
     const INSTANCE_ID: &str = "11111111-2222-4333-8444-555555555555";
 
@@ -2177,21 +2262,50 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 62);
+        assert_eq!(catalog().len(), 63);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect::<HashSet<_>>();
         assert_eq!(names.len(), catalog().len());
         for tool in catalog() {
-            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+            if tool["name"] != "scyllahide.profile" {
+                assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+            }
             assert!(tool["annotations"]["openWorldHint"].is_boolean());
-            if tool["annotations"]["readOnlyHint"] == false {
+            if tool["annotations"]["readOnlyHint"] == false && tool["name"] != "scyllahide.profile"
+            {
                 let required = tool["inputSchema"]["required"].as_array().unwrap();
                 assert!(required.contains(&json!("operation_id")));
                 assert!(required.contains(&json!("instance_id")));
             }
         }
+    }
+
+    #[test]
+    fn scyllahide_profile_has_action_scoped_mutation_semantics() {
+        assert!(!is_mutation_call(
+            "scyllahide.profile",
+            &json!({"action":"get"})
+        ));
+        assert!(is_mutation_call(
+            "scyllahide.profile",
+            &json!({"action":"set"})
+        ));
+        assert!(validate_raw("scyllahide.profile", &json!({"action":"get"})).is_ok());
+        assert!(
+            validate_raw(
+                "scyllahide.profile",
+                &json!({
+                    "action":"set",
+                    "profile":"VMProtect",
+                    "expected_config_generation": format!("sha256:{}", "a".repeat(64)),
+                    "operation_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                    "instance_id":INSTANCE_ID
+                })
+            )
+            .is_ok()
+        );
     }
 
     #[test]

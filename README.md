@@ -71,7 +71,7 @@ not required; MCP tool descriptions and schemas are authoritative.
 
 Register x32dbg and x64dbg as separate Streamable HTTP backends. Store the same
 installed bearer token in the Gateway secret facility. MCP uses protocol
-`2025-06-18`, endpoint `/mcp`, and `Authorization: Bearer <token>`. Do not retry
+`2025-11-25` or `2025-06-18`, endpoint `/mcp`, and `Authorization: Bearer <token>`. Do not retry
 mutating tools blindly; preserve `instance_id` and `operation_id` semantics.
 
 The Dynamic Analysis Gateway keeps each optional host command in the existing

@@ -66,7 +66,6 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
         .as_object()
         .ok_or(invalid("arguments", "must be an object"))?;
     match name {
-        "debugger.state" => exact_keys(object, &[], &[]),
         "events.list" => {
             exact_keys(object, &[], &["after_sequence", "types", "limit"])?;
             optional_integer(object, "after_sequence", 0, 9_007_199_254_740_991)?;
@@ -630,7 +629,7 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             }
             Ok(())
         }
-        "process.peb" => exact_keys(object, &[], &[]),
+        "debugger.state" | "process.peb" => exact_keys(object, &[], &[]),
         "context.arguments" => {
             exact_keys(object, &[], &["count", "calling_convention", "thread_id"])?;
             optional_integer(object, "count", 1, 16)?;

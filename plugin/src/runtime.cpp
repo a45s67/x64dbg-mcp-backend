@@ -4406,10 +4406,18 @@ void Runtime::Worker() noexcept {
                                              "debugger command queue rejected the launch", true,
                                              false);
                     }
-                    if (!WaitForActionableLaunchPause(before, requestDeadline)) {
-                        return ErrorResponse(*parsed, "TIMEOUT",
-                                             "launch did not reach an actionable debugger pause",
-                                             false, true);
+                    const auto launchDeadline =
+                        requestDeadline > std::chrono::steady_clock::now() +
+                                              std::chrono::milliseconds(500)
+                            ? requestDeadline - std::chrono::milliseconds(500)
+                            : requestDeadline;
+                    if (!WaitForActionableLaunchPause(before, launchDeadline)) {
+                        return ErrorResponse(
+                            *parsed, "TIMEOUT",
+                            "x64dbg accepted the launch command, but no debug session or "
+                            "actionable pause was observed before the deadline; inspect the "
+                            "x64dbg log for native loader diagnostics",
+                            false, true);
                     }
                     const std::uint64_t confirmed = ObservedGeneration(DebuggeeState::paused);
                     if (dllLaunch) {

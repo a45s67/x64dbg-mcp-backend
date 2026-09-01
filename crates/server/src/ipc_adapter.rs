@@ -21,6 +21,10 @@ use crate::{
 
 const LEDGER_CAPACITY: usize = 1024;
 const LEDGER_TTL: Duration = Duration::from_mins(10);
+// Reserve bounded time for the plugin executor to serialize its result and for
+// the sidecar to read the response. Giving both layers the same deadline races
+// a valid plugin TIMEOUT response against the transport timeout.
+const MAX_IPC_RESPONSE_GRACE: Duration = Duration::from_secs(1);
 
 pub struct IpcAdapter<S> {
     stream: Mutex<S>,
@@ -127,7 +131,7 @@ where
         let request_id = Uuid::new_v4();
         let request = IpcRequest {
             request_id,
-            deadline_unix_ms: unix_deadline_ms(operation_timeout),
+            deadline_unix_ms: unix_deadline_ms(plugin_execution_budget(operation_timeout)),
             operation_id,
             method: name.to_owned(),
             payload: arguments.clone(),
@@ -165,12 +169,23 @@ where
 
         let outcome = match response.outcome {
             IpcOutcome::Ok { result } => Ok(result),
-            IpcOutcome::Error { error } => Err(ToolError {
-                code: stable_error_code(&error.code),
-                message: "debugger rejected the operation",
-                retryable: error.retryable,
-                details: error.details,
-            }),
+            IpcOutcome::Error { error } => {
+                let mut details = error.details;
+                if let Some(object) = details.as_object_mut() {
+                    object.insert("debugger_message".to_owned(), Value::String(error.message));
+                } else {
+                    details = json!({
+                        "debugger_message": error.message,
+                        "debugger_details": details
+                    });
+                }
+                Err(ToolError {
+                    code: stable_error_code(&error.code),
+                    message: "debugger rejected the operation",
+                    retryable: error.retryable,
+                    details,
+                })
+            }
         };
         if let Some(id) = operation_id {
             let recorded = encode_recorded(&outcome);
@@ -200,6 +215,11 @@ fn unix_deadline_ms(duration: Duration) -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     u64::try_from((now + duration).as_millis()).unwrap_or(u64::MAX)
+}
+
+fn plugin_execution_budget(operation_timeout: Duration) -> Duration {
+    let response_grace = (operation_timeout / 4).min(MAX_IPC_RESPONSE_GRACE);
+    operation_timeout.saturating_sub(response_grace)
 }
 
 fn stable_error_code(code: &str) -> &'static str {
@@ -304,7 +324,19 @@ mod tests {
     use tokio::io::DuplexStream;
 
     use super::*;
-    use crate::ipc::{IpcOutcome, IpcResponse};
+    use crate::ipc::{IpcErrorBody, IpcOutcome, IpcResponse};
+
+    #[test]
+    fn plugin_budget_reserves_bounded_response_time() {
+        assert_eq!(
+            plugin_execution_budget(Duration::from_secs(30)),
+            Duration::from_secs(29)
+        );
+        assert_eq!(
+            plugin_execution_budget(Duration::from_millis(100)),
+            Duration::from_millis(75)
+        );
+    }
 
     #[test]
     fn discovery_error_codes_remain_structured() {
@@ -385,6 +417,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plugin_timeout_response_preserves_ipc_for_follow_up_calls() {
+        let (client, mut plugin): (DuplexStream, DuplexStream) = tokio::io::duplex(4096);
+        let adapter = IpcAdapter::established(
+            client,
+            Duration::from_millis(100),
+            Duration::from_millis(120),
+        );
+        let operation_id = Uuid::new_v4();
+        let plugin_task = tokio::spawn(async move {
+            let launch: IpcRequest = read_frame(&mut plugin).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(95)).await;
+            write_frame(
+                &mut plugin,
+                &IpcResponse {
+                    request_id: launch.request_id,
+                    state_generation: 0,
+                    outcome: IpcOutcome::Error {
+                        error: IpcErrorBody {
+                            code: "TIMEOUT".to_owned(),
+                            message: "launch did not reach an actionable pause".to_owned(),
+                            retryable: false,
+                            details: json!({"outcome":"unknown"}),
+                        },
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+            let state: IpcRequest = read_frame(&mut plugin).await.unwrap();
+            write_frame(
+                &mut plugin,
+                &IpcResponse {
+                    request_id: state.request_id,
+                    state_generation: 0,
+                    outcome: IpcOutcome::Ok {
+                        result: json!({"debuggee_state":"absent"}),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        let error = adapter
+            .call(
+                "debuggee.launch",
+                &json!({"operation_id": operation_id, "path":"sample.pif"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "TIMEOUT");
+        assert!(!error.retryable);
+        assert_eq!(
+            error.details["debugger_message"],
+            "launch did not reach an actionable pause"
+        );
+        assert!(adapter.is_ready());
+
+        let state = adapter.call("debugger.state", &json!({})).await.unwrap();
+        assert_eq!(state["debuggee_state"], "absent");
+        plugin_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn correlation_mismatch_fails_closed() {
         let (client, mut plugin) = tokio::io::duplex(4096);
         let adapter =
@@ -428,7 +525,7 @@ mod tests {
     async fn mutations_receive_the_separate_longer_deadline() {
         let (client, mut plugin) = tokio::io::duplex(4096);
         let adapter =
-            IpcAdapter::established(client, Duration::from_millis(100), Duration::from_secs(2));
+            IpcAdapter::established(client, Duration::from_millis(100), Duration::from_secs(4));
         let plugin_task = tokio::spawn(async move {
             let read: IpcRequest = read_frame(&mut plugin).await.unwrap();
             write_frame(
@@ -460,6 +557,6 @@ mod tests {
             .await
             .unwrap();
         let (read_deadline, mutation_deadline) = plugin_task.await.unwrap();
-        assert!(mutation_deadline.saturating_sub(read_deadline) >= 1_800);
+        assert!(mutation_deadline.saturating_sub(read_deadline) >= 2_800);
     }
 }

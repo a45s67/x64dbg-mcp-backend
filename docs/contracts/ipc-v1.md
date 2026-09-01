@@ -1,30 +1,27 @@
-# IPC protocol v1
+# Plugin-sidecar IPC v1
 
-The sidecar and plugin communicate over a current-user-only Windows named pipe.
-This document freezes the MVP wire boundary independently of either language.
+The native plugin and Rust sidecar communicate through a current-user-only
+Windows named pipe. This is an internal protocol; MCP clients use Streamable
+HTTP instead.
 
 ## Framing
 
-Each frame is:
+Each frame is a 32-bit little-endian payload length followed by one UTF-8 JSON
+payload. The payload must be 1 through 1,048,576 bytes. Invalid, truncated,
+oversized, trailing, or schema-invalid frames close the connection; there is no
+resynchronization scan.
 
-```text
-uint32_le payload_length
-payload_length bytes of UTF-8 JSON
-```
-
-The payload MUST be non-empty and MUST NOT exceed 1,048,576 bytes. A peer closes
-the connection on a zero, oversized, truncated, trailing, invalid UTF-8, invalid
-JSON, or schema-invalid frame. There is no resynchronization scan after corruption.
-
-One request produces exactly one response with the same `request_id`. Both sides
-apply absolute deadlines. A disconnected or timed-out mutation is never replayed.
+One request produces one response with the same `request_id`. Both peers apply
+deadlines. A disconnected or timed-out mutation is recorded as unknown and is
+not replayed automatically.
 
 ## Handshake
 
-The plugin creates the secured pipe and supplies the launch nonce to the sidecar
-through the child's sole inherited stdin channel. The plugin retains the write
-end for the child lifetime; EOF is the sidecar shutdown signal. The plugin's first
-named-pipe frame is:
+The plugin creates the pipe and launches the sidecar with a random nonce and a
+single inherited stdin handle. The plugin keeps the corresponding write handle
+for the child lifetime; EOF requests sidecar shutdown.
+
+Plugin handshake:
 
 ```json
 {
@@ -36,7 +33,7 @@ named-pipe frame is:
 }
 ```
 
-After authenticating the nonce, the sidecar returns:
+Sidecar acknowledgement:
 
 ```json
 {
@@ -48,16 +45,10 @@ After authenticating the nonce, the sidecar returns:
 }
 ```
 
-The sidecar generates a new unpredictable UUID v4 for every process. A rejected
-acknowledgement sets `instance_id` to null. The plugin validates and retains an
-accepted canonical lowercase UUID before entering `ready`, then includes it in
-`debugger.state`. The launch nonce remains secret and is never reused as public
-identity.
-
-Major versions must match exactly. A peer may accept an older or equal minor
-version within the same major. The receiving Rust sidecar compares the nonce in
-constant time; the native plugin strictly validates the versioned acknowledgement.
-Authentication failure closes the pipe without detailed logging.
+Major versions must match; a peer accepts an equal or older minor version. The
+sidecar compares the nonce in constant time and creates a new UUID v4
+`instance_id` for each process. Authentication failure closes the pipe without
+exposing detailed diagnostics.
 
 ## Request
 
@@ -71,13 +62,12 @@ Authentication failure closes the pipe without detailed logging.
 }
 ```
 
-`operation_id` is null for reads and required for mutations. `deadline_unix_ms`
-is admission metadata, not permission to continue forever after the deadline.
-The public MCP `instance_id` mutation precondition is checked and removed by the
-sidecar before this IPC request is encoded. The in-memory operation ledger and
-`instance_id` therefore have the same sidecar-process lifetime.
-Address-taking payloads accept a legacy canonical hexadecimal string or one of
-the closed structured forms:
+`operation_id` is null for reads and required for mutations. The sidecar checks
+and removes the public MCP `instance_id` before encoding IPC. Its operation
+ledger has the same lifetime as the sidecar process.
+
+Address fields accept an absolute hexadecimal string, an explicit absolute
+object, or a module-relative object:
 
 ```json
 {"address":{"absolute":"0x140001000"}}
@@ -87,46 +77,9 @@ the closed structured forms:
 {"address":{"module":"sample.exe","rva":"0x1000"}}
 ```
 
-The plugin resolves the latter only after the work item reaches the serialized
-debugger executor. Arbitrary expression strings are not address references.
-
-`debugger.wait_for_pause` is a read request (`operation_id: null`) whose payload
-contains required integer `after_generation` and optional integer `timeout_ms`
-(default 5,000; range 1-9,000). A successful result includes
-`debuggee_state`, `state_generation`, `instruction_pointer`,
-`active_thread_id`, and a bounded `pause_reason`. Its reason `kind` is one of
-`process_created`, `system_breakpoint`, `breakpoint`, `exception`, `step`,
-`user_pause`, or `unknown`.
-
-`events.wait` waits for the first retained callback event newer than the required
-`after_sequence` that matches the required closed `types` array. `timeout_ms`
-defaults to 5,000 and is limited to 1-9,000. It does not consume the fixed event
-ring and reports whether the caller's sequence predates retained history.
-
-`expressions.evaluate_batch` evaluates 1-32 expressions, bounded to 8,192 input
-bytes in aggregate, against one paused generation. Evaluation failure is reported
-per item; a debugger state change rejects the complete snapshot. `process.peb`
-returns only fixed architecture-known PEB fields. `context.arguments` returns 1-16
-raw ABI argument candidates and explicitly records the callee-entry assumption;
-it never changes the selected debugger thread.
-
-`debugger.run_to_address` is a mutation whose payload contains one closed
-address reference and optional integer `timeout_ms` (default 9,000; range
-100-20,000). Its successful result explicitly distinguishes target completion,
-intervening pause, process exit, and caller timeout. The native operation owns
-one operation-derived single-shot breakpoint and reports success only after the
-record is absent or exact cleanup is callback/postcondition confirmed.
-
-Every successful state-sensitive read includes `state_generation` inside its
-`result` (the outer IPC field is transport metadata and is not forwarded as MCP
-structured content). A callback during collection returns `BUSY` with
-`retryable: true`; no mixed-generation result is emitted. Pagination cursor
-generation must equal the checked result generation.
-
-`debugger.state` also returns bounded `diagnostic_code` and `next_actions` fields.
-The absent or exited state advertises `NO_DEBUGGEE` and the exact `debuggee.launch` tool;
-other connected states return `null` and an empty array. These hints are data only
-and never cause an IPC request or mutation by themselves.
+The plugin resolves addresses only inside its serialized debugger executor.
+Per-tool payload schemas and limits are defined by
+`crates/server/src/tools.rs` and enforced again at the native boundary.
 
 ## Response
 
@@ -137,19 +90,27 @@ Success:
   "request_id": "83db0d7d-df01-40ac-bdfc-87bac1e60813",
   "state_generation": 8,
   "status": "ok",
-  "result": {
-    "address": "0x140001000",
-    "location": {
-      "address": "0x140001000",
-      "module": "sample.exe",
-      "module_base": "0x140000000",
-      "rva": "0x1000",
-      "state_generation": 8
-    },
-    "bytes_written": 1
+  "result": {"bytes_written":1,"state_generation":8}
+}
+```
+
+Failure:
+
+```json
+{
+  "request_id": "83db0d7d-df01-40ac-bdfc-87bac1e60813",
+  "state_generation": 8,
+  "status": "error",
+  "error": {
+    "code": "BUSY",
+    "message": "debugger changed during the operation",
+    "retryable": true,
+    "details": {}
   }
 }
 ```
 
-Failure uses `status: "error"` and the stable structured error envelope. Internal
-OS errors and stack traces never cross this boundary.
+The internal `retryable` value is a native transient-error hint, not the public
+MCP replay decision. The sidecar combines it with operation type and ledger
+state to produce public `recoverable` and `safeToRetry` fields. Native messages
+and details are bounded; OS errors and stack traces do not cross the boundary.

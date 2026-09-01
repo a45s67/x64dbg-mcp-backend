@@ -108,6 +108,35 @@ $headers = @{ Authorization = 'Bearer <installed token>' }
 Invoke-RestMethod http://127.0.0.1:43164/health/ready -Headers $headers
 ```
 
+## Tool errors
+
+Starting with backend version 0.1.2, failed MCP tool results use one structured
+error contract. The former `retryable` field is removed; clients must read the
+two independent booleans:
+
+- `recoverable`: a changed state, input, configuration, or manual action can
+  allow the workflow to continue.
+- `safeToRetry`: replaying the same tool request cannot duplicate an unknown
+  mutation. A recoverable error can still have `safeToRetry=false`.
+
+Every error contains bounded `code`, `message`, `recoverable`, `safeToRetry`,
+and `details` fields. `details.outcome="unknown"` means the backend cannot prove
+whether a mutation took effect and the request must not be replayed blindly.
+When the backend has evidence-based guidance it may also return a bounded
+`suggestedAction`, `adviceSource="x64dbg-mcp-backend"`, and up to four
+`nextActions`. These are advisory and are never executed automatically.
+`nextActions` are omitted unless a precise safe MCP observation or
+reconciliation step is available. The checked-in schema is
+`contracts/mcp/tool-error.schema.json`. MCP protocol negotiation remains
+`2025-11-25`; this is a backend result-contract change, not an MCP transport
+version change.
+
+Successful calls keep exact machine-readable data in `structuredContent`.
+Their text `content` is a bounded human-readable summary: `memory.read` shows
+at most 128 bytes as a hexdump, execution and breakpoint tools summarize only
+observations returned by that same operation, and discovery tools report counts
+without duplicating their item arrays.
+
 ## Tools
 
 The catalog is intentionally bounded and contains no shell execution, file

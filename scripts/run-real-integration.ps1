@@ -1694,7 +1694,9 @@ try {
         } (15 + $attempt * 2)
         if ($wait.isError) {
             if ($wait.structuredContent.error.code -ne 'TIMEOUT' -or
-                !$wait.structuredContent.error.retryable) {
+                !$wait.structuredContent.error.recoverable -or
+                !$wait.structuredContent.error.safeToRetry -or
+                $null -ne $wait.structuredContent.error.retryable) {
                 throw "Unexpected wait_for_pause failure: $($wait.structuredContent | ConvertTo-Json -Compress -Depth 8)"
             }
             $stableRunning = $true
@@ -1856,7 +1858,16 @@ try {
         throw 'Typed DLL workflow did not stop at the loaded fixture entry breakpoint.'
     }
     $stop = Invoke-Tool 'debugger.stop' @{ operation_id = [Guid]::NewGuid().ToString() } 245
-    if (@(Get-ChildItem -LiteralPath $backendRoot -File -Filter 'DLLLoader*.exe').Count -ne 0) {
+    # CB_STOPDEBUG confirms debugger state before x64dbg finishes its own
+    # generated DLL-loader file cleanup. Observe that separate postcondition
+    # within a small bound instead of racing the callback.
+    $loaderCleanupDeadline = [DateTime]::UtcNow.AddSeconds(3)
+    do {
+        $retainedLoaders = @(Get-ChildItem -LiteralPath $backendRoot -File -Filter 'DLLLoader*.exe')
+        if ($retainedLoaders.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 25
+    } while ([DateTime]::UtcNow -lt $loaderCleanupDeadline)
+    if ($retainedLoaders.Count -ne 0) {
         throw 'x64dbg retained a generated DLL loader after debugger stop.'
     }
     $stoppedEvents = Invoke-Tool 'events.list' @{
@@ -2014,7 +2025,7 @@ try {
         resume_state = $resume.debuggee_state
         resume_generation = $resume.state_generation
         startup_pause_reason = if ($startupPause) { $startupPause.pause_reason.kind } else { $null }
-        wait_timeout_retryable = $true
+        wait_timeout_safe_to_retry = $true
         pause_reason = $pauseObservation.pause_reason.kind
         pause_generation = $pauseObservation.state_generation
         step_into_state = $stepInto.debuggee_state

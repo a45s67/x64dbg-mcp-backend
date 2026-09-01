@@ -2,6 +2,7 @@
 
 pub mod adapter;
 pub mod config;
+mod content;
 pub mod error;
 pub mod http_server;
 pub mod ipc;

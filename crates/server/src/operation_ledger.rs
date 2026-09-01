@@ -124,6 +124,30 @@ impl OperationLedger {
         self.set_status(operation_id, Status::Unknown)
     }
 
+    /// Removes an in-flight admission that was proven not to have crossed the
+    /// transport boundary. The fingerprint prevents abandoning another call's
+    /// operation if the identifier was concurrently reused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LedgerError::NotFound`] unless the exact operation is still
+    /// in flight, or [`LedgerError::Poisoned`] when the lock is poisoned.
+    pub fn abandon_unstarted(
+        &self,
+        operation_id: Uuid,
+        fingerprint: &str,
+    ) -> Result<(), LedgerError> {
+        let mut entries = self.entries.lock().map_err(|_| LedgerError::Poisoned)?;
+        let removable = entries.get(&operation_id).is_some_and(|entry| {
+            entry.fingerprint == fingerprint && matches!(entry.status, Status::InFlight)
+        });
+        if !removable {
+            return Err(LedgerError::NotFound);
+        }
+        entries.remove(&operation_id);
+        Ok(())
+    }
+
     fn set_status(&self, operation_id: Uuid, status: Status) -> Result<(), LedgerError> {
         let mut entries = self.entries.lock().map_err(|_| LedgerError::Poisoned)?;
         let entry = entries
@@ -204,5 +228,29 @@ mod tests {
             ledger.begin(Uuid::new_v4(), "two".to_owned()).unwrap(),
             Admission::Capacity
         );
+    }
+
+    #[test]
+    fn unstarted_admission_can_be_safely_released() {
+        let ledger = ledger(1);
+        let id = Uuid::new_v4();
+        let key = "not-dispatched".to_owned();
+        assert_eq!(ledger.begin(id, key.clone()).unwrap(), Admission::Started);
+        ledger.abandon_unstarted(id, &key).unwrap();
+        assert_eq!(ledger.begin(id, key).unwrap(), Admission::Started);
+    }
+
+    #[test]
+    fn unknown_admission_cannot_be_abandoned() {
+        let ledger = ledger(1);
+        let id = Uuid::new_v4();
+        let key = "dispatched".to_owned();
+        assert_eq!(ledger.begin(id, key.clone()).unwrap(), Admission::Started);
+        ledger.mark_unknown(id).unwrap();
+        assert_eq!(
+            ledger.abandon_unstarted(id, &key),
+            Err(LedgerError::NotFound)
+        );
+        assert_eq!(ledger.begin(id, key).unwrap(), Admission::Unknown);
     }
 }

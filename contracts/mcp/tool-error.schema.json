@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["code", "message", "recoverable", "safeToRetry", "details"],
+  "properties": {
+    "code": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "recoverable": {
+      "type": "boolean"
+    },
+    "safeToRetry": {
+      "type": "boolean"
+    },
+    "suggestedAction": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "adviceSource": {
+      "const": "x64dbg-mcp-backend"
+    },
+    "nextActions": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": ["code", "execution", "reason"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+          },
+          "execution": {
+            "type": "string",
+            "enum": ["suggested", "required_before_retry", "manual"]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "tool": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$"
+          },
+          "arguments": {
+            "type": "object",
+            "maxProperties": 32
+          },
+          "argumentsPatch": {
+            "type": "object",
+            "maxProperties": 16
+          },
+          "preserveArguments": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "details": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false
+}

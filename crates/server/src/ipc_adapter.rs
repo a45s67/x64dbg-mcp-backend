@@ -13,7 +13,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    adapter::{DebuggerAdapter, ToolError},
+    adapter::{ActionExecution, DebuggerAdapter, NextAction, ToolError},
     ipc::{IpcOutcome, IpcRequest, IpcResponse, read_frame, write_frame},
     operation_ledger::{Admission, OperationLedger, fingerprint},
     tools,
@@ -53,14 +53,28 @@ impl<S> IpcAdapter<S> {
         }
     }
 
-    fn transport_error(&self, code: &'static str, message: &'static str) -> ToolError {
+    fn transport_error(
+        &self,
+        code: &'static str,
+        message: &'static str,
+        mutation: bool,
+        details: Value,
+    ) -> ToolError {
         self.ready.store(false, Ordering::Release);
-        ToolError {
-            code,
-            message,
-            retryable: true,
-            details: json!({}),
+        let mut error = ToolError::new(code, message, code != "INTERNAL", !mutation, details);
+        if mutation && error.details.get("outcome").and_then(Value::as_str) == Some("unknown") {
+            error = error.with_guidance(
+                "Reconcile current debugger state before deciding whether to issue another mutation.",
+                vec![NextAction::tool(
+                    "REFRESH_DEBUGGER_STATE",
+                    ActionExecution::RequiredBeforeRetry,
+                    "Observe the current debugger state before another mutation.",
+                    "debugger.state",
+                    json!({}),
+                )],
+            );
         }
+        error
     }
 }
 
@@ -86,45 +100,73 @@ where
             None
         };
 
+        let mut admitted_key = None;
         if let Some(id) = operation_id {
-            let key = fingerprint(name, arguments).map_err(|_| ToolError {
-                code: "INVALID_ARGUMENT",
-                message: "tool arguments cannot be fingerprinted",
-                retryable: false,
-                details: json!({}),
+            let key = fingerprint(name, arguments).map_err(|_| {
+                ToolError::new(
+                    "INVALID_ARGUMENT",
+                    "tool arguments cannot be fingerprinted",
+                    false,
+                    false,
+                    json!({}),
+                )
             })?;
-            match self.ledger.begin(id, key).map_err(ledger_internal_error)? {
-                Admission::Started => {}
+            match self
+                .ledger
+                .begin(id, key.clone())
+                .map_err(ledger_internal_error)?
+            {
+                Admission::Started => admitted_key = Some(key),
                 Admission::Completed(value) => return decode_recorded(value),
                 Admission::InFlight => {
-                    return Err(ToolError {
-                        code: "BUSY",
-                        message: "operation is already in flight",
-                        retryable: true,
-                        details: json!({ "operation_id": id }),
-                    });
+                    return Err(ToolError::new(
+                        "BUSY",
+                        "operation is already in flight",
+                        true,
+                        true,
+                        json!({ "operation_id": id }),
+                    )
+                    .with_guidance(
+                        "Wait for the in-flight operation to finish, then retry with the same operation_id.",
+                        Vec::new(),
+                    ));
                 }
                 Admission::Unknown => return Err(unknown_outcome(id)),
                 Admission::Conflict => {
-                    return Err(ToolError {
-                        code: "OPERATION_ID_CONFLICT",
-                        message: "operation_id was already used with different arguments",
-                        retryable: false,
-                        details: json!({ "operation_id": id }),
-                    });
+                    return Err(ToolError::new(
+                        "OPERATION_ID_CONFLICT",
+                        "operation_id was already used with different arguments",
+                        true,
+                        false,
+                        json!({ "operation_id": id }),
+                    )
+                    .with_guidance(
+                        "Use the original arguments, or use a new operation_id only for a distinct intended mutation.",
+                        Vec::new(),
+                    ));
                 }
                 Admission::Capacity => {
-                    return Err(ToolError {
-                        code: "BUSY",
-                        message: "mutation operation ledger is full",
-                        retryable: true,
-                        details: json!({}),
-                    });
+                    return Err(ToolError::new(
+                        "BUSY",
+                        "mutation operation ledger is full",
+                        true,
+                        true,
+                        json!({}),
+                    )
+                    .with_guidance(
+                        "Wait for admitted mutations to complete before retrying this request.",
+                        Vec::new(),
+                    ));
                 }
             }
         }
 
         if !self.is_ready() {
+            if let (Some(id), Some(key)) = (operation_id, admitted_key.as_deref()) {
+                self.ledger
+                    .abandon_unstarted(id, key)
+                    .map_err(ledger_internal_error)?;
+            }
             return Err(ToolError::plugin_unavailable());
         }
 
@@ -146,7 +188,12 @@ where
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
                 self.mark_unknown(operation_id);
-                return Err(self.transport_error("PLUGIN_UNAVAILABLE", "IPC connection failed"));
+                return Err(self.transport_error(
+                    "PLUGIN_UNAVAILABLE",
+                    "IPC connection failed",
+                    mutation,
+                    unknown_transport_details(operation_id),
+                ));
             }
             Err(_) => {
                 self.mark_unknown(operation_id);
@@ -164,7 +211,12 @@ where
 
         if response.request_id != request_id {
             self.mark_unknown(operation_id);
-            return Err(self.transport_error("INTERNAL", "IPC response correlation mismatch"));
+            return Err(self.transport_error(
+                "INTERNAL",
+                "IPC response correlation mismatch",
+                mutation,
+                unknown_transport_details(operation_id),
+            ));
         }
 
         let outcome = match response.outcome {
@@ -179,12 +231,18 @@ where
                         "debugger_details": details
                     });
                 }
-                Err(ToolError {
-                    code: stable_error_code(&error.code),
-                    message: "debugger rejected the operation",
-                    retryable: error.retryable,
+                let code = stable_error_code(&error.code);
+                let recoverable = plugin_error_recoverable(code, error.retryable);
+                let safe_to_retry = !mutation && error.retryable;
+                let mut tool_error = ToolError::new(
+                    code,
+                    "debugger rejected the operation",
+                    recoverable,
+                    safe_to_retry,
                     details,
-                })
+                );
+                apply_plugin_guidance(&mut tool_error, name, arguments, mutation);
+                Err(tool_error)
             }
         };
         if let Some(id) = operation_id {
@@ -202,11 +260,14 @@ fn parse_operation_id(arguments: &Value) -> Result<Uuid, ToolError> {
         .get("operation_id")
         .and_then(Value::as_str)
         .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or(ToolError {
-            code: "INVALID_ARGUMENT",
-            message: "mutating tools require a valid UUID operation_id",
-            retryable: false,
-            details: json!({ "field": "operation_id" }),
+        .ok_or_else(|| {
+            ToolError::new(
+                "INVALID_ARGUMENT",
+                "mutating tools require a valid UUID operation_id",
+                true,
+                false,
+                json!({ "field": "operation_id" }),
+            )
         })
 }
 
@@ -247,22 +308,92 @@ fn stable_error_code(code: &str) -> &'static str {
     }
 }
 
-fn ledger_internal_error(_: crate::operation_ledger::LedgerError) -> ToolError {
-    ToolError {
-        code: "INTERNAL",
-        message: "mutation ledger failure",
-        retryable: false,
-        details: json!({}),
+fn plugin_error_recoverable(code: &str, native_retryable: bool) -> bool {
+    native_retryable || !matches!(code, "INTERNAL" | "UNSUPPORTED")
+}
+
+fn unknown_transport_details(operation_id: Option<Uuid>) -> Value {
+    operation_id.map_or_else(
+        || json!({}),
+        |id| json!({ "operation_id": id, "outcome": "unknown" }),
+    )
+}
+
+fn apply_plugin_guidance(error: &mut ToolError, name: &str, arguments: &Value, mutation: bool) {
+    let pif_launch = name == "debuggee.launch"
+        && arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.to_ascii_lowercase().ends_with(".pif"));
+    if error.code == "TIMEOUT" && pif_launch {
+        error.suggested_action = Some(
+            "Rename a hash-identical analysis copy to .exe, record its provenance, and try again."
+                .to_owned(),
+        );
+        return;
+    }
+    if mutation && error.details.get("outcome").and_then(Value::as_str) == Some("unknown") {
+        error.suggested_action = Some(
+            "Reconcile current debugger state before deciding whether to issue another mutation."
+                .to_owned(),
+        );
+        error.next_actions = vec![NextAction::tool(
+            "REFRESH_DEBUGGER_STATE",
+            ActionExecution::RequiredBeforeRetry,
+            "Observe the current debugger state before another mutation.",
+            "debugger.state",
+            json!({}),
+        )];
+        return;
+    }
+    if error.code == "STALE_CURSOR" {
+        error.suggested_action =
+            Some("Restart the bounded discovery query without the stale cursor.".to_owned());
+    } else if error.code == "NO_DEBUGGEE" {
+        error.suggested_action =
+            Some("Launch a binary or attach to a process before calling this tool.".to_owned());
+    } else if error.code == "INVALID_DEBUGGER_STATE" {
+        error.suggested_action = Some(
+            "Call debugger.state and satisfy the tool's required state before retrying.".to_owned(),
+        );
+        error.next_actions = vec![NextAction::tool(
+            "REFRESH_DEBUGGER_STATE",
+            ActionExecution::Suggested,
+            "Inspect the current debugger state before choosing the next operation.",
+            "debugger.state",
+            json!({}),
+        )];
     }
 }
 
+fn ledger_internal_error(_: crate::operation_ledger::LedgerError) -> ToolError {
+    ToolError::new(
+        "INTERNAL",
+        "mutation ledger failure",
+        false,
+        false,
+        json!({}),
+    )
+}
+
 fn unknown_outcome(operation_id: Uuid) -> ToolError {
-    ToolError {
-        code: "TIMEOUT",
-        message: "mutation outcome is unknown and will not be retried",
-        retryable: false,
-        details: json!({ "operation_id": operation_id, "outcome": "unknown" }),
-    }
+    ToolError::new(
+        "TIMEOUT",
+        "mutation outcome is unknown and will not be retried",
+        true,
+        false,
+        json!({ "operation_id": operation_id, "outcome": "unknown" }),
+    )
+    .with_guidance(
+        "Reconcile current debugger state before deciding whether to issue another mutation.",
+        vec![NextAction::tool(
+            "REFRESH_DEBUGGER_STATE",
+            ActionExecution::RequiredBeforeRetry,
+            "Observe the current debugger state before another mutation.",
+            "debugger.state",
+            json!({}),
+        )],
+    )
 }
 
 fn encode_recorded(outcome: &Result<Value, ToolError>) -> Value {
@@ -273,7 +404,10 @@ fn encode_recorded(outcome: &Result<Value, ToolError>) -> Value {
             "error": {
                 "code": error.code,
                 "message": error.message,
-                "retryable": error.retryable,
+                "recoverable": error.recoverable,
+                "safe_to_retry": error.safe_to_retry,
+                "suggested_action": error.suggested_action,
+                "next_actions": error.next_actions,
                 "details": error.details
             }
         }),
@@ -284,10 +418,17 @@ fn decode_recorded(value: Value) -> Result<Value, ToolError> {
     if value["ok"] == true {
         return Ok(value["result"].clone());
     }
+    let next_actions = serde_json::from_value(value["error"]["next_actions"].clone())
+        .unwrap_or_else(|_| Vec::new());
     Err(ToolError {
         code: stable_error_code(value["error"]["code"].as_str().unwrap_or("INTERNAL")),
         message: "replayed debugger operation result",
-        retryable: value["error"]["retryable"].as_bool().unwrap_or(false),
+        recoverable: value["error"]["recoverable"].as_bool().unwrap_or(false),
+        safe_to_retry: value["error"]["safe_to_retry"].as_bool().unwrap_or(false),
+        suggested_action: value["error"]["suggested_action"]
+            .as_str()
+            .map(str::to_owned),
+        next_actions,
         details: value["error"]["details"].clone(),
     })
 }
@@ -303,16 +444,26 @@ impl<S> IpcAdapter<S> {
         &self,
         code: &'static str,
         message: &'static str,
-        retryable: bool,
+        safe_to_retry: bool,
         details: Value,
     ) -> ToolError {
         self.ready.store(false, Ordering::Release);
-        ToolError {
-            code,
-            message,
-            retryable,
-            details,
+        let recoverable = code != "INTERNAL";
+        let mut error = ToolError::new(code, message, recoverable, safe_to_retry, details);
+        if !safe_to_retry && error.details.get("outcome").and_then(Value::as_str) == Some("unknown")
+        {
+            error = error.with_guidance(
+                "Reconcile current debugger state before deciding whether to issue another mutation.",
+                vec![NextAction::tool(
+                    "REFRESH_DEBUGGER_STATE",
+                    ActionExecution::RequiredBeforeRetry,
+                    "Observe the current debugger state before another mutation.",
+                    "debugger.state",
+                    json!({}),
+                )],
+            );
         }
+        error
     }
 }
 
@@ -400,7 +551,8 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(first.code, "TIMEOUT");
-        assert!(!first.retryable);
+        assert!(first.recoverable);
+        assert!(!first.safe_to_retry);
         assert!(!adapter.is_ready());
         let second = adapter
             .call("debugger.resume", &arguments)
@@ -422,12 +574,15 @@ mod tests {
         let adapter = IpcAdapter::established(
             client,
             Duration::from_millis(100),
-            Duration::from_millis(120),
+            Duration::from_millis(300),
         );
         let operation_id = Uuid::new_v4();
         let plugin_task = tokio::spawn(async move {
             let launch: IpcRequest = read_frame(&mut plugin).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(95)).await;
+            // The 300 ms transport budget gives the plugin 225 ms after the
+            // response reserve. Reply well inside that deadline so this test
+            // cannot race the sidecar's transport timeout on a busy runner.
+            tokio::time::sleep(Duration::from_millis(150)).await;
             write_frame(
                 &mut plugin,
                 &IpcResponse {
@@ -469,7 +624,8 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "TIMEOUT");
-        assert!(!error.retryable);
+        assert!(error.recoverable);
+        assert!(!error.safe_to_retry);
         assert_eq!(
             error.details["debugger_message"],
             "launch did not reach an actionable pause"

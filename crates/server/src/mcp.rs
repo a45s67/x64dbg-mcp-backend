@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    adapter::{DebuggerAdapter, ToolError},
-    tools,
+    adapter::{ActionExecution, DebuggerAdapter, NextAction, ToolError},
+    content, tools,
 };
 
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
@@ -120,7 +120,12 @@ async fn call_tool(
             ToolError {
                 code: "INVALID_ARGUMENT",
                 message: error.message,
-                retryable: false,
+                recoverable: true,
+                safe_to_retry: false,
+                suggested_action: Some(
+                    "Correct the reported field before calling the tool again.".to_owned(),
+                ),
+                next_actions: Vec::new(),
                 details: json!({ "field": error.field }),
             },
         ));
@@ -138,13 +143,23 @@ async fn call_tool(
                 ToolError {
                     code: "BACKEND_RESTARTED",
                     message: "backend instance changed; mutation was not dispatched",
-                    retryable: false,
+                    recoverable: true,
+                    safe_to_retry: false,
+                    suggested_action: Some(
+                        "Refresh debugger state and use its current instance_id before deciding whether to issue the mutation."
+                            .to_owned(),
+                    ),
+                    next_actions: vec![NextAction::tool(
+                        "REFRESH_DEBUGGER_STATE",
+                        ActionExecution::RequiredBeforeRetry,
+                        "Obtain the current backend identity before another mutation.",
+                        "debugger.state",
+                        json!({}),
+                    )],
                     details: json!({
-                        "outcome": "unknown",
+                        "outcome": "not_started",
                         "expected_instance_id": supplied,
-                        "current_instance_id": instance_id,
-                        "diagnostic_code": "REFRESH_BACKEND_STATE",
-                        "next_actions": [{ "code": "CALL_DEBUGGER_STATE", "tool": "debugger.state" }]
+                        "current_instance_id": instance_id
                     }),
                 },
             ));
@@ -166,7 +181,13 @@ async fn call_tool(
                 ToolError {
                     code: "BACKEND_IDENTITY_MISMATCH",
                     message: "plugin and sidecar instance identities do not match",
-                    retryable: false,
+                    recoverable: true,
+                    safe_to_retry: false,
+                    suggested_action: Some(
+                        "Restart the debugger host so the plugin and sidecar establish one identity."
+                            .to_owned(),
+                    ),
+                    next_actions: Vec::new(),
                     details: json!({ "instance_id": instance_id }),
                 },
             )
@@ -177,29 +198,7 @@ async fn call_tool(
 }
 
 fn tool_success(name: &str, value: Value) -> Value {
-    let text = if name == "scyllahide.profile" {
-        let profile = value
-            .get("configured_profile")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        if value.get("restart_required").and_then(Value::as_bool) == Some(true) {
-            format!("ScyllaHide profile is {profile}; restart x64dbg before continuing analysis.")
-        } else {
-            format!("ScyllaHide profile is {profile}; no restart is required.")
-        }
-    } else if let Some(items) = value.get("items").and_then(Value::as_array) {
-        let next_page = value
-            .get("next_cursor")
-            .is_some_and(|cursor| !cursor.is_null());
-        format!(
-            "{name} completed: {} items; next_page={next_page}.",
-            items.len()
-        )
-    } else if let Some(state) = value.get("debuggee_state").and_then(Value::as_str) {
-        format!("{name} completed: debuggee_state={state}.")
-    } else {
-        format!("{name} completed.")
-    };
+    let text = content::success_summary(name, &value);
     json!({
         "content": [{ "type": "text", "text": text }],
         "structuredContent": value,
@@ -213,29 +212,89 @@ fn tool_failure(name: &str, error: ToolError) -> Value {
         .get("debugger_message")
         .and_then(Value::as_str)
         .filter(|message| message.len() <= 512 && !message.chars().any(char::is_control));
-    let text = debugger_message.map_or_else(
+    let mut text = debugger_message.map_or_else(
         || {
             format!(
-                "{name} failed: {}: {}; retryable={}.",
-                error.code, error.message, error.retryable
+                "{name} failed: {}: {}; recoverable={}; safeToRetry={}.",
+                error.code, error.message, error.recoverable, error.safe_to_retry
             )
         },
         |message| {
             format!(
-                "{name} failed: {}: {message}; retryable={}.",
-                error.code, error.retryable
+                "{name} failed: {}: {message}; recoverable={}; safeToRetry={}.",
+                error.code, error.recoverable, error.safe_to_retry
             )
         },
     );
-    let value = json!({
-        "ok": false,
-        "error": {
-            "code": error.code,
-            "message": error.message,
-            "retryable": error.retryable,
-            "details": error.details
-        }
+    let suggested_action = error.suggested_action.filter(|value| {
+        !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
     });
+    let next_actions: Vec<_> = error
+        .next_actions
+        .into_iter()
+        .filter(NextAction::is_bounded)
+        .take(4)
+        .collect();
+    let has_guidance = suggested_action.is_some() || !next_actions.is_empty();
+    if let Some(state) = error
+        .details
+        .get("current_state")
+        .or_else(|| error.details.get("debuggee_state"))
+        .and_then(Value::as_str)
+        .filter(|state| {
+            !state.is_empty() && state.len() <= 64 && !state.chars().any(char::is_control)
+        })
+    {
+        text.push_str("\nCurrent state: ");
+        text.push_str(state);
+        text.push('.');
+    }
+    let mut displayed_actions = 0_usize;
+    if let Some(action) = suggested_action.as_deref() {
+        text.push_str("\nNext: ");
+        text.push_str(action);
+        displayed_actions += 1;
+    }
+    for action in next_actions
+        .iter()
+        .take(2_usize.saturating_sub(displayed_actions))
+    {
+        text.push_str("\nNext (");
+        text.push_str(&action.code);
+        text.push_str("): ");
+        if let Some(tool) = action.tool.as_deref() {
+            text.push_str("call ");
+            text.push_str(tool);
+            text.push_str(" — ");
+        }
+        text.push_str(&action.reason);
+    }
+    let mut error_value = json!({
+        "code": error.code,
+        "message": error.message,
+        "recoverable": error.recoverable,
+        "safeToRetry": error.safe_to_retry,
+        "details": error.details
+    });
+    let error_object = error_value
+        .as_object_mut()
+        .expect("tool error serialization is an object");
+    if let Some(suggested_action) = suggested_action {
+        error_object.insert(
+            "suggestedAction".to_owned(),
+            Value::String(suggested_action),
+        );
+    }
+    if !next_actions.is_empty() {
+        error_object.insert("nextActions".to_owned(), json!(next_actions));
+    }
+    if has_guidance {
+        error_object.insert(
+            "adviceSource".to_owned(),
+            Value::String("x64dbg-mcp-backend".to_owned()),
+        );
+    }
+    let value = json!({ "ok": false, "error": error_value });
     json!({
         "content": [{ "type": "text", "text": text }],
         "structuredContent": value,
@@ -274,7 +333,9 @@ mod contract_tests {
     use serde_json::{Value, json};
 
     use super::{handle, tool_failure};
-    use crate::adapter::{DebuggerAdapter, DisconnectedAdapter, ToolError};
+    use crate::adapter::{
+        ActionExecution, DebuggerAdapter, DisconnectedAdapter, NextAction, ToolError,
+    };
 
     fn instance_id() -> uuid::Uuid {
         uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap()
@@ -282,6 +343,11 @@ mod contract_tests {
 
     struct RecordingAdapter {
         calls: AtomicUsize,
+    }
+
+    struct MemoryRecordingAdapter {
+        calls: AtomicUsize,
+        result: Value,
     }
 
     #[async_trait]
@@ -295,6 +361,19 @@ mod contract_tests {
             assert_eq!(name, "debugger.resume");
             assert!(arguments.get("instance_id").is_none());
             Ok(json!({"debuggee_state":"running","state_generation":8}))
+        }
+    }
+
+    #[async_trait]
+    impl DebuggerAdapter for MemoryRecordingAdapter {
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        async fn call(&self, name: &str, _arguments: &Value) -> Result<Value, ToolError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(name, "memory.read");
+            Ok(self.result.clone())
         }
     }
 
@@ -364,13 +443,33 @@ mod contract_tests {
     }
 
     #[test]
+    fn checked_in_error_schema_has_one_non_legacy_contract() {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../contracts/mcp/tool-error.schema.json"
+        ))
+        .unwrap();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("recoverable")));
+        assert!(required.contains(&json!("safeToRetry")));
+        assert!(schema["properties"].get("retryable").is_none());
+        assert_eq!(schema["properties"]["nextActions"]["maxItems"], 4);
+        assert_eq!(
+            schema["properties"]["adviceSource"]["const"],
+            "x64dbg-mcp-backend"
+        );
+    }
+
+    #[test]
     fn bounded_debugger_diagnostic_is_included_in_content() {
         let result = tool_failure(
             "debuggee.launch",
             ToolError {
                 code: "TIMEOUT",
                 message: "debugger rejected the operation",
-                retryable: false,
+                recoverable: true,
+                safe_to_retry: false,
+                suggested_action: Some("Rename the analysis copy and try again.".to_owned()),
+                next_actions: Vec::new(),
                 details: json!({
                     "debugger_message": "x32dbg handles .PIF with ResolveShortcut before CreateProcessW; rename and try again",
                     "outcome": "unknown"
@@ -383,6 +482,98 @@ mod contract_tests {
                 .unwrap()
                 .contains("ResolveShortcut before CreateProcessW")
         );
+        assert_eq!(result["structuredContent"]["error"]["recoverable"], true);
+        assert_eq!(result["structuredContent"]["error"]["safeToRetry"], false);
+        assert!(
+            result["structuredContent"]["error"]
+                .get("retryable")
+                .is_none()
+        );
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Next: Rename the analysis copy and try again.")
+        );
+    }
+
+    #[test]
+    fn invalid_or_oversized_guidance_is_omitted_at_the_serialization_boundary() {
+        let mut action = NextAction::tool(
+            "REFRESH_DEBUGGER_STATE",
+            ActionExecution::Suggested,
+            "Inspect state",
+            "debugger.state",
+            json!({}),
+        );
+        action.reason = "bad\nreason".to_owned();
+        let result = tool_failure(
+            "debugger.resume",
+            ToolError {
+                code: "BUSY",
+                message: "debugger is busy",
+                recoverable: true,
+                safe_to_retry: true,
+                suggested_action: Some("x".repeat(513)),
+                next_actions: vec![action],
+                details: json!({}),
+            },
+        );
+        let error = &result["structuredContent"]["error"];
+        assert!(error.get("suggestedAction").is_none());
+        assert!(error.get("nextActions").is_none());
+        assert!(error.get("adviceSource").is_none());
+        assert!(
+            !result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(&"x".repeat(513))
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_read_has_readable_content_and_unchanged_structured_result() {
+        let exact = json!({
+            "address":"0x1e56090",
+            "location":{
+                "address":"0x1e56090",
+                "module":"checksum.exe",
+                "module_base":"0x1e40000",
+                "rva":"0x16090",
+                "state_generation":42
+            },
+            "data_hex":"347f25a55f0d85dc650f6bbd24ad2f2a4142434400010203",
+            "bytes_read":24,
+            "complete":true,
+            "state_generation":42
+        });
+        let adapter = MemoryRecordingAdapter {
+            calls: AtomicUsize::new(0),
+            result: exact.clone(),
+        };
+        let request = json!({
+            "jsonrpc":"2.0",
+            "id":5,
+            "method":"tools/call",
+            "params":{
+                "name":"memory.read",
+                "arguments":{"address":"0x1e56090","length":24}
+            }
+        });
+        let response = handle(
+            &serde_json::to_vec(&request).unwrap(),
+            &adapter,
+            instance_id(),
+        )
+        .await;
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["result"]["structuredContent"], exact);
+        let content = value["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(content.starts_with("24 bytes at checksum.exe+0x16090 (0x1e56090)"));
+        assert!(content.contains("34 7F 25 A5 5F 0D 85 DC  65 0F 6B BD 24 AD 2F 2A"));
+        assert!(!content.contains("347f25a55f0d85dc650f6bbd24ad2f2a"));
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -417,12 +608,30 @@ mod contract_tests {
             "BACKEND_RESTARTED"
         );
         assert_eq!(
-            value["result"]["structuredContent"]["error"]["retryable"],
+            value["result"]["structuredContent"]["error"]["recoverable"],
+            true
+        );
+        assert_eq!(
+            value["result"]["structuredContent"]["error"]["safeToRetry"],
             false
+        );
+        assert!(
+            value["result"]["structuredContent"]["error"]
+                .get("retryable")
+                .is_none()
         );
         assert_eq!(
             value["result"]["structuredContent"]["error"]["details"]["outcome"],
-            "unknown"
+            "not_started"
+        );
+        assert!(
+            value["result"]["structuredContent"]["error"]["details"]
+                .get("diagnostic_code")
+                .is_none()
+        );
+        assert_eq!(
+            value["result"]["structuredContent"]["error"]["nextActions"][0]["tool"],
+            "debugger.state"
         );
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
     }

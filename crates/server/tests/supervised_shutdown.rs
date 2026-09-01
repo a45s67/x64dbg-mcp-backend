@@ -278,7 +278,9 @@ async fn replacement_sidecar_rejects_stale_mutation_without_ipc_dispatch() {
     let response = String::from_utf8(response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200"));
     assert!(response.contains("BACKEND_RESTARTED"));
-    assert!(response.contains("REFRESH_BACKEND_STATE"));
+    assert!(response.contains("REFRESH_DEBUGGER_STATE"));
+    assert!(response.contains("\"safeToRetry\":false"));
+    assert!(!response.contains("\"retryable\""));
     assert!(
         tokio::time::timeout(
             Duration::from_millis(150),

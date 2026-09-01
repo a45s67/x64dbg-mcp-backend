@@ -5,7 +5,7 @@
     "content": [
       {
         "type": "text",
-        "text": "debugger.state failed: PLUGIN_UNAVAILABLE: x64dbg plugin is not connected; retryable=true."
+        "text": "debugger.state failed: PLUGIN_UNAVAILABLE: x64dbg plugin is not connected; recoverable=true; safeToRetry=true.\nNext: Start the matching x32dbg or x64dbg host and wait for its plugin to connect."
       }
     ],
     "structuredContent": {
@@ -13,7 +13,10 @@
       "error": {
         "code": "PLUGIN_UNAVAILABLE",
         "message": "x64dbg plugin is not connected",
-        "retryable": true,
+        "recoverable": true,
+        "safeToRetry": true,
+        "suggestedAction": "Start the matching x32dbg or x64dbg host and wait for its plugin to connect.",
+        "adviceSource": "x64dbg-mcp-backend",
         "details": {}
       }
     },

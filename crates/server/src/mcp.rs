@@ -13,9 +13,15 @@ use crate::{
 };
 
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
+pub const CODEX_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_JSON_DEPTH: usize = 32;
 const MAX_JSON_STRING_BYTES: usize = 8_192;
 const MAX_JSON_CONTAINER_ITEMS: usize = 512;
+
+#[must_use]
+pub fn is_supported_protocol_version(version: &str) -> bool {
+    version == PROTOCOL_VERSION || version == CODEX_PROTOCOL_VERSION
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -304,11 +310,12 @@ fn tool_failure(name: &str, error: ToolError) -> Value {
 
 fn initialize(params: &Value, instance_id: Uuid) -> Result<Value, (i32, &'static str)> {
     let requested = params.get("protocolVersion").and_then(Value::as_str);
-    if requested != Some(PROTOCOL_VERSION) {
+    if !requested.is_some_and(is_supported_protocol_version) {
         return Err((-32602, "Unsupported protocol version"));
     }
+    let negotiated = requested.expect("supported protocol version is present");
     Ok(json!({
-        "protocolVersion": PROTOCOL_VERSION,
+        "protocolVersion": negotiated,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "x64dbg-mcp-backend", "version": env!("CARGO_PKG_VERSION") },
         "_meta": { "x64dbg-mcp-backend/instance_id": instance_id }
@@ -332,7 +339,7 @@ mod contract_tests {
     use axum::body::to_bytes;
     use serde_json::{Value, json};
 
-    use super::{handle, tool_failure};
+    use super::{CODEX_PROTOCOL_VERSION, handle, tool_failure};
     use crate::adapter::{
         ActionExecution, DebuggerAdapter, DisconnectedAdapter, NextAction, ToolError,
     };
@@ -431,6 +438,29 @@ mod contract_tests {
             include_str!("../../../contracts/mcp/initialize.response.json"),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn initialize_negotiates_codex_protocol_version() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": CODEX_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "codex", "version": "test" }
+            }
+        });
+        let response = handle(
+            &serde_json::to_vec(&request).unwrap(),
+            &DisconnectedAdapter,
+            instance_id(),
+        )
+        .await;
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["result"]["protocolVersion"], CODEX_PROTOCOL_VERSION);
     }
 
     #[tokio::test]

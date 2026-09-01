@@ -58,8 +58,10 @@ or environment variables, and no separate Codex skill is required.
 ## Dynamic Analysis Gateway
 
 Register x32dbg and x64dbg as separate Streamable HTTP backends using MCP
-protocol `2025-11-25`, endpoint `/mcp`, and the installed bearer token. The
-Gateway may add its dotted namespace; backend tool names remain local.
+protocol `2025-11-25` or `2025-06-18`, endpoint `/mcp`, and the installed bearer
+token. The server echoes either supported version during initialization and
+accepts it in the subsequent `MCP-Protocol-Version` header. The Gateway may add
+its dotted namespace; backend tool names remain local.
 
 An optional lifecycle command can be stored in each existing backend entry:
 

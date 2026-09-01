@@ -257,11 +257,9 @@ fn set_json_utf8(response: &mut Response) {
 }
 
 fn require_protocol_version(headers: &HeaderMap) -> Result<(), HttpError> {
-    let valid = headers.get("mcp-protocol-version").is_none_or(|value| {
-        value
-            .to_str()
-            .is_ok_and(|version| version == mcp::PROTOCOL_VERSION)
-    });
+    let valid = headers
+        .get("mcp-protocol-version")
+        .is_none_or(|value| value.to_str().is_ok_and(mcp::is_supported_protocol_version));
     valid.then_some(()).ok_or_else(|| {
         HttpError::new(
             StatusCode::BAD_REQUEST,
@@ -387,6 +385,7 @@ mod tests {
     use crate::{
         adapter::{FakeAbsentAdapter, FakeAdapter, FakeMismatchedAdapter},
         config::Config,
+        mcp,
     };
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -610,6 +609,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn codex_protocol_header_is_accepted_after_initialize() {
+        let response = app()
+            .oneshot(
+                Request::post("/mcp")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT, "application/json, text/event-stream")
+                    .header("mcp-protocol-version", mcp::CODEX_PROTOCOL_VERSION)
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 63);
     }
 
     #[tokio::test]

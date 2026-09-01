@@ -1,4 +1,6 @@
 use std::{
+    collections::VecDeque,
+    sync::Mutex as StdMutex,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -14,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     adapter::{ActionExecution, DebuggerAdapter, NextAction, ToolError},
-    ipc::{IpcOutcome, IpcRequest, IpcResponse, read_frame, write_frame},
+    ipc::{FrameError, IpcOutcome, IpcRequest, IpcResponse, read_frame, write_frame},
     operation_ledger::{Admission, OperationLedger, fingerprint},
     tools,
 };
@@ -25,6 +27,7 @@ const LEDGER_TTL: Duration = Duration::from_mins(10);
 // the sidecar to read the response. Giving both layers the same deadline races
 // a valid plugin TIMEOUT response against the transport timeout.
 const MAX_IPC_RESPONSE_GRACE: Duration = Duration::from_secs(1);
+const ABANDONED_REQUEST_CAPACITY: usize = 64;
 
 pub struct IpcAdapter<S> {
     stream: Mutex<S>,
@@ -32,6 +35,7 @@ pub struct IpcAdapter<S> {
     read_timeout: Duration,
     mutation_timeout: Duration,
     ledger: OperationLedger,
+    abandoned_request_ids: StdMutex<VecDeque<Uuid>>,
 }
 
 impl<S> IpcAdapter<S> {
@@ -50,7 +54,28 @@ impl<S> IpcAdapter<S> {
             mutation_timeout,
             ledger: OperationLedger::new(LEDGER_CAPACITY, LEDGER_TTL)
                 .expect("ledger constants are non-zero"),
+            abandoned_request_ids: StdMutex::new(VecDeque::new()),
         }
+    }
+
+    fn remember_abandoned_request(&self, request_id: Uuid) {
+        if let Ok(mut ids) = self.abandoned_request_ids.lock() {
+            if ids.len() == ABANDONED_REQUEST_CAPACITY {
+                ids.pop_front();
+            }
+            ids.push_back(request_id);
+        }
+    }
+
+    fn consume_abandoned_response(&self, request_id: Uuid) -> bool {
+        let Ok(mut ids) = self.abandoned_request_ids.lock() else {
+            return false;
+        };
+        let Some(index) = ids.iter().position(|candidate| *candidate == request_id) else {
+            return false;
+        };
+        ids.remove(index);
+        true
     }
 
     fn transport_error(
@@ -179,10 +204,18 @@ where
             payload: arguments.clone(),
         };
 
+        let mut request_guard = AbandonedRequestGuard::new(self, request_id);
         let exchange = async {
             let mut stream = self.stream.lock().await;
             write_frame(&mut *stream, &request).await?;
-            read_frame::<_, IpcResponse>(&mut *stream).await
+            loop {
+                let response = read_frame::<_, IpcResponse>(&mut *stream).await?;
+                if response.request_id == request_id
+                    || !self.consume_abandoned_response(response.request_id)
+                {
+                    break Ok::<IpcResponse, FrameError>(response);
+                }
+            }
         };
         let response = match timeout(operation_timeout, exchange).await {
             Ok(Ok(response)) => response,
@@ -218,6 +251,7 @@ where
                 unknown_transport_details(operation_id),
             ));
         }
+        request_guard.disarm();
 
         let outcome = match response.outcome {
             IpcOutcome::Ok { result } => Ok(result),
@@ -252,6 +286,34 @@ where
                 .map_err(ledger_internal_error)?;
         }
         outcome
+    }
+}
+
+struct AbandonedRequestGuard<'a, S> {
+    adapter: &'a IpcAdapter<S>,
+    request_id: Uuid,
+    armed: bool,
+}
+
+impl<'a, S> AbandonedRequestGuard<'a, S> {
+    fn new(adapter: &'a IpcAdapter<S>, request_id: Uuid) -> Self {
+        Self {
+            adapter,
+            request_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl<S> Drop for AbandonedRequestGuard<'_, S> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.adapter.remember_abandoned_request(self.request_id);
+        }
     }
 }
 
@@ -529,6 +591,60 @@ mod tests {
         plugin_task.await.unwrap();
         assert_eq!(result["debuggee_state"], "paused");
         assert!(adapter.is_ready());
+    }
+
+    #[tokio::test]
+    async fn cancelled_call_stale_response_is_drained_before_next_response() {
+        let (client, mut plugin) = tokio::io::duplex(4096);
+        let adapter = Arc::new(IpcAdapter::established(
+            client,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        ));
+        let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
+        let plugin_task = tokio::spawn(async move {
+            let cancelled: IpcRequest = read_frame(&mut plugin).await.unwrap();
+            request_seen_tx.send(()).unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            write_frame(
+                &mut plugin,
+                &IpcResponse {
+                    request_id: cancelled.request_id,
+                    state_generation: 1,
+                    outcome: IpcOutcome::Ok {
+                        result: json!({"debuggee_state":"running"}),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+            let current: IpcRequest = read_frame(&mut plugin).await.unwrap();
+            write_frame(
+                &mut plugin,
+                &IpcResponse {
+                    request_id: current.request_id,
+                    state_generation: 2,
+                    outcome: IpcOutcome::Ok {
+                        result: json!({"debuggee_state":"paused"}),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        let cancelled_adapter = Arc::clone(&adapter);
+        let cancelled_call =
+            tokio::spawn(async move { cancelled_adapter.call("debugger.state", &json!({})).await });
+        request_seen_rx.await.unwrap();
+        cancelled_call.abort();
+        assert!(cancelled_call.await.unwrap_err().is_cancelled());
+
+        let result = adapter.call("debugger.state", &json!({})).await.unwrap();
+        assert_eq!(result["debuggee_state"], "paused");
+        assert!(adapter.is_ready());
+        plugin_task.await.unwrap();
     }
 
     #[tokio::test]

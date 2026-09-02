@@ -78,6 +78,12 @@ identity must therefore be derived from `DbgGetThreadList().CurrentThread` and v
 `DbgGetThreadHandle()`. Comparing `switchthread` against `DbgGetThreadId()` rejects a successful
 selection whenever the requested thread differs from the last debug-event thread.
 
+Selection and stepping must also remain in one debugger-executor turn. A synchronous
+`switchthread <tid>, quiet` followed by queued `sti` or `sto` permits another debug-event update to
+replace `hActiveThread` before the queued command executes. The backend submits the single
+run-state step with `DbgCmdExecDirect` immediately after verifying the selected handle, then still
+requires a callback whose TID matches the requested thread.
+
 ## Direct pause interruption
 
 Submitting the textual `pause` command through x64dbg's command queue is not a reliable way to

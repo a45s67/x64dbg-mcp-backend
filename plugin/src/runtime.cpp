@@ -4828,6 +4828,8 @@ void Runtime::Worker() noexcept {
                         }
                     }
                     const std::uint64_t before = generation_.load();
+                    const bool isStep = parsed->method == "debugger.step_into" ||
+                                        parsed->method == "debugger.step_over";
                     bool submitted = false;
                     if (directPause) {
                         if (pauseInterruptPending_.exchange(true)) {
@@ -4840,6 +4842,12 @@ void Runtime::Worker() noexcept {
                                     processHandle != INVALID_HANDLE_VALUE &&
                                     DebugBreakProcess(processHandle) != FALSE;
                         if (!submitted) pauseInterruptPending_.store(false);
+                    } else if (isStep) {
+                        // Keep the verified hActiveThread selection and the one
+                        // run-state mutation in the same executor turn. Queuing
+                        // sti/sto permits a later debug-event update to restore a
+                        // different active thread before the command executes.
+                        submitted = DbgCmdExecDirect(command);
                     } else {
                         submitted = DbgCmdExec(command);
                     }
@@ -4850,8 +4858,6 @@ void Runtime::Worker() noexcept {
                                                  : "debugger command queue rejected the operation", true,
                                              false);
                     }
-                    const bool isStep = parsed->method == "debugger.step_into" ||
-                                        parsed->method == "debugger.step_over";
                     const bool outcomeConfirmed =
                         isStep ? WaitForPauseReason(PauseReasonKind::step, before, requestDeadline)
                         : directPause

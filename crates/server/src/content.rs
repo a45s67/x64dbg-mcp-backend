@@ -162,6 +162,7 @@ fn is_execution_tool(name: &str) -> bool {
     matches!(
         name,
         "debugger.resume"
+            | "debugger.continue_exception"
             | "debugger.pause"
             | "debugger.step_into"
             | "debugger.step_over"

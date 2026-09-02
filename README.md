@@ -125,7 +125,7 @@ executes them automatically. The schema is
 
 - Lifecycle: `debugger.state`, `debuggee.launch`, `debuggee.launch_dll`,
   `debuggee.attach`, `debuggee.detach`, `debugger.stop`.
-- Execution: `debugger.pause`, `debugger.resume`, `debugger.step_into`,
+- Execution: `debugger.pause`, `debugger.resume`, `debugger.continue_exception`, `debugger.step_into`,
   `debugger.step_over`, `debugger.step_out`, `debugger.run_to_address`,
   `debugger.wait_for_pause`, `events.wait`.
 - Context: `debugger.snapshot`, `events.list`, `context.arguments`,

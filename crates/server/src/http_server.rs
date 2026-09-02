@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 63);
+        assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 64);
     }
 
     #[tokio::test]
@@ -663,7 +663,7 @@ mod tests {
         let value =
             mcp_request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#).await;
         let tools = value["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 63);
+        assert_eq!(tools.len(), 64);
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.state"));
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.snapshot"));
         assert!(tools.iter().any(|tool| tool["name"] == "trace.start"));

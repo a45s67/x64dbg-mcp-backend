@@ -157,6 +157,12 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
         }
         "debugger.pause" | "debugger.resume" | "debugger.step_into" | "debugger.step_over"
         | "debugger.step_out" | "debugger.stop" | "debuggee.detach" => operation(object, &[]),
+        "debugger.continue_exception" => {
+            exact_keys(object, &["operation_id", "instance_id", "disposition"], &[])?;
+            validate_operation_id(object)?;
+            validate_instance_id(object)?;
+            one_of(object, "disposition", &["handled", "not_handled"])
+        }
         "debuggee.launch" => {
             if !object.contains_key("operation_id") {
                 return Err(invalid("operation_id", "must be a UUID"));
@@ -1199,6 +1205,15 @@ fn build_catalog() -> Vec<Value> {
             "debugger.resume",
             "Resume a paused debuggee. Do not blindly retry an ambiguous result.",
             operation_schema(vec![]),
+            false,
+        ),
+        mutation_tool(
+            "debugger.continue_exception",
+            "Continue only from a confirmed exception pause. handled swallows the current exception; not_handled passes first-chance exceptions to the debuggee.",
+            operation_schema(vec![(
+                "disposition",
+                json!({"type":"string","enum":["handled","not_handled"]}),
+            )]),
             false,
         ),
         mutation_tool(
@@ -2261,7 +2276,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 63);
+        assert_eq!(catalog().len(), 64);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -3002,6 +3017,28 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(error.field, "instance_id");
+        }
+    }
+
+    #[test]
+    fn exception_continuation_accepts_only_typed_dispositions() {
+        let operation_id = "83db0d7d-df01-40ac-bdfc-87bac1e60813";
+        for disposition in ["handled", "not_handled"] {
+            assert!(
+                validate_arguments(
+                    "debugger.continue_exception",
+                    &json!({"operation_id":operation_id,"disposition":disposition})
+                )
+                .is_ok()
+            );
+        }
+        for disposition in ["run", "pass", "swallow", ""] {
+            let error = validate_arguments(
+                "debugger.continue_exception",
+                &json!({"operation_id":operation_id,"disposition":disposition}),
+            )
+            .unwrap_err();
+            assert_eq!(error.field, "disposition");
         }
     }
 

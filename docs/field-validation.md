@@ -41,9 +41,10 @@ This observation does not currently require a server contract change. Runtime ac
 nevertheless cover attach, resume, event polling, and a hardware breakpoint after a non-transient
 pause so that a future lifecycle change does not silently regress the workflow.
 
-## Pending command semantics
+## Typed exception continuation
 
-The backend has no explicit primitive for choosing exception disposition. Analysis that must pass
-a first-chance exception to the debuggee still requires an x64dbg command equivalent to `erun` or
-a future typed exception-continuation tool. A normal resume must not be assumed to have that
-semantic.
+`debugger.continue_exception` is a closed, typed mutation that is accepted only at a confirmed
+exception pause. `disposition=handled` maps to x64dbg `serun` and swallows the current exception;
+`disposition=not_handled` is accepted only for a first-chance exception and maps to `erun`, passing
+first-chance exceptions to the debuggee. A normal `debugger.resume` must not be assumed to have
+either semantic.

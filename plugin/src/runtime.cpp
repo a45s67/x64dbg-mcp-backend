@@ -210,10 +210,12 @@ struct Request {
     std::string scyllaAction;
     std::string scyllaProfile;
     std::string expectedConfigGeneration;
+    std::string exceptionDisposition;
 };
 
 bool IsMutation(const std::string_view method) {
     return method == "debugger.pause" || method == "debugger.resume" ||
+           method == "debugger.continue_exception" ||
            method == "debugger.step_into" || method == "debugger.step_over" ||
            method == "debugger.step_out" || method == "debugger.run_to_address" ||
            method == "registers.write" ||
@@ -601,6 +603,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::string scyllaAction;
     std::string scyllaProfile;
     std::string expectedConfigGeneration;
+    std::string exceptionDisposition;
     if (methodValue == "scyllahide.profile") {
         json_t* action = json_object_get(payload, "action");
         if (!json_is_string(action)) return std::nullopt;
@@ -1357,6 +1360,18 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         if (timeout != nullptr) {
             runToTimeoutMs = static_cast<std::size_t>(json_integer_value(timeout));
         }
+    } else if (methodValue == "debugger.continue_exception") {
+        json_t* disposition = json_object_get(payload, "disposition");
+        if (json_object_size(payload) != 2U ||
+            !json_is_string(json_object_get(payload, "operation_id")) ||
+            !json_is_string(disposition)) {
+            return std::nullopt;
+        }
+        exceptionDisposition.assign(json_string_value(disposition),
+                                    json_string_length(disposition));
+        if (exceptionDisposition != "handled" && exceptionDisposition != "not_handled") {
+            return std::nullopt;
+        }
     } else if (methodValue == "debugger.pause" || methodValue == "debugger.resume" ||
                methodValue == "debugger.step_into" || methodValue == "debugger.step_over" ||
                methodValue == "debugger.step_out" || methodValue == "debugger.stop") {
@@ -1624,7 +1639,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    traceTimeoutMs, traceCursorInvalid, std::move(expressions),
                    std::move(callingConvention), argumentCount,
                    std::move(scyllaAction), std::move(scyllaProfile),
-                   std::move(expectedConfigGeneration)};
+                   std::move(expectedConfigGeneration), std::move(exceptionDisposition)};
 }
 
 bool IsCanonicalUuid(const std::string_view value) {
@@ -4599,6 +4614,7 @@ void Runtime::Worker() noexcept {
                            std::to_string(confirmed) + "}}";
                 }
                 if (parsed->method == "debugger.pause" || parsed->method == "debugger.resume" ||
+                    parsed->method == "debugger.continue_exception" ||
                     parsed->method == "debugger.step_into" ||
                     parsed->method == "debugger.step_over" || parsed->method == "debugger.stop") {
                     const DebuggeeState state = debuggeeState_.load();
@@ -4613,6 +4629,19 @@ void Runtime::Worker() noexcept {
                         command = "run";
                         expected = DebuggeeState::running;
                         valid = state == DebuggeeState::paused;
+                    } else if (parsed->method == "debugger.continue_exception") {
+                        PauseObservation pause;
+                        {
+                            std::lock_guard lock(stateMutex_);
+                            pause = latestPause_;
+                        }
+                        command = parsed->exceptionDisposition == "handled" ? "serun" : "erun";
+                        expected = DebuggeeState::running;
+                        valid = state == DebuggeeState::paused &&
+                                pause.kind == PauseReasonKind::exception &&
+                                pause.hasExceptionCode &&
+                                (parsed->exceptionDisposition == "handled" ||
+                                 pause.firstChance);
                     } else if (parsed->method == "debugger.step_into") {
                         command = "sti";
                         expected = DebuggeeState::paused;

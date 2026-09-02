@@ -8019,6 +8019,21 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
             event.hasAddress = true;
             event.firstChance = pause.firstChance;
         }
+        // DebugBreakProcess reports its owned interrupt as a first-chance
+        // EXCEPTION_BREAKPOINT rather than CB_PAUSEDEBUG. Correlate it only while
+        // this runtime has one outstanding direct pause request; all other
+        // breakpoint exceptions retain their native exception semantics.
+        if (pauseInterruptPending_.load() && pause.hasExceptionCode &&
+            pause.exceptionCode == EXCEPTION_BREAKPOINT) {
+            pause.kind = PauseReasonKind::userPause;
+            pause.hasAddress = false;
+            pause.hasExceptionCode = false;
+            pause.firstChance = false;
+            event.kind = EventKind::paused;
+            event.hasAddress = false;
+            event.hasCode = false;
+            event.firstChance = false;
+        }
         clearPendingException = true;
         break;
     }
@@ -8152,7 +8167,11 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     TraceReason traceFallback = TraceReason::none;
     switch (callbackType) {
     case CB_BREAKPOINT: traceFallback = TraceReason::breakpoint; break;
-    case CB_EXCEPTION: traceFallback = TraceReason::exception; break;
+    case CB_EXCEPTION:
+        traceFallback = pause.kind == PauseReasonKind::userPause
+                            ? TraceReason::userPause
+                            : TraceReason::exception;
+        break;
     case CB_PAUSEDEBUG: traceFallback = TraceReason::userPause; break;
     case CB_EXITPROCESS:
     case CB_STOPDEBUG:

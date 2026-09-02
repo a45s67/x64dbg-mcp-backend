@@ -1852,7 +1852,7 @@ try {
     } 49
     if ($pauseObservation.state_generation -ne $pause.state_generation -or
         $pauseObservation.pause_reason.kind -ne 'user_pause') {
-        throw 'Explicit pause was not retained as a generation-consistent user_pause observation.'
+        throw "Explicit pause was not retained as a generation-consistent user_pause observation: $($pauseObservation | ConvertTo-Json -Compress -Depth 10)"
     }
     $nonTargetBeforeStep = Invoke-Tool 'registers.read' @{
         names = @('cip'); thread_id = $selectedThread.thread_id

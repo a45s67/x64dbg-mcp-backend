@@ -668,7 +668,7 @@ try {
         module = $fixtureModule.name.ToUpperInvariant(); query = 'mcp_fixture'; limit = 32
     } 60
     $functions = Invoke-Tool 'functions.list' @{
-        module = $fixtureModule.name.ToUpperInvariant(); limit = 32
+        module = $fixtureModule.name.ToUpperInvariant(); limit = 64
     } 61
     $analysisSymbol = @($symbols.items | Where-Object {
         $_.name -ieq 'mcp_fixture_analysis_target'
@@ -685,11 +685,31 @@ try {
     $exceptionTriggerSymbol = @($symbols.items | Where-Object {
         $_.name -ieq 'mcp_fixture_exception_trigger'
     })[0]
+    $accessViolationTriggerSymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_access_violation_trigger'
+    })[0]
+    $accessViolationSymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_access_violation'
+    })[0]
+    $accessViolationRecoverySymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_access_violation_recovery'
+    })[0]
+    $recoveryCheckpointSymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_recovery_checkpoint'
+    })[0]
+    $recoveryObservedSymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_recovery_observed'
+    })[0]
     if (!$analysisSymbol -or !$analysisSymbol.location.rva -or
         !$markerSymbol -or !$markerSymbol.location.rva -or
         !$runToInterrupterSymbol -or !$runToInterrupterSymbol.location.rva -or
         !$runToTargetSymbol -or !$runToTargetSymbol.location.rva -or
-        !$exceptionTriggerSymbol -or !$exceptionTriggerSymbol.location.rva) {
+        !$exceptionTriggerSymbol -or !$exceptionTriggerSymbol.location.rva -or
+        !$accessViolationTriggerSymbol -or !$accessViolationTriggerSymbol.location.rva -or
+        !$accessViolationSymbol -or !$accessViolationSymbol.location.rva -or
+        !$accessViolationRecoverySymbol -or !$accessViolationRecoverySymbol.location.rva -or
+        !$recoveryCheckpointSymbol -or !$recoveryCheckpointSymbol.location.rva -or
+        !$recoveryObservedSymbol -or !$recoveryObservedSymbol.location.rva) {
         throw 'Fixture analysis, marker, run-to, and exception-trigger exports were not available as structured symbols.'
     }
     $analysisRuntimeAddress = [Convert]::ToUInt64(
@@ -725,6 +745,18 @@ try {
     $markerRef = @{
         module = $fixtureModule.name.ToUpperInvariant()
         rva = $markerSymbol.location.rva
+    }
+    $accessViolationTriggerRef = @{
+        module = $fixtureModule.name.ToUpperInvariant()
+        rva = $accessViolationTriggerSymbol.location.rva
+    }
+    $recoveryObservedRef = @{
+        module = $fixtureModule.name.ToUpperInvariant()
+        rva = $recoveryObservedSymbol.location.rva
+    }
+    $recoveryCheckpointRef = @{
+        module = $fixtureModule.name.ToUpperInvariant()
+        rva = $recoveryCheckpointSymbol.location.rva
     }
     $runToInterrupterRef = @{
         module = $fixtureModule.name.ToUpperInvariant()
@@ -1430,6 +1462,68 @@ try {
         operation_id = [Guid]::NewGuid().ToString()
     } 318
 
+    # Prove exception context mutation against a benign AV. The fault and recovery
+    # exports have the same ABI, so changing only CIP preserves the caller's return
+    # address and arguments. Command submission or register-view read-back is not
+    # sufficient: the recovery marker must be written after continuation.
+    $accessViolationSet = Invoke-Tool 'breakpoints.exception.set' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        code = '0xc0000005'; chance = 'first'
+    } 319
+    $null = Invoke-Tool 'memory.write' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $recoveryObservedRef; data_hex = '00000000'
+    } 320
+    $null = Invoke-Tool 'memory.write' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $accessViolationTriggerRef; data_hex = '01000000'
+    } 321
+    $recoveryCheckpointSet = Invoke-Tool 'breakpoints.set' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $recoveryCheckpointRef
+    } 328
+    $avResume = Invoke-Tool 'debugger.resume' @{
+        operation_id = [Guid]::NewGuid().ToString()
+    } 322
+    $avPause = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $avResume.state_generation; timeout_ms = 9000
+    } 323
+    if ($avPause.pause_reason.kind -ne 'exception' -or
+        $avPause.pause_reason.code -ne '0xc0000005' -or
+        !$avPause.pause_reason.first_chance) {
+        throw 'Benign access-violation fixture did not reach its first-chance pause.'
+    }
+    $instructionRegister = if ($Backend -eq 'x32') { 'eip' } else { 'rip' }
+    $avContinue = Invoke-Tool 'debugger.continue_exception' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        disposition = 'handled'
+        register_overrides = @(@{
+            name = $instructionRegister
+            value = $accessViolationRecoverySymbol.location.address
+        })
+    } 324
+    $recoveryPause = Invoke-Tool 'debugger.wait_for_pause' @{
+        after_generation = $avContinue.state_generation; timeout_ms = 9000
+    } 325
+    $recoveryObserved = Invoke-Tool 'memory.read' @{
+        address = $recoveryObservedRef; length = 4
+    } 326
+    if ($avContinue.debuggee_state -ne 'running' -or
+        $recoveryPause.pause_reason.kind -ne 'breakpoint' -or
+        $recoveryPause.instruction_pointer -ne $recoveryCheckpointSymbol.location.address -or
+        $recoveryObserved.data_hex -eq '00000000') {
+        throw 'Exception continuation did not execute the ABI-compatible recovery target.'
+    }
+    $null = Invoke-Tool 'breakpoints.remove' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $recoveryCheckpointRef
+    } 329
+    $null = Invoke-Tool 'breakpoints.exception.remove' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        code = '0xc0000005'; chance = 'first'
+        managed_id = $accessViolationSet.managed_id
+    } 327
+
     $runToInterrupterSet = Invoke-Tool 'breakpoints.set' @{
         operation_id = [Guid]::NewGuid().ToString(); address = $runToInterrupterRef
     } 221
@@ -1533,6 +1627,38 @@ try {
         !$selectedThreadAfter -or $selectedThreadAfter.thread_id -ne $selectedThread.thread_id) {
         throw 'Exact-thread register/snapshot reads were inconsistent or changed thread selection.'
     }
+    $workerWritableRegister = if ($Backend -eq 'x32') { 'edi' } else { 'rdi' }
+    $workerWritableBefore = Invoke-Tool 'registers.read' @{
+        names = @($workerWritableRegister); thread_id = $workerThread.thread_id
+    } 238
+    $workerOriginalValue = $workerWritableBefore.registers.$workerWritableRegister
+    $workerTestValue = if ($workerOriginalValue -eq '0x31415926') {
+        '0x27182818'
+    } else {
+        '0x31415926'
+    }
+    $workerWrite = Invoke-Tool 'registers.write' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        name = $workerWritableRegister; value = $workerTestValue
+        thread_id = $workerThread.thread_id
+    } 239
+    $workerAfterWrite = Invoke-Tool 'registers.read' @{
+        names = @($workerWritableRegister); thread_id = $workerThread.thread_id
+    } 240
+    $selectionAfterWorkerWrite = Invoke-Tool 'threads.list' @{ limit = 256 } 241
+    $selectedAfterWorkerWrite = @($selectionAfterWorkerWrite.items | Where-Object { $_.current })[0]
+    if ($workerWrite.thread_id -ne $workerThread.thread_id -or
+        $workerWrite.value -ne $workerTestValue -or
+        $workerAfterWrite.registers.$workerWritableRegister -ne $workerTestValue -or
+        !$selectedAfterWorkerWrite -or
+        $selectedAfterWorkerWrite.thread_id -ne $selectedThread.thread_id) {
+        throw 'Exact-thread register write was not verified or changed x64dbg thread selection.'
+    }
+    $null = Invoke-Tool 'registers.write' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        name = $workerWritableRegister; value = $workerOriginalValue
+        thread_id = $workerThread.thread_id
+    } 242
     [uint64]$missingThreadCandidate = [Convert]::ToUInt64('ffffffff', 16)
     $knownThreadIds = @($threadsAfterContextRead.items | ForEach-Object { $_.thread_id })
     while (('0x{0:x}' -f $missingThreadCandidate) -in $knownThreadIds) {
@@ -1728,15 +1854,27 @@ try {
         $pauseObservation.pause_reason.kind -ne 'user_pause') {
         throw 'Explicit pause was not retained as a generation-consistent user_pause observation.'
     }
-    $stepInto = Invoke-Tool 'debugger.step_into' @{ operation_id = [Guid]::NewGuid().ToString() } 17
+    $nonTargetBeforeStep = Invoke-Tool 'registers.read' @{
+        names = @('cip'); thread_id = $selectedThread.thread_id
+    } 330
+    $stepInto = Invoke-Tool 'debugger.step_into' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        thread_id = $workerThread.thread_id
+    } 17
     $stepIntoObservation = Invoke-Tool 'debugger.wait_for_pause' @{
         after_generation = $pause.state_generation; timeout_ms = 1500
     } 50
     if ($stepIntoObservation.state_generation -ne $stepInto.state_generation -or
         $stepIntoObservation.pause_reason.kind -ne 'step' -or
         $stepInto.pause_reason.kind -ne 'step' -or !$stepInto.instruction_pointer -or
-        !$stepInto.active_thread_id) {
-        throw 'Step-into callback reason or generation was not retained.'
+        $stepInto.active_thread_id -ne $workerThread.thread_id) {
+        throw 'Exact-thread step-into callback reason, generation, or thread was not retained.'
+    }
+    $nonTargetAfterStep = Invoke-Tool 'registers.read' @{
+        names = @('cip'); thread_id = $selectedThread.thread_id
+    } 331
+    if ($nonTargetAfterStep.registers.cip -ne $nonTargetBeforeStep.registers.cip) {
+        throw 'Exact-thread step changed the non-target thread instruction pointer.'
     }
     $staleCursor = Invoke-Mcp 'tools/call' @{
         name = 'memory.map'; arguments = @{ limit = 1; cursor = $cursorProbe.next_cursor }

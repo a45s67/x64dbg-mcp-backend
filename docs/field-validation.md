@@ -50,8 +50,33 @@ first-chance exceptions to the debuggee. A normal `debugger.resume` must not be 
 either semantic.
 
 An exception-paused register write followed by a separate continuation can lose the edited
-registers when x64dbg restores its saved exception context. Optional `register_overrides` therefore
-places one to four closed, full-width register assignments and the selected continuation in one
-debugger command queue item. Names use the same architecture-specific policy as `registers.write`;
-values are canonical lowercase hexadecimal. Arbitrary expressions and debugger commands remain
-unavailable.
+registers when x64dbg restores its saved exception context. Optional `register_overrides` are
+therefore applied atomically to the exact thread reported by the correlated exception callback.
+The plugin obtains that native thread context, applies one to four closed full-width assignments,
+writes the context once, and verifies it with a second native context read before submitting only
+`serun` or `erun`. Names use the same architecture-specific policy as `registers.write`; values are
+canonical lowercase hexadecimal. Arbitrary expressions and debugger commands remain unavailable.
+
+Runtime acceptance must redirect a benign access violation to an ABI-compatible recovery export
+and observe a marker written by that export before its checkpoint breakpoint. A successful command
+submission or an immediate register read-back alone does not prove that x64dbg resumed with the
+modified exception context.
+
+## Exact-thread mutation and stepping
+
+Debugger GUI selection is mutable state and is not authoritative evidence of which native thread
+was read, written, or stepped. `registers.write` accepts an optional exact `thread_id`; the plugin
+uses the corresponding native handle for one `GetThreadContext` / `SetThreadContext` / read-back
+cycle without changing GUI selection. `debugger.step_into` and `debugger.step_over` also accept an
+exact `thread_id`, synchronously select it for x64dbg's step engine, and reject a completion callback
+from any other thread. Runtime acceptance writes and restores a non-selected worker register, then
+steps that worker and proves the prior selected thread's instruction pointer did not move.
+
+## Direct pause interruption
+
+Submitting the textual `pause` command through x64dbg's command queue is not a reliable way to
+interrupt a debuggee whose debugger thread is occupied. `debugger.pause` calls `DebugBreakProcess`
+on the current debuggee process and admits only one pending interrupt request until a pause callback
+or process reset clears it. The resulting callback must be correlated to the returned generation
+and classified as `user_pause`; repeated client retries must not create multiple transient break
+threads.

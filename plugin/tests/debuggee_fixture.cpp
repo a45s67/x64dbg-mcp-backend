@@ -10,6 +10,9 @@
 
 extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_marker{0x1234abcdU};
 extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_exception_trigger{0U};
+extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_access_violation_trigger{0U};
+extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_recovery_observed{0U};
+extern "C" __declspec(dllexport) volatile std::uint32_t* mcp_fixture_invalid_pointer = nullptr;
 extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_worker_ready{0U};
 extern "C" __declspec(dllexport) char mcp_fixture_discovery_ascii[] =
     "MCP_DISCOVERY_ASCII_SENTINEL";
@@ -32,6 +35,23 @@ mcp_fixture_run_to_target(const std::uint32_t value) {
     // folding would otherwise give both exported symbols the same address and
     // invalidate the run-to interruption fixture.
     return (value ^ 3U) + 1U;
+}
+
+extern "C" __declspec(dllexport) __declspec(noinline) std::uint32_t
+mcp_fixture_access_violation(const std::uint32_t value) {
+    return value ^ *mcp_fixture_invalid_pointer;
+}
+
+extern "C" __declspec(dllexport) __declspec(noinline) std::uint32_t
+mcp_fixture_recovery_checkpoint(const std::uint32_t value) {
+    return value;
+}
+
+extern "C" __declspec(dllexport) __declspec(noinline) std::uint32_t
+mcp_fixture_access_violation_recovery(const std::uint32_t value) {
+    const std::uint32_t recovered = value ^ 0xa55a3cc3U;
+    mcp_fixture_recovery_observed.store(recovered);
+    return mcp_fixture_recovery_checkpoint(recovered);
 }
 
 namespace {
@@ -123,6 +143,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     while (value != 0U) {
         if (mcp_fixture_exception_trigger.exchange(0U) != 0U) {
             RaiseHandledFixtureException();
+        }
+        if (mcp_fixture_access_violation_trigger.exchange(0U) != 0U) {
+            mcp_fixture_marker.store(
+                mcp_fixture_access_violation(mcp_fixture_marker.load()));
         }
         value = mcp_fixture_run_to_interrupter(value);
         value = mcp_fixture_run_to_target(value);

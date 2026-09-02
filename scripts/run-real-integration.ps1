@@ -1671,7 +1671,26 @@ try {
         $workerSnapshot.active_thread_id -ne $selectedThread.thread_id -or
         @($workerSnapshot.disassembly).Count -ne 4 -or
         !$selectedThreadAfter -or $selectedThreadAfter.thread_id -ne $selectedThread.thread_id) {
-        throw 'Exact-thread register/snapshot reads were inconsistent or changed thread selection.'
+        $contextDiagnostic = [ordered]@{
+            selected_before = $selectedThread.thread_id
+            selected_after = $selectedThreadAfter.thread_id
+            default_thread = $defaultSelectedRegisters.thread_id
+            default_current = $defaultSelectedRegisters.current
+            explicit_thread = $explicitSelectedRegisters.thread_id
+            explicit_current = $explicitSelectedRegisters.current
+            selected_maps_equal = $selectedMapsEqual
+            worker_thread = $workerThread.thread_id
+            worker_list_ip = $workerThread.instruction_pointer
+            worker_register_thread = $workerRegisters.thread_id
+            worker_register_current = $workerRegisters.current
+            worker_register_ip = $workerRegisters.registers.cip
+            worker_snapshot_thread = $workerSnapshot.thread_id
+            worker_snapshot_current = $workerSnapshot.current
+            worker_snapshot_ip = $workerSnapshot.instruction_pointer.address
+            worker_snapshot_active_thread = $workerSnapshot.active_thread_id
+            worker_snapshot_disassembly_count = @($workerSnapshot.disassembly).Count
+        }
+        throw "Exact-thread register/snapshot reads were inconsistent or changed thread selection: $($contextDiagnostic | ConvertTo-Json -Compress)"
     }
     $workerWritableRegister = if ($Backend -eq 'x32') { 'edi' } else { 'rdi' }
     $workerWritableBefore = Invoke-Tool 'registers.read' @{
@@ -1910,6 +1929,12 @@ try {
     if ($pauseObservation.state_generation -ne $pause.state_generation -or
         $pauseObservation.pause_reason.kind -ne 'user_pause') {
         throw "Explicit pause was not retained as a generation-consistent user_pause observation: $($pauseObservation | ConvertTo-Json -Compress -Depth 10)"
+    }
+    $pebBeingDebuggedAfterPause = Invoke-Tool 'memory.read' @{
+        address = $pebBeingDebuggedAddress; length = 1
+    } 337
+    if ($pebBeingDebuggedAfterPause.data_hex -ne '00') {
+        throw 'Explicit pause did not restore the hidden PEB BeingDebugged byte.'
     }
     $null = Invoke-Tool 'memory.write' @{
         operation_id = [Guid]::NewGuid().ToString()

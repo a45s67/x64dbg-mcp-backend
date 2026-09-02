@@ -4386,6 +4386,7 @@ void Runtime::Worker() noexcept {
                            std::to_string(resolvedGeneration) + "}}";
                 }
                 if (parsed->method == "debuggee.attach") {
+                    ReconcileDebuggerLiveness();
                     if (debuggeeState_.load() != DebuggeeState::absent || DbgIsDebugging()) {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
                                              "attach requires no current debuggee", false, false);
@@ -4435,6 +4436,7 @@ void Runtime::Worker() noexcept {
                 }
                 if (parsed->method == "debuggee.launch" ||
                     parsed->method == "debuggee.launch_dll") {
+                    ReconcileDebuggerLiveness();
                     const bool dllLaunch = parsed->method == "debuggee.launch_dll";
                     if (debuggeeState_.load() != DebuggeeState::absent || DbgIsDebugging()) {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
@@ -4729,6 +4731,7 @@ void Runtime::Worker() noexcept {
                     parsed->method == "debugger.continue_exception" ||
                     parsed->method == "debugger.step_into" ||
                     parsed->method == "debugger.step_over" || parsed->method == "debugger.stop") {
+                    ReconcileDebuggerLiveness();
                     const DebuggeeState state = debuggeeState_.load();
                     const char* command = nullptr;
                     std::string ownedCommand;
@@ -4741,7 +4744,7 @@ void Runtime::Worker() noexcept {
                         valid = state == DebuggeeState::running;
                         directPause = true;
                     } else if (parsed->method == "debugger.resume") {
-                        command = "run";
+                        command = ownedPauseException_.load() ? "serun" : "run";
                         expected = DebuggeeState::running;
                         valid = state == DebuggeeState::paused;
                     } else if (parsed->method == "debugger.continue_exception") {
@@ -4830,21 +4833,50 @@ void Runtime::Worker() noexcept {
                                                  "a debugger interrupt is already pending", true,
                                                  false);
                         }
-                        // Use x64dbg's direct pause implementation. A raw
-                        // DebugBreakProcess call enters DbgUiRemoteBreakin,
-                        // which exits without raising EXCEPTION_BREAKPOINT when
-                        // the debuggee's PEB BeingDebugged byte is hidden. The
-                        // debugger command first plants a one-shot breakpoint
-                        // at a real debuggee thread's CIP and therefore remains
-                        // effective in that anti-debug state.
+#ifndef MCP_LIFECYCLE_HARNESS
+                        // Enter DbgBreakPoint directly instead of using
+                        // DebugBreakProcess/DbgUiRemoteBreakin, which silently
+                        // exits when malware hides PEB.BeingDebugged. The owned
+                        // breakpoint is later continued with serun.
+                        const HANDLE processHandle = DbgGetProcessHandle();
+                        ownedPauseSelectedThreadId_.store(
+                            SelectedThreadId().value_or(DbgGetThreadId()));
+                        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+                        const auto breakPoint = ntdll == nullptr
+                                                    ? nullptr
+                                                    : reinterpret_cast<LPTHREAD_START_ROUTINE>(
+                                                          GetProcAddress(ntdll, "DbgBreakPoint"));
+                        HANDLE interruptThread = nullptr;
+                        if (processHandle != nullptr && processHandle != INVALID_HANDLE_VALUE &&
+                            breakPoint != nullptr) {
+                            interruptThread = CreateRemoteThread(processHandle, nullptr, 0U,
+                                                                 breakPoint, nullptr, 0U, nullptr);
+                        }
+                        submitted = interruptThread != nullptr;
+                        if (interruptThread != nullptr) CloseHandle(interruptThread);
+#else
                         submitted = DbgCmdExecDirect("pause");
-                        if (!submitted) pauseInterruptPending_.store(false);
+#endif
+                        if (!submitted) {
+                            pauseInterruptPending_.store(false);
+                            ownedPauseSelectedThreadId_.store(0U);
+                        }
                     } else if (isStep) {
                         // x64dbg's step engine operates on the current debug-event
                         // thread, not the GUI-selected hActiveThread. Submit the
                         // one verified run-state mutation in this executor turn.
                         submitted = DbgCmdExecDirect(command);
                     } else {
+                        if (parsed->method == "debugger.resume" &&
+                            ownedPauseException_.load()) {
+                            const std::uint32_t selectedThreadId =
+                                ownedPauseSelectedThreadId_.exchange(0U);
+                            if (selectedThreadId != 0U) {
+                                const std::string switchCommand =
+                                    "switchthread " + HexValue(selectedThreadId) + ", silent";
+                                (void)DbgCmdExecDirect(switchCommand.c_str());
+                            }
+                        }
                         submitted = DbgCmdExec(command);
                     }
                     if (!submitted) {
@@ -7722,7 +7754,31 @@ std::string Runtime::ScyllaHideProfileResponse(
            ",\"next_actions\":" + nextActions + "}}";
 }
 
+void Runtime::ReconcileDebuggerLiveness() noexcept {
+#ifndef MCP_LIFECYCLE_HARNESS
+    const DebuggeeState observed = debuggeeState_.load();
+    if (observed == DebuggeeState::absent || observed == DebuggeeState::starting ||
+        DbgIsDebugging()) {
+        return;
+    }
+    std::lock_guard lock(stateMutex_);
+    if (DbgIsDebugging()) return;
+    debuggeeState_.store(DebuggeeState::absent);
+    sessionOrigin_.store(SessionOrigin::none);
+    processId_.store(0U);
+    activeThreadId_.store(0U);
+    pauseInterruptPending_.store(false);
+    ownedPauseException_.store(false);
+    ownedPauseSelectedThreadId_.store(0U);
+    latestPause_ = {};
+    const std::uint64_t generation = generation_.fetch_add(1U) + 1U;
+    absentGeneration_.store(generation);
+    stateChanged_.notify_all();
+#endif
+}
+
 std::string Runtime::StateResponse(const std::string& requestId) {
+    ReconcileDebuggerLiveness();
     DebuggeeState state;
     std::uint64_t generation = 0;
     std::uint32_t processId = 0;
@@ -8043,11 +8099,14 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
             event.firstChance = pause.firstChance;
         }
         // DebugBreakProcess reports its owned interrupt as a first-chance
-        // EXCEPTION_BREAKPOINT rather than CB_PAUSEDEBUG. Correlate it only while
-        // this runtime has one outstanding direct pause request; all other
+        // EXCEPTION_BREAKPOINT, sometimes adjacent to CB_PAUSEDEBUG. Correlate
+        // both callback orders while this runtime owns the pause; all other
         // breakpoint exceptions retain their native exception semantics.
-        if (pauseInterruptPending_.load() && pause.hasExceptionCode &&
+        if ((pauseInterruptPending_.load() || ownedPauseException_.load()) &&
+            pause.hasExceptionCode &&
             pause.exceptionCode == EXCEPTION_BREAKPOINT) {
+            pauseInterruptPending_.store(false);
+            ownedPauseException_.store(true);
             pause.kind = PauseReasonKind::userPause;
             pause.hasAddress = false;
             pause.hasExceptionCode = false;
@@ -8061,6 +8120,9 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
         break;
     }
     case CB_PAUSEDEBUG:
+        if (pauseInterruptPending_.exchange(false)) {
+            ownedPauseException_.store(true);
+        }
         event.kind = EventKind::paused;
         next = DebuggeeState::paused;
         pause.kind = PauseReasonKind::userPause;
@@ -8075,6 +8137,8 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     case CB_RESUMEDEBUG:
         event.kind = EventKind::resumed;
         next = DebuggeeState::running;
+        ownedPauseException_.store(false);
+        ownedPauseSelectedThreadId_.store(0U);
         clearPendingException = true;
         break;
     case CB_ATTACH: {
@@ -8251,10 +8315,14 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     }
     if (clearProcess) {
         pauseInterruptPending_.store(false);
+        ownedPauseException_.store(false);
+        ownedPauseSelectedThreadId_.store(0U);
     }
     const DebuggeeState previous = debuggeeState_.load();
     if (next == DebuggeeState::paused && previous == DebuggeeState::paused) {
-        if (callbackType == CB_PAUSEDEBUG) {
+        if (callbackType == CB_PAUSEDEBUG ||
+            (pause.kind == PauseReasonKind::userPause &&
+             latestPause_.kind == PauseReasonKind::userPause)) {
             return;
         }
         if (refineCurrentPause ||

@@ -132,6 +132,7 @@ private:
     [[nodiscard]] bool PauseObservationCurrent(std::uint64_t generation,
                                                std::uint64_t pauseGeneration) noexcept;
     void RecordEventLocked(EventRecord event) noexcept;
+    void ReconcileDebuggerLiveness() noexcept;
 
     std::atomic<PluginState> pluginState_{PluginState::stopped};
     std::atomic<DebuggeeState> debuggeeState_{DebuggeeState::absent};
@@ -147,6 +148,8 @@ private:
     std::atomic<std::uint32_t> detachProcessId_{0};
     std::atomic<std::uint64_t> detachGeneration_{0};
     std::atomic<bool> pauseInterruptPending_{false};
+    std::atomic<bool> ownedPauseException_{false};
+    std::atomic<std::uint32_t> ownedPauseSelectedThreadId_{0U};
     HANDLE instanceMutex_{nullptr};
     HANDLE pipe_{INVALID_HANDLE_VALUE};
     HANDLE nonceWriter_{nullptr};

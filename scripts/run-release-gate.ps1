@@ -34,7 +34,7 @@ Push-Location $workspace
 try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass `
         -File (Join-Path $PSScriptRoot 'package.ps1') `
-        -Version $version -OutputDirectory $packageOutput
+        -Version $version -OutputDirectory $packageOutput -X64dbgRoot $X64dbgRoot
     if ($LASTEXITCODE -ne 0) { throw 'Package gate failed.' }
 
     & powershell.exe -NoProfile -ExecutionPolicy Bypass `

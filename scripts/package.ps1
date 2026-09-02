@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Version = '0.1.2',
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+    [string]$X64dbgRoot = 'C:\tools\x64dbg'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +21,8 @@ if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $archive)) {
     throw 'Refusing to overwrite an existing release stage or archive.'
 }
 
+$previousX64dbgRoot = $env:X64DBG_ROOT
+$env:X64DBG_ROOT = $X64dbgRoot
 Push-Location $workspace
 try {
     & cargo.exe build --offline --locked --release
@@ -72,4 +75,9 @@ try {
     Write-Output "Created $archive"
 } finally {
     Pop-Location
+    if ($null -eq $previousX64dbgRoot) {
+        Remove-Item Env:X64DBG_ROOT -ErrorAction SilentlyContinue
+    } else {
+        $env:X64DBG_ROOT = $previousX64dbgRoot
+    }
 }

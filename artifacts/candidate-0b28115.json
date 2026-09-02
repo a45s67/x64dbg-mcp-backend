@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "candidate": {
+    "commit": "0b28115b91701312c37e99fabecafb02fe14821b",
+    "source_bundle": {
+      "file": "backend-pause-0b28115-full.bundle",
+      "sha256": "96b2e027eae7b93e66a5754a7f4ad3cf520d27818d08fad2d293095d76c90b17"
+    },
+    "package": {
+      "file": "x64dbg-mcp-backend-0.1.2-candidate-0b28115.zip",
+      "size": 2403303,
+      "sha256": "074f511da921bc7fb22fa3a715f7e75893a8e47e1682ab80c9c17c1fa4635514"
+    }
+  },
+  "build": {
+    "builder": "DESKTOP-6UMFFQ1",
+    "configuration": "Release",
+    "x64dbg_sdk": "2026.05.27",
+    "msvc": "19.44.35228.0",
+    "rust": "locked offline release"
+  },
+  "artifacts": [
+    {
+      "role": "x32dbg_plugin",
+      "file": "x64dbg-mcp-backend.dp32",
+      "size": 821248,
+      "sha256": "2733f8fc3600f16739097918926fe9027970dd431bc1203a54cacd87d57b939d"
+    },
+    {
+      "role": "x64dbg_plugin",
+      "file": "x64dbg-mcp-backend.dp64",
+      "size": 1084928,
+      "sha256": "8f908f8131ed54b002fd1481d905653b2230bb88c7df54341ed8834fe7e9632a"
+    },
+    {
+      "role": "mcp_sidecar",
+      "file": "x96dbg-mcp-server.exe",
+      "size": 3565056,
+      "sha256": "69ebb804f92a795fedf5cdc5c01b462f55b4d3bb6d861c36eba76e1fe040d3cc"
+    },
+    {
+      "role": "host_controller",
+      "file": "x96dbg-mcp-control.exe",
+      "size": 345600,
+      "sha256": "1cd53742b8638c2d3cf059efc713c6aa678ff63cca2d42711373502910724e07"
+    }
+  ],
+  "acceptance": {
+    "native_x86_tests": { "passed": 17, "failed": 0 },
+    "native_x64_tests": { "passed": 17, "failed": 0 },
+    "real_x32dbg_integration": {
+      "passed": true,
+      "fresh_tree": "integration-32e5cf8-focus",
+      "peb_being_debugged_hidden": true,
+      "pause_reason": "user_pause",
+      "owned_sidecars_exited": true,
+      "loopback_ports_closed": true
+    },
+    "real_x64dbg_integration": {
+      "passed": true,
+      "fresh_tree": "integration-0b28115-x64",
+      "peb_being_debugged_hidden": true,
+      "pause_reason": "user_pause",
+      "owned_sidecars_exited": true,
+      "loopback_ports_closed": true
+    },
+    "combined_soak_note": "A combined sequential run intermittently failed the pre-existing exact-thread snapshot assertion; both architectures passed complete isolated runs from fresh trees."
+  },
+  "promotion": {
+    "target": "win10-dyn",
+    "install_root": "C:/analysis/tools/x64dbg-backend-eval-95f84fa/release",
+    "installed_hashes_verified": true,
+    "native_x32_mcp_verified": true,
+    "native_x64_mcp_verified": true,
+    "x32_idle_wait_pause_verified": true,
+    "x32_hidden_peb_preserved": true,
+    "x32_handled_resume_verified": true
+  }
+}

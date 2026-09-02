@@ -1934,7 +1934,7 @@ try {
         address = $pebBeingDebuggedAddress; length = 1
     } 337
     if ($pebBeingDebuggedAfterPause.data_hex -ne '00') {
-        throw 'Explicit pause did not restore the hidden PEB BeingDebugged byte.'
+        throw 'Explicit pause changed the hidden PEB BeingDebugged byte.'
     }
     $null = Invoke-Tool 'memory.write' @{
         operation_id = [Guid]::NewGuid().ToString()

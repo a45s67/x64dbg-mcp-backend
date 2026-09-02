@@ -87,11 +87,15 @@ both rejection without a generation change and a callback-correlated exact event
 ## Direct pause interruption
 
 Submitting the textual `pause` command through x64dbg's asynchronous command queue is not a
-reliable way to interrupt a debuggee whose debugger thread is occupied. `debugger.pause` invokes
-x64dbg's pause command directly on the executor thread and admits only one pending request until a
-pause callback or process reset clears it. The native command plants a one-shot breakpoint at a
-real debuggee thread's instruction pointer before considering a remote break-in fallback. Calling
-`DebugBreakProcess` directly is incorrect when the debuggee's PEB `BeingDebugged` byte is hidden:
-`DbgUiRemoteBreakin` can exit cleanly without raising a breakpoint. The resulting pause callback
-must be correlated to the returned generation and classified as `user_pause`; repeated client
-retries must not create multiple transient break threads.
+reliable way to interrupt a debuggee whose selected thread is blocked in a kernel wait. Calling
+`DebugBreakProcess` is also insufficient when the debuggee hides its PEB `BeingDebugged` byte:
+`DbgUiRemoteBreakin` can exit cleanly without raising a breakpoint.
+
+`debugger.pause` therefore admits one owned interrupt at a time and creates a remote thread directly
+at the architecture-matched `ntdll!DbgBreakPoint`. The adjacent `CB_PAUSEDEBUG` and
+`CB_EXCEPTION` callback orders are folded into one generation-consistent `user_pause`. Before the
+owned exception is continued, the backend restores the thread that x64dbg had selected before the
+interrupt and uses `serun` so the synthetic breakpoint is handled instead of delivered to the
+debuggee. This preserves exact-thread reads after the short-lived interrupt thread exits. Runtime
+acceptance also proves that `BeingDebugged` remains hidden throughout the pause rather than being
+temporarily modified.

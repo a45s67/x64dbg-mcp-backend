@@ -1,5 +1,7 @@
 #include "register_policy.h"
 
+#include <algorithm>
+#include <charconv>
 #include <cctype>
 
 namespace mcp {
@@ -37,6 +39,36 @@ std::optional<WritableRegister> FindWritableRegister(const std::string_view name
 #endif
     if (name == "eflags") return WritableRegister{CFLAGS, 32U};
     return std::nullopt;
+}
+
+std::optional<std::string> BuildExceptionContinueCommand(
+    const std::vector<RegisterAssignment>& assignments, const bool handled) noexcept {
+    if (assignments.size() > 4U) return std::nullopt;
+    std::string command;
+    command.reserve(assignments.size() * 32U + 5U);
+    for (std::size_t index = 0U; index < assignments.size(); ++index) {
+        const RegisterAssignment& assignment = assignments[index];
+        const std::optional<WritableRegister> spec = FindWritableRegister(assignment.name);
+        if (!spec ||
+            (spec->bits < 64U && assignment.value >= (std::uint64_t{1U} << spec->bits)) ||
+            std::find_if(assignments.begin(), assignments.begin() + index,
+                         [&assignment](const RegisterAssignment& earlier) {
+                             return earlier.name == assignment.name;
+                         }) != assignments.begin() + index) {
+            return std::nullopt;
+        }
+        char encoded[16]{};
+        const auto result =
+            std::to_chars(encoded, encoded + sizeof(encoded), assignment.value, 16);
+        if (result.ec != std::errc{}) return std::nullopt;
+        command += "mov ";
+        command += assignment.name;
+        command += ", 0x";
+        command.append(encoded, result.ptr);
+        command += ';';
+    }
+    command += handled ? "serun" : "erun";
+    return command;
 }
 
 bool IsReturnInstruction(const std::string_view instruction) noexcept {

@@ -48,3 +48,10 @@ exception pause. `disposition=handled` maps to x64dbg `serun` and swallows the c
 `disposition=not_handled` is accepted only for a first-chance exception and maps to `erun`, passing
 first-chance exceptions to the debuggee. A normal `debugger.resume` must not be assumed to have
 either semantic.
+
+An exception-paused register write followed by a separate continuation can lose the edited
+registers when x64dbg restores its saved exception context. Optional `register_overrides` therefore
+places one to four closed, full-width register assignments and the selected continuation in one
+debugger command queue item. Names use the same architecture-specific policy as `registers.write`;
+values are canonical lowercase hexadecimal. Arbitrary expressions and debugger commands remain
+unavailable.

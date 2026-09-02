@@ -158,10 +158,85 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
         "debugger.pause" | "debugger.resume" | "debugger.step_into" | "debugger.step_over"
         | "debugger.step_out" | "debugger.stop" | "debuggee.detach" => operation(object, &[]),
         "debugger.continue_exception" => {
-            exact_keys(object, &["operation_id", "instance_id", "disposition"], &[])?;
+            exact_keys(
+                object,
+                &["operation_id", "instance_id", "disposition"],
+                &["register_overrides"],
+            )?;
             validate_operation_id(object)?;
             validate_instance_id(object)?;
-            one_of(object, "disposition", &["handled", "not_handled"])
+            one_of(object, "disposition", &["handled", "not_handled"])?;
+            if let Some(overrides) = object.get("register_overrides") {
+                let overrides = overrides
+                    .as_array()
+                    .filter(|values| (1..=4).contains(&values.len()))
+                    .ok_or(invalid(
+                        "register_overrides",
+                        "must contain 1 to 4 register overrides",
+                    ))?;
+                let mut names = std::collections::HashSet::new();
+                for override_value in overrides {
+                    let override_object = override_value.as_object().ok_or(invalid(
+                        "register_overrides",
+                        "must contain only register override objects",
+                    ))?;
+                    exact_keys(override_object, &["name", "value"], &[])?;
+                    let name = string(override_object, "name", 2, 6)?;
+                    if !matches!(
+                        name,
+                        "rax"
+                            | "rbx"
+                            | "rcx"
+                            | "rdx"
+                            | "rsi"
+                            | "rdi"
+                            | "rbp"
+                            | "rsp"
+                            | "rip"
+                            | "r8"
+                            | "r9"
+                            | "r10"
+                            | "r11"
+                            | "r12"
+                            | "r13"
+                            | "r14"
+                            | "r15"
+                            | "eax"
+                            | "ebx"
+                            | "ecx"
+                            | "edx"
+                            | "esi"
+                            | "edi"
+                            | "ebp"
+                            | "esp"
+                            | "eip"
+                            | "eflags"
+                    ) {
+                        return Err(invalid(
+                            "register_overrides",
+                            "contains an unsupported full-width register",
+                        ));
+                    }
+                    if !names.insert(name) {
+                        return Err(invalid(
+                            "register_overrides",
+                            "register names must be unique",
+                        ));
+                    }
+                    let value = string(override_object, "value", 3, 18)?;
+                    if !value.starts_with("0x")
+                        || !value[2..]
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    {
+                        return Err(invalid(
+                            "register_overrides",
+                            "values must be canonical lowercase hexadecimal",
+                        ));
+                    }
+                }
+            }
+            Ok(())
         }
         "debuggee.launch" => {
             if !object.contains_key("operation_id") {
@@ -1209,11 +1284,17 @@ fn build_catalog() -> Vec<Value> {
         ),
         mutation_tool(
             "debugger.continue_exception",
-            "Continue only from a confirmed exception pause. handled swallows the current exception; not_handled passes first-chance exceptions to the debuggee.",
-            operation_schema(vec![(
-                "disposition",
-                json!({"type":"string","enum":["handled","not_handled"]}),
-            )]),
+            "Continue an exception with optional atomic typed register overrides.",
+            operation_schema_with_optional(
+                vec![(
+                    "disposition",
+                    json!({"type":"string","enum":["handled","not_handled"]}),
+                )],
+                vec![(
+                    "register_overrides",
+                    json!({"type":"array","minItems":1,"maxItems":4}),
+                )],
+            ),
             false,
         ),
         mutation_tool(
@@ -3039,6 +3120,43 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(error.field, "disposition");
+        }
+        assert!(
+            validate_arguments(
+                "debugger.continue_exception",
+                &json!({
+                    "operation_id":operation_id,
+                    "disposition":"handled",
+                    "register_overrides":[
+                        {"name":"edi","value":"0x771e0000"},
+                        {"name":"eip","value":"0x1e42d0c"}
+                    ]
+                })
+            )
+            .is_ok()
+        );
+        for invalid_overrides in [
+            json!([]),
+            json!([{"name":"dr0","value":"0x1"}]),
+            json!([{"name":"eip","value":"0X1"}]),
+            json!([{"name":"eip","value":"0x1"},{"name":"eip","value":"0x2"}]),
+            json!([
+                {"name":"eax","value":"0x1"},{"name":"ebx","value":"0x2"},
+                {"name":"ecx","value":"0x3"},{"name":"edx","value":"0x4"},
+                {"name":"esi","value":"0x5"}
+            ]),
+        ] {
+            assert!(
+                validate_arguments(
+                    "debugger.continue_exception",
+                    &json!({
+                        "operation_id":operation_id,
+                        "disposition":"handled",
+                        "register_overrides":invalid_overrides
+                    })
+                )
+                .is_err()
+            );
         }
     }
 

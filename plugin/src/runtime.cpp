@@ -211,6 +211,7 @@ struct Request {
     std::string scyllaProfile;
     std::string expectedConfigGeneration;
     std::string exceptionDisposition;
+    std::vector<RegisterAssignment> exceptionRegisterOverrides;
 };
 
 bool IsMutation(const std::string_view method) {
@@ -604,6 +605,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::string scyllaProfile;
     std::string expectedConfigGeneration;
     std::string exceptionDisposition;
+    std::vector<RegisterAssignment> exceptionRegisterOverrides;
     if (methodValue == "scyllahide.profile") {
         json_t* action = json_object_get(payload, "action");
         if (!json_is_string(action)) return std::nullopt;
@@ -1362,15 +1364,46 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         }
     } else if (methodValue == "debugger.continue_exception") {
         json_t* disposition = json_object_get(payload, "disposition");
-        if (json_object_size(payload) != 2U ||
+        json_t* overrides = json_object_get(payload, "register_overrides");
+        const std::size_t expectedFields = overrides == nullptr ? 2U : 3U;
+        if (json_object_size(payload) != expectedFields ||
             !json_is_string(json_object_get(payload, "operation_id")) ||
-            !json_is_string(disposition)) {
+            !json_is_string(disposition) ||
+            (overrides != nullptr && (!json_is_array(overrides) ||
+                                      json_array_size(overrides) < 1U ||
+                                      json_array_size(overrides) > 4U))) {
             return std::nullopt;
         }
         exceptionDisposition.assign(json_string_value(disposition),
                                     json_string_length(disposition));
         if (exceptionDisposition != "handled" && exceptionDisposition != "not_handled") {
             return std::nullopt;
+        }
+        if (overrides != nullptr) {
+            const std::size_t count = json_array_size(overrides);
+            for (std::size_t index = 0U; index < count; ++index) {
+                json_t* overrideValue = json_array_get(overrides, index);
+                json_t* name = json_is_object(overrideValue)
+                                   ? json_object_get(overrideValue, "name")
+                                   : nullptr;
+                std::uint64_t value = 0U;
+                if (!json_is_object(overrideValue) || json_object_size(overrideValue) != 2U ||
+                    !json_is_string(name) || json_string_length(name) < 2U ||
+                    json_string_length(name) > 6U ||
+                    !ParseCanonicalHex64(json_object_get(overrideValue, "value"), value)) {
+                    return std::nullopt;
+                }
+                std::string parsedName(json_string_value(name), json_string_length(name));
+                if (std::find_if(exceptionRegisterOverrides.begin(),
+                                 exceptionRegisterOverrides.end(),
+                                 [&parsedName](const RegisterAssignment& item) {
+                                     return item.name == parsedName;
+                                 }) != exceptionRegisterOverrides.end()) {
+                    return std::nullopt;
+                }
+                exceptionRegisterOverrides.push_back(
+                    RegisterAssignment{std::move(parsedName), value});
+            }
         }
     } else if (methodValue == "debugger.pause" || methodValue == "debugger.resume" ||
                methodValue == "debugger.step_into" || methodValue == "debugger.step_over" ||
@@ -1639,7 +1672,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    traceTimeoutMs, traceCursorInvalid, std::move(expressions),
                    std::move(callingConvention), argumentCount,
                    std::move(scyllaAction), std::move(scyllaProfile),
-                   std::move(expectedConfigGeneration), std::move(exceptionDisposition)};
+                   std::move(expectedConfigGeneration), std::move(exceptionDisposition),
+                   std::move(exceptionRegisterOverrides)};
 }
 
 bool IsCanonicalUuid(const std::string_view value) {
@@ -4619,6 +4653,7 @@ void Runtime::Worker() noexcept {
                     parsed->method == "debugger.step_over" || parsed->method == "debugger.stop") {
                     const DebuggeeState state = debuggeeState_.load();
                     const char* command = nullptr;
+                    std::string ownedCommand;
                     DebuggeeState expected = state;
                     bool valid = false;
                     if (parsed->method == "debugger.pause") {
@@ -4635,7 +4670,18 @@ void Runtime::Worker() noexcept {
                             std::lock_guard lock(stateMutex_);
                             pause = latestPause_;
                         }
-                        command = parsed->exceptionDisposition == "handled" ? "serun" : "erun";
+                        const std::optional<std::string> builtCommand =
+                            BuildExceptionContinueCommand(
+                                parsed->exceptionRegisterOverrides,
+                                parsed->exceptionDisposition == "handled");
+                        if (!builtCommand) {
+                            return ErrorResponse(
+                                *parsed, "INVALID_ARGUMENT",
+                                "register override is not writable on this architecture",
+                                false, false);
+                        }
+                        ownedCommand = *builtCommand;
+                        command = ownedCommand.c_str();
                         expected = DebuggeeState::running;
                         valid = state == DebuggeeState::paused &&
                                 pause.kind == PauseReasonKind::exception &&

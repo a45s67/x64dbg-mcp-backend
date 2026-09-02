@@ -1,6 +1,7 @@
 #include "register_policy.h"
 
 #include <iostream>
+#include <vector>
 
 int main() {
 #ifdef _WIN64
@@ -22,6 +23,9 @@ int main() {
         std::cerr << "x64 Windows context conversion failed\n";
         return 4;
     }
+    const std::vector<mcp::RegisterAssignment> validAssignments{
+        {"rdi", 0x771e0000ULL}, {"rip", 0x1e42d0cULL}};
+    const std::vector<mcp::RegisterAssignment> wrongArchitecture{{"edi", 1U}};
 #else
     const auto core = mcp::FindWritableRegister("edi");
     if (!core || core->bits != 32U || mcp::FindWritableRegister("rax")) {
@@ -41,7 +45,30 @@ int main() {
         std::cerr << "x86 Windows context conversion failed\n";
         return 4;
     }
+    const std::vector<mcp::RegisterAssignment> validAssignments{
+        {"edi", 0x771e0000U}, {"eip", 0x1e42d0cU}};
+    const std::vector<mcp::RegisterAssignment> wrongArchitecture{{"rdi", 1U}};
 #endif
+    const auto handledCommand =
+        mcp::BuildExceptionContinueCommand(validAssignments, true);
+    const auto notHandledCommand =
+        mcp::BuildExceptionContinueCommand(validAssignments, false);
+    if (!handledCommand || !notHandledCommand ||
+#ifdef _WIN64
+        *handledCommand != "mov rdi, 0x771e0000;mov rip, 0x1e42d0c;serun" ||
+        *notHandledCommand != "mov rdi, 0x771e0000;mov rip, 0x1e42d0c;erun" ||
+#else
+        *handledCommand != "mov edi, 0x771e0000;mov eip, 0x1e42d0c;serun" ||
+        *notHandledCommand != "mov edi, 0x771e0000;mov eip, 0x1e42d0c;erun" ||
+#endif
+        mcp::BuildExceptionContinueCommand(wrongArchitecture, true) ||
+        mcp::BuildExceptionContinueCommand({{"eip", 1U}, {"eip", 2U}}, true) ||
+        mcp::BuildExceptionContinueCommand({{"eip", 0x100000000ULL}}, true) ||
+        mcp::BuildExceptionContinueCommand(
+            {{"eax", 1U}, {"ebx", 2U}, {"ecx", 3U}, {"edx", 4U}, {"esi", 5U}}, true)) {
+        std::cerr << "exception continuation command policy failed\n";
+        return 5;
+    }
     const auto flags = mcp::FindWritableRegister("eflags");
     if (!flags || flags->bits != 32U || mcp::FindWritableRegister("al") ||
         mcp::FindWritableRegister("dr0") || mcp::FindWritableRegister("RAX")) {

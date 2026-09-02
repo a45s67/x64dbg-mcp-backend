@@ -74,6 +74,16 @@ function Invoke-Tool([string]$Name, $Arguments, [int]$Id) {
     return $result.structuredContent
 }
 
+function Convert-LittleEndianUInt32Hex([string]$Hex) {
+    if ($Hex -notmatch '^[0-9a-fA-F]{8}$') {
+        throw "Expected exactly four hexadecimal bytes, received: $Hex"
+    }
+    [byte[]]$bytes = 0..3 | ForEach-Object {
+        [Convert]::ToByte($Hex.Substring($_ * 2, 2), 16)
+    }
+    return [BitConverter]::ToUInt32($bytes, 0)
+}
+
 function Assert-ExactStringSequence($Actual, [string[]]$Expected, [string]$Context) {
     $actualItems = @($Actual)
     if ($actualItems.Count -ne $Expected.Count) {
@@ -665,7 +675,7 @@ try {
         throw 'Compact debugger snapshot mixed generations or omitted its bounded default fields.'
     }
     $symbols = Invoke-Tool 'symbols.search' @{
-        module = $fixtureModule.name.ToUpperInvariant(); query = 'mcp_fixture'; limit = 32
+        module = $fixtureModule.name.ToUpperInvariant(); query = 'mcp_fixture'; limit = 64
     } 60
     $functions = Invoke-Tool 'functions.list' @{
         module = $fixtureModule.name.ToUpperInvariant(); limit = 64
@@ -700,6 +710,12 @@ try {
     $recoveryObservedSymbol = @($symbols.items | Where-Object {
         $_.name -ieq 'mcp_fixture_recovery_observed'
     })[0]
+    $mainThreadIdSymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_main_thread_id'
+    })[0]
+    $workerThreadIdSymbol = @($symbols.items | Where-Object {
+        $_.name -ieq 'mcp_fixture_worker_thread_id'
+    })[0]
     if (!$analysisSymbol -or !$analysisSymbol.location.rva -or
         !$markerSymbol -or !$markerSymbol.location.rva -or
         !$runToInterrupterSymbol -or !$runToInterrupterSymbol.location.rva -or
@@ -709,7 +725,9 @@ try {
         !$accessViolationSymbol -or !$accessViolationSymbol.location.rva -or
         !$accessViolationRecoverySymbol -or !$accessViolationRecoverySymbol.location.rva -or
         !$recoveryCheckpointSymbol -or !$recoveryCheckpointSymbol.location.rva -or
-        !$recoveryObservedSymbol -or !$recoveryObservedSymbol.location.rva) {
+        !$recoveryObservedSymbol -or !$recoveryObservedSymbol.location.rva -or
+        !$mainThreadIdSymbol -or !$mainThreadIdSymbol.location.rva -or
+        !$workerThreadIdSymbol -or !$workerThreadIdSymbol.location.rva) {
         throw 'Fixture analysis, marker, run-to, and exception-trigger exports were not available as structured symbols.'
     }
     $analysisRuntimeAddress = [Convert]::ToUInt64(
@@ -757,6 +775,14 @@ try {
     $recoveryCheckpointRef = @{
         module = $fixtureModule.name.ToUpperInvariant()
         rva = $recoveryCheckpointSymbol.location.rva
+    }
+    $mainThreadIdRef = @{
+        module = $fixtureModule.name.ToUpperInvariant()
+        rva = $mainThreadIdSymbol.location.rva
+    }
+    $workerThreadIdRef = @{
+        module = $fixtureModule.name.ToUpperInvariant()
+        rva = $workerThreadIdSymbol.location.rva
     }
     $runToInterrupterRef = @{
         module = $fixtureModule.name.ToUpperInvariant()
@@ -1589,11 +1615,26 @@ try {
 
     # The fixture creates a deterministic worker after startup. Qualify exact-thread
     # context reads while preserving x64dbg's selected thread.
+    $mainThreadIdMemory = Invoke-Tool 'memory.read' @{
+        address = $mainThreadIdRef; length = 4
+    } 243
+    $workerThreadIdMemory = Invoke-Tool 'memory.read' @{
+        address = $workerThreadIdRef; length = 4
+    } 244
+    $fixtureMainThreadId = '0x{0:x}' -f (Convert-LittleEndianUInt32Hex $mainThreadIdMemory.data_hex)
+    $fixtureWorkerThreadId = '0x{0:x}' -f (Convert-LittleEndianUInt32Hex $workerThreadIdMemory.data_hex)
     $threadsBeforeContextRead = Invoke-Tool 'threads.list' @{ limit = 256 } 230
     $selectedThread = @($threadsBeforeContextRead.items | Where-Object { $_.current })[0]
-    $workerThread = @($threadsBeforeContextRead.items | Where-Object { !$_.current })[0]
-    if (!$selectedThread -or !$workerThread -or !$workerThread.instruction_pointer) {
-        throw 'Fixture did not expose distinct selected and worker threads for context qualification.'
+    $mainThread = @($threadsBeforeContextRead.items | Where-Object {
+        $_.thread_id -eq $fixtureMainThreadId
+    })[0]
+    $workerThread = @($threadsBeforeContextRead.items | Where-Object {
+        $_.thread_id -eq $fixtureWorkerThreadId
+    })[0]
+    if (!$selectedThread -or !$mainThread -or !$workerThread -or
+        $mainThread.thread_id -eq $workerThread.thread_id -or
+        !$workerThread.instruction_pointer) {
+        throw 'Fixture did not expose its exported persistent main and worker threads.'
     }
     $defaultSelectedRegisters = Invoke-Tool 'registers.read' @{
         names = @('cip', 'csp', 'cbp', 'eflags')
@@ -1854,12 +1895,22 @@ try {
         $pauseObservation.pause_reason.kind -ne 'user_pause') {
         throw "Explicit pause was not retained as a generation-consistent user_pause observation: $($pauseObservation | ConvertTo-Json -Compress -Depth 10)"
     }
+    $threadsBeforeExactStep = Invoke-Tool 'threads.list' @{ limit = 256 } 332
+    $workerThreadAtStep = @($threadsBeforeExactStep.items | Where-Object {
+        $_.thread_id -eq $fixtureWorkerThreadId
+    })[0]
+    $mainThreadAtStep = @($threadsBeforeExactStep.items | Where-Object {
+        $_.thread_id -eq $fixtureMainThreadId
+    })[0]
+    if (!$workerThreadAtStep -or !$mainThreadAtStep) {
+        throw 'Persistent fixture main or worker thread exited before exact-thread stepping.'
+    }
     $nonTargetBeforeStep = Invoke-Tool 'registers.read' @{
-        names = @('cip'); thread_id = $selectedThread.thread_id
+        names = @('cip'); thread_id = $mainThreadAtStep.thread_id
     } 330
     $stepInto = Invoke-Tool 'debugger.step_into' @{
         operation_id = [Guid]::NewGuid().ToString()
-        thread_id = $workerThread.thread_id
+        thread_id = $workerThreadAtStep.thread_id
     } 17
     $stepIntoObservation = Invoke-Tool 'debugger.wait_for_pause' @{
         after_generation = $pause.state_generation; timeout_ms = 1500
@@ -1867,11 +1918,11 @@ try {
     if ($stepIntoObservation.state_generation -ne $stepInto.state_generation -or
         $stepIntoObservation.pause_reason.kind -ne 'step' -or
         $stepInto.pause_reason.kind -ne 'step' -or !$stepInto.instruction_pointer -or
-        $stepInto.active_thread_id -ne $workerThread.thread_id) {
+        $stepInto.active_thread_id -ne $workerThreadAtStep.thread_id) {
         throw 'Exact-thread step-into callback reason, generation, or thread was not retained.'
     }
     $nonTargetAfterStep = Invoke-Tool 'registers.read' @{
-        names = @('cip'); thread_id = $selectedThread.thread_id
+        names = @('cip'); thread_id = $mainThreadAtStep.thread_id
     } 331
     if ($nonTargetAfterStep.registers.cip -ne $nonTargetBeforeStep.registers.cip) {
         throw 'Exact-thread step changed the non-target thread instruction pointer.'

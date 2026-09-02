@@ -14,6 +14,8 @@ extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_access_v
 extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_recovery_observed{0U};
 extern "C" __declspec(dllexport) volatile std::uint32_t* mcp_fixture_invalid_pointer = nullptr;
 extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_worker_ready{0U};
+extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_main_thread_id{0U};
+extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_worker_thread_id{0U};
 extern "C" __declspec(dllexport) char mcp_fixture_discovery_ascii[] =
     "MCP_DISCOVERY_ASCII_SENTINEL";
 extern "C" __declspec(dllexport) wchar_t mcp_fixture_discovery_utf16[] =
@@ -126,6 +128,7 @@ bool WriteObservedArguments() {
 }
 
 DWORD WINAPI FixtureWorker(void*) {
+    mcp_fixture_worker_thread_id.store(GetCurrentThreadId());
     mcp_fixture_worker_ready.store(1U);
     while (mcp_fixture_marker.load() != 0U) Sleep(10U);
     return 0U;
@@ -134,6 +137,7 @@ DWORD WINAPI FixtureWorker(void*) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    mcp_fixture_main_thread_id.store(GetCurrentThreadId());
     if (!WriteObservedArguments()) return 2;
     const HANDLE worker = CreateThread(nullptr, 0U, FixtureWorker, nullptr, 0U, nullptr);
     if (worker == nullptr) return 3;

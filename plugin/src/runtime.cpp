@@ -4838,7 +4838,10 @@ void Runtime::Worker() noexcept {
                                         parsed->method == "debugger.step_over";
                     const bool outcomeConfirmed =
                         isStep ? WaitForPauseReason(PauseReasonKind::step, before, requestDeadline)
-                               : WaitForState(expected, before, requestDeadline);
+                        : directPause
+                            ? WaitForPauseReason(PauseReasonKind::userPause, before,
+                                                 requestDeadline)
+                            : WaitForState(expected, before, requestDeadline);
                     if (!outcomeConfirmed) {
                         return ErrorResponse(*parsed, "TIMEOUT",
                                              "mutation outcome was not callback-confirmed", false,
@@ -7948,6 +7951,7 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     bool markDetaching = false;
     bool exceptionBreakpointCallback = false;
     bool clearPendingException = false;
+    bool ownedPauseInterruptObserved = false;
     EventRecord event;
     switch (callbackType) {
     case CB_INITDEBUG:
@@ -8033,6 +8037,7 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
             event.hasAddress = false;
             event.hasCode = false;
             event.firstChance = false;
+            ownedPauseInterruptObserved = true;
         }
         clearPendingException = true;
         break;
@@ -8226,7 +8231,7 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
         pause.threadId = activeThreadId_.load();
         pause.hasThreadId = true;
     }
-    if (next == DebuggeeState::paused || clearProcess) {
+    if (ownedPauseInterruptObserved || callbackType == CB_PAUSEDEBUG || clearProcess) {
         pauseInterruptPending_.store(false);
     }
     const DebuggeeState previous = debuggeeState_.load();

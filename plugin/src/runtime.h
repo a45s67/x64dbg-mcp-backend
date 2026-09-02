@@ -38,10 +38,12 @@ struct PauseObservation {
     std::uint64_t address{0};
     std::uint64_t exceptionCode{0};
     std::uint32_t hitCount{0};
+    std::uint32_t threadId{0};
     std::uint8_t breakpointType{0};
     bool hasAddress{false};
     bool hasExceptionCode{false};
     bool firstChance{false};
+    bool hasThreadId{false};
 };
 
 enum class EventKind : std::uint8_t {
@@ -144,6 +146,7 @@ private:
     std::atomic<std::uint64_t> attachGeneration_{0};
     std::atomic<std::uint32_t> detachProcessId_{0};
     std::atomic<std::uint64_t> detachGeneration_{0};
+    std::atomic<bool> pauseInterruptPending_{false};
     HANDLE instanceMutex_{nullptr};
     HANDLE pipe_{INVALID_HANDLE_VALUE};
     HANDLE nonceWriter_{nullptr};

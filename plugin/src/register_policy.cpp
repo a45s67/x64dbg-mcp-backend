@@ -71,6 +71,57 @@ std::optional<std::string> BuildExceptionContinueCommand(
     return command;
 }
 
+bool ApplyRegisterAssignments(
+    CONTEXT& context, const std::vector<RegisterAssignment>& assignments) noexcept {
+    if (assignments.empty() || assignments.size() > 4U) return false;
+    for (std::size_t index = 0U; index < assignments.size(); ++index) {
+        const RegisterAssignment& assignment = assignments[index];
+        const std::optional<WritableRegister> spec = FindWritableRegister(assignment.name);
+        if (!spec ||
+            (spec->bits < 64U && assignment.value >= (std::uint64_t{1U} << spec->bits)) ||
+            std::find_if(assignments.begin(), assignments.begin() + index,
+                         [&assignment](const RegisterAssignment& earlier) {
+                             return earlier.name == assignment.name;
+                         }) != assignments.begin() + index) {
+            return false;
+        }
+#ifdef _WIN64
+        if (assignment.name == "rax") context.Rax = assignment.value;
+        else if (assignment.name == "rbx") context.Rbx = assignment.value;
+        else if (assignment.name == "rcx") context.Rcx = assignment.value;
+        else if (assignment.name == "rdx") context.Rdx = assignment.value;
+        else if (assignment.name == "rsi") context.Rsi = assignment.value;
+        else if (assignment.name == "rdi") context.Rdi = assignment.value;
+        else if (assignment.name == "rbp") context.Rbp = assignment.value;
+        else if (assignment.name == "rsp") context.Rsp = assignment.value;
+        else if (assignment.name == "rip") context.Rip = assignment.value;
+        else if (assignment.name == "r8") context.R8 = assignment.value;
+        else if (assignment.name == "r9") context.R9 = assignment.value;
+        else if (assignment.name == "r10") context.R10 = assignment.value;
+        else if (assignment.name == "r11") context.R11 = assignment.value;
+        else if (assignment.name == "r12") context.R12 = assignment.value;
+        else if (assignment.name == "r13") context.R13 = assignment.value;
+        else if (assignment.name == "r14") context.R14 = assignment.value;
+        else if (assignment.name == "r15") context.R15 = assignment.value;
+        else if (assignment.name == "eflags") context.EFlags = static_cast<DWORD>(assignment.value);
+        else return false;
+#else
+        if (assignment.name == "eax") context.Eax = static_cast<DWORD>(assignment.value);
+        else if (assignment.name == "ebx") context.Ebx = static_cast<DWORD>(assignment.value);
+        else if (assignment.name == "ecx") context.Ecx = static_cast<DWORD>(assignment.value);
+        else if (assignment.name == "edx") context.Edx = static_cast<DWORD>(assignment.value);
+        else if (assignment.name == "esi") context.Esi = static_cast<DWORD>(assignment.value);
+        else if (assignment.name == "edi") context.Edi = static_cast<DWORD>(assignment.value);
+        else if (assignment.name == "ebp") context.Ebp = static_cast<DWORD>(assignment.value);
+        else if (assignment.name == "esp") context.Esp = static_cast<DWORD>(assignment.value);
+        else if (assignment.name == "eip") context.Eip = static_cast<DWORD>(assignment.value);
+        else if (assignment.name == "eflags") context.EFlags = static_cast<DWORD>(assignment.value);
+        else return false;
+#endif
+    }
+    return true;
+}
+
 bool IsReturnInstruction(const std::string_view instruction) noexcept {
     const std::size_t start = instruction.find_first_not_of(" \t");
     if (start == std::string_view::npos) return false;

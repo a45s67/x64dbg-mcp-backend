@@ -1009,7 +1009,9 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
         }
     } else if (methodValue == "registers.write") {
         json_t* name = json_object_get(payload, "name");
-        if (json_object_size(payload) != 3U ||
+        json_t* thread = json_object_get(payload, "thread_id");
+        const std::size_t expectedFields = thread == nullptr ? 3U : 4U;
+        if (json_object_size(payload) != expectedFields ||
             !json_is_string(json_object_get(payload, "operation_id")) ||
             !json_is_string(name) || json_string_length(name) < 2U ||
             json_string_length(name) > 6U ||
@@ -1017,6 +1019,12 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             return std::nullopt;
         }
         registerName.assign(json_string_value(name), json_string_length(name));
+        if (thread != nullptr) {
+            std::uint64_t parsedThread = 0U;
+            if (!ParseCanonicalHex64(thread, parsedThread) || parsedThread == 0U ||
+                parsedThread > 0xffffffffULL) return std::nullopt;
+            targetThreadId = static_cast<std::uint32_t>(parsedThread);
+        }
     } else if (methodValue == "memory.map") {
         json_t* module = json_object_get(payload, "module");
         json_t* committed = json_object_get(payload, "committed_only");
@@ -1408,9 +1416,19 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     } else if (methodValue == "debugger.pause" || methodValue == "debugger.resume" ||
                methodValue == "debugger.step_into" || methodValue == "debugger.step_over" ||
                methodValue == "debugger.step_out" || methodValue == "debugger.stop") {
-        if (json_object_size(payload) != 1U ||
+        json_t* thread = json_object_get(payload, "thread_id");
+        const bool supportsThread = methodValue == "debugger.step_into" ||
+                                    methodValue == "debugger.step_over";
+        const std::size_t expectedFields = supportsThread && thread != nullptr ? 2U : 1U;
+        if (json_object_size(payload) != expectedFields ||
             !json_is_string(json_object_get(payload, "operation_id"))) {
             return std::nullopt;
+        }
+        if (thread != nullptr) {
+            std::uint64_t parsedThread = 0U;
+            if (!supportsThread || !ParseCanonicalHex64(thread, parsedThread) ||
+                parsedThread == 0U || parsedThread > 0xffffffffULL) return std::nullopt;
+            targetThreadId = static_cast<std::uint32_t>(parsedThread);
         }
     } else if (methodValue == "breakpoints.enable" ||
                methodValue == "breakpoints.disable") {
@@ -2278,6 +2296,54 @@ ThreadContextCapture CaptureThreadContext(
     }
     return {ThreadContextStatus::ok,
             {registers, requested, activeBefore, current}};
+}
+
+ThreadContextStatus MutateThreadContext(
+    const std::uint32_t requestedThreadId,
+    const std::vector<RegisterAssignment>& assignments) {
+    if (requestedThreadId == 0U || assignments.empty()) {
+        return ThreadContextStatus::missing;
+    }
+    THREADLIST list{};
+    DbgGetThreadList(&list);
+    struct ThreadListGuard {
+        THREADALLINFO* value;
+        ~ThreadListGuard() { if (value != nullptr) BridgeFree(value); }
+    } guard{list.list};
+    if (list.count < 0 || list.count > 65536 ||
+        (list.count > 0 && list.list == nullptr)) {
+        return ThreadContextStatus::invalidList;
+    }
+    HANDLE threadHandle = nullptr;
+    for (int index = 0; index < list.count; ++index) {
+        if (list.list[index].BasicInfo.ThreadId == requestedThreadId) {
+            if (threadHandle != nullptr) return ThreadContextStatus::invalidList;
+            threadHandle = list.list[index].BasicInfo.Handle;
+        }
+    }
+    if (threadHandle == nullptr || threadHandle == INVALID_HANDLE_VALUE) {
+        return ThreadContextStatus::missing;
+    }
+    CONTEXT context{};
+    context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (GetThreadContext(threadHandle, &context) == FALSE ||
+        !ApplyRegisterAssignments(context, assignments) ||
+        SetThreadContext(threadHandle, &context) == FALSE) {
+        return ThreadContextStatus::unavailable;
+    }
+    CONTEXT observed{};
+    observed.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (GetThreadContext(threadHandle, &observed) == FALSE) {
+        return ThreadContextStatus::unavailable;
+    }
+    const REGISTERCONTEXT_AVX512 registers = CoreRegisterContext(observed);
+    for (const RegisterAssignment& assignment : assignments) {
+        const std::optional<duint> value = RegisterValue(registers, assignment.name);
+        if (!value || *value != static_cast<duint>(assignment.value)) {
+            return ThreadContextStatus::changed;
+        }
+    }
+    return ThreadContextStatus::ok;
 }
 #endif
 
@@ -4656,10 +4722,12 @@ void Runtime::Worker() noexcept {
                     std::string ownedCommand;
                     DebuggeeState expected = state;
                     bool valid = false;
+                    bool directPause = false;
+                    std::optional<std::uint32_t> expectedStepThread;
                     if (parsed->method == "debugger.pause") {
-                        command = "pause";
                         expected = DebuggeeState::paused;
                         valid = state == DebuggeeState::running;
+                        directPause = true;
                     } else if (parsed->method == "debugger.resume") {
                         command = "run";
                         expected = DebuggeeState::running;
@@ -4670,17 +4738,32 @@ void Runtime::Worker() noexcept {
                             std::lock_guard lock(stateMutex_);
                             pause = latestPause_;
                         }
-                        const std::optional<std::string> builtCommand =
-                            BuildExceptionContinueCommand(
-                                parsed->exceptionRegisterOverrides,
-                                parsed->exceptionDisposition == "handled");
-                        if (!builtCommand) {
-                            return ErrorResponse(
-                                *parsed, "INVALID_ARGUMENT",
-                                "register override is not writable on this architecture",
-                                false, false);
+                        for (const RegisterAssignment& assignment :
+                             parsed->exceptionRegisterOverrides) {
+                            const std::optional<WritableRegister> spec =
+                                FindWritableRegister(assignment.name);
+                            if (!spec ||
+                                (spec->bits < 64U && assignment.value >=
+                                    (std::uint64_t{1U} << spec->bits))) {
+                                return ErrorResponse(
+                                    *parsed, "INVALID_ARGUMENT",
+                                    "register override is not writable on this architecture",
+                                    false, false);
+                            }
                         }
-                        ownedCommand = *builtCommand;
+                        if (!parsed->exceptionRegisterOverrides.empty()) {
+                            if (!pause.hasThreadId) {
+                                return ErrorResponse(
+                                    *parsed, "INVALID_DEBUGGER_STATE",
+                                    "exception pause has no correlated thread", false, false);
+                            }
+                            const ThreadContextStatus mutation = MutateThreadContext(
+                                pause.threadId, parsed->exceptionRegisterOverrides);
+                            if (mutation != ThreadContextStatus::ok) {
+                                return ThreadContextErrorResponse(*parsed, mutation);
+                            }
+                        }
+                        ownedCommand = parsed->exceptionDisposition == "handled" ? "serun" : "erun";
                         command = ownedCommand.c_str();
                         expected = DebuggeeState::running;
                         valid = state == DebuggeeState::paused &&
@@ -4692,10 +4775,12 @@ void Runtime::Worker() noexcept {
                         command = "sti";
                         expected = DebuggeeState::paused;
                         valid = state == DebuggeeState::paused;
+                        expectedStepThread = parsed->targetThreadId.value_or(DbgGetThreadId());
                     } else if (parsed->method == "debugger.step_over") {
                         command = "sto";
                         expected = DebuggeeState::paused;
                         valid = state == DebuggeeState::paused;
+                        expectedStepThread = parsed->targetThreadId.value_or(DbgGetThreadId());
                     } else {
                         command = "stop";
                         expected = DebuggeeState::absent;
@@ -4712,10 +4797,41 @@ void Runtime::Worker() noexcept {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE", message, false,
                                              false);
                     }
+                    if (expectedStepThread && *expectedStepThread == 0U) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                             "no debugger thread is selected", false, false);
+                    }
+                    if (expectedStepThread && DbgGetThreadId() != *expectedStepThread) {
+                        const std::string selectCommand =
+                            "switchthread " + HexValue(*expectedStepThread);
+                        if (!DbgCmdExecDirect(selectCommand.c_str()) ||
+                            DbgGetThreadId() != *expectedStepThread) {
+                            return ErrorResponse(*parsed, "INVALID_ARGUMENT",
+                                                 "thread_id could not be selected", false,
+                                                 false);
+                        }
+                    }
                     const std::uint64_t before = generation_.load();
-                    if (!DbgCmdExec(command)) {
+                    bool submitted = false;
+                    if (directPause) {
+                        if (pauseInterruptPending_.exchange(true)) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                                 "a debugger interrupt is already pending", true,
+                                                 false);
+                        }
+                        const HANDLE processHandle = DbgGetProcessHandle();
+                        submitted = processHandle != nullptr &&
+                                    processHandle != INVALID_HANDLE_VALUE &&
+                                    DebugBreakProcess(processHandle) != FALSE;
+                        if (!submitted) pauseInterruptPending_.store(false);
+                    } else {
+                        submitted = DbgCmdExec(command);
+                    }
+                    if (!submitted) {
                         return ErrorResponse(*parsed, "BUSY",
-                                             "debugger command queue rejected the operation", true,
+                                             directPause
+                                                 ? "debugger interrupt request failed"
+                                                 : "debugger command queue rejected the operation", true,
                                              false);
                     }
                     const bool isStep = parsed->method == "debugger.step_into" ||
@@ -4730,6 +4846,17 @@ void Runtime::Worker() noexcept {
                     }
                     const std::uint64_t confirmed = ObservedGeneration(expected);
                     if (isStep) {
+                        PauseObservation stepPause;
+                        {
+                            std::lock_guard lock(stateMutex_);
+                            stepPause = latestPause_;
+                        }
+                        if (!expectedStepThread || !stepPause.hasThreadId ||
+                            stepPause.threadId != *expectedStepThread) {
+                            return ErrorResponse(
+                                *parsed, "TIMEOUT",
+                                "step paused a different or uncorrelated thread", false, true);
+                        }
                         REGDUMP_AVX512 dump{};
                         if (!DbgGetRegDumpEx(&dump, sizeof(dump))) {
                             return ErrorResponse(*parsed, "INTERNAL",
@@ -5642,14 +5769,13 @@ void Runtime::Worker() noexcept {
                                              "register write requires a paused debuggee", false,
                                              false);
                     }
-                    REGDUMP_AVX512 beforeDump{};
-                    if (!DbgGetRegDumpEx(&beforeDump, sizeof(beforeDump))) {
-                        return ErrorResponse(*parsed, "INTERNAL",
-                                             "initial register snapshot is unavailable", true,
-                                             false);
+                    const ThreadContextCapture beforeCapture =
+                        CaptureThreadContext(parsed->targetThreadId);
+                    if (beforeCapture.status != ThreadContextStatus::ok) {
+                        return ThreadContextErrorResponse(*parsed, beforeCapture.status);
                     }
-                    const std::optional<duint> previous =
-                        RegisterValue(beforeDump.regcontext, parsed->registerName);
+                    const std::optional<duint> previous = RegisterValue(
+                        beforeCapture.value.registers, parsed->registerName);
                     if (!previous) {
                         return ErrorResponse(*parsed, "INTERNAL",
                                              "register policy has no snapshot mapping", false,
@@ -5659,19 +5785,26 @@ void Runtime::Worker() noexcept {
                         return ErrorResponse(*parsed, "BUSY",
                                              "debugger changed before register write", true, false);
                     }
-                    if (!Script::Register::Set(
-                            spec->id, static_cast<duint>(parsed->registerWriteValue))) {
+                    if (parsed->targetThreadId) {
+                        const ThreadContextStatus mutation = MutateThreadContext(
+                            *parsed->targetThreadId,
+                            {{parsed->registerName, parsed->registerWriteValue}});
+                        if (mutation != ThreadContextStatus::ok) {
+                            return ThreadContextErrorResponse(*parsed, mutation);
+                        }
+                    } else if (!Script::Register::Set(
+                                   spec->id,
+                                   static_cast<duint>(parsed->registerWriteValue))) {
                         return ErrorResponse(*parsed, "ACCESS_DENIED",
                                              "typed register write failed", false, true);
                     }
-                    REGDUMP_AVX512 afterDump{};
-                    if (!DbgGetRegDumpEx(&afterDump, sizeof(afterDump))) {
-                        return ErrorResponse(*parsed, "TIMEOUT",
-                                             "register write completed without read-back", false,
-                                             true);
+                    const ThreadContextCapture afterCapture =
+                        CaptureThreadContext(parsed->targetThreadId);
+                    if (afterCapture.status != ThreadContextStatus::ok) {
+                        return ThreadContextErrorResponse(*parsed, afterCapture.status);
                     }
-                    const std::optional<duint> observed =
-                        RegisterValue(afterDump.regcontext, parsed->registerName);
+                    const std::optional<duint> observed = RegisterValue(
+                        afterCapture.value.registers, parsed->registerName);
                     if (!PausedSnapshotCurrent(*snapshot) || !observed ||
                         *observed != static_cast<duint>(parsed->registerWriteValue)) {
                         return ErrorResponse(*parsed, "TIMEOUT",
@@ -5684,6 +5817,8 @@ void Runtime::Worker() noexcept {
                            JsonString(HexValue(*previous)) + ",\"value\":" +
                            JsonString(HexValue(*observed)) + ",\"changed\":" +
                            (*previous == *observed ? "false" : "true") +
+                           ",\"thread_id\":" +
+                           JsonString(HexValue(afterCapture.value.threadId)) +
                            ",\"state_generation\":" + std::to_string(*snapshot) + "}}";
                 }
                 if (parsed->method == "registers.read") {
@@ -8067,6 +8202,13 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     } else {
         if (callbackProcessId) processId_.store(*callbackProcessId);
         if (callbackThreadId) activeThreadId_.store(*callbackThreadId);
+    }
+    if (next == DebuggeeState::paused && activeThreadId_.load() != 0U) {
+        pause.threadId = activeThreadId_.load();
+        pause.hasThreadId = true;
+    }
+    if (next == DebuggeeState::paused || clearProcess) {
+        pauseInterruptPending_.store(false);
     }
     const DebuggeeState previous = debuggeeState_.load();
     if (next == DebuggeeState::paused && previous == DebuggeeState::paused) {

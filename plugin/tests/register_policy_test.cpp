@@ -69,6 +69,30 @@ int main() {
         std::cerr << "exception continuation command policy failed\n";
         return 5;
     }
+    CONTEXT mutableContext{};
+    mutableContext.EFlags = 0x202U;
+#ifdef _WIN64
+    mutableContext.Rdi = 1U;
+    mutableContext.Rip = 2U;
+    if (!mcp::ApplyRegisterAssignments(mutableContext, validAssignments) ||
+        mutableContext.Rdi != 0x771e0000ULL || mutableContext.Rip != 0x1e42d0cULL ||
+        mutableContext.EFlags != 0x202U) {
+#else
+    mutableContext.Edi = 1U;
+    mutableContext.Eip = 2U;
+    if (!mcp::ApplyRegisterAssignments(mutableContext, validAssignments) ||
+        mutableContext.Edi != 0x771e0000U || mutableContext.Eip != 0x1e42d0cU ||
+        mutableContext.EFlags != 0x202U) {
+#endif
+        std::cerr << "Windows context mutation failed\n";
+        return 6;
+    }
+    if (mcp::ApplyRegisterAssignments(mutableContext, {}) ||
+        mcp::ApplyRegisterAssignments(mutableContext, wrongArchitecture) ||
+        mcp::ApplyRegisterAssignments(mutableContext, {{"eip", 1U}, {"eip", 2U}})) {
+        std::cerr << "invalid Windows context mutation was accepted\n";
+        return 7;
+    }
     const auto flags = mcp::FindWritableRegister("eflags");
     if (!flags || flags->bits != 32U || mcp::FindWritableRegister("al") ||
         mcp::FindWritableRegister("dr0") || mcp::FindWritableRegister("RAX")) {

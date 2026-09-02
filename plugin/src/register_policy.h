@@ -28,6 +28,9 @@ FindWritableRegister(std::string_view name) noexcept;
 [[nodiscard]] std::optional<std::string> BuildExceptionContinueCommand(
     const std::vector<RegisterAssignment>& assignments, bool handled) noexcept;
 
+[[nodiscard]] bool ApplyRegisterAssignments(
+    CONTEXT& context, const std::vector<RegisterAssignment>& assignments) noexcept;
+
 [[nodiscard]] bool IsReturnInstruction(std::string_view instruction) noexcept;
 
 [[nodiscard]] REGISTERCONTEXT_AVX512

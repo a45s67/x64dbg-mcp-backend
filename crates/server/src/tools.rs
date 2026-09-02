@@ -155,8 +155,17 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             validate_address_ref(object, "address")?;
             optional_integer(object, "timeout_ms", 100, 20_000)
         }
-        "debugger.pause" | "debugger.resume" | "debugger.step_into" | "debugger.step_over"
-        | "debugger.step_out" | "debugger.stop" | "debuggee.detach" => operation(object, &[]),
+        "debugger.pause" | "debugger.resume" | "debugger.step_out" | "debugger.stop"
+        | "debuggee.detach" => operation(object, &[]),
+        "debugger.step_into" | "debugger.step_over" => {
+            exact_keys(object, &["operation_id", "instance_id"], &["thread_id"])?;
+            validate_operation_id(object)?;
+            validate_instance_id(object)?;
+            if object.contains_key("thread_id") {
+                validate_thread_id(object)?;
+            }
+            Ok(())
+        }
         "debugger.continue_exception" => {
             exact_keys(
                 object,
@@ -382,7 +391,16 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             Ok(())
         }
         "registers.write" => {
-            operation(object, &["name", "value"])?;
+            exact_keys(
+                object,
+                &["operation_id", "instance_id", "name", "value"],
+                &["thread_id"],
+            )?;
+            validate_operation_id(object)?;
+            validate_instance_id(object)?;
+            if object.contains_key("thread_id") {
+                validate_thread_id(object)?;
+            }
             let name = string(object, "name", 2, 6)?;
             if !matches!(
                 name,
@@ -1299,14 +1317,26 @@ fn build_catalog() -> Vec<Value> {
         ),
         mutation_tool(
             "debugger.step_into",
-            "Execute one step-into operation and wait for callback-confirmed pause.",
-            operation_schema(vec![]),
+            "Step one explicit or selected thread and verify the pause thread.",
+            operation_schema_with_optional(
+                vec![],
+                vec![(
+                    "thread_id",
+                    json!({"type":"string","pattern":"^0x[0-9a-f]{1,8}$"}),
+                )],
+            ),
             false,
         ),
         mutation_tool(
             "debugger.step_over",
-            "Execute one step-over operation and wait for callback-confirmed pause.",
-            operation_schema(vec![]),
+            "Step over on one explicit or selected thread and verify the pause thread.",
+            operation_schema_with_optional(
+                vec![],
+                vec![(
+                    "thread_id",
+                    json!({"type":"string","pattern":"^0x[0-9a-f]{1,8}$"}),
+                )],
+            ),
             false,
         ),
         mutation_tool(
@@ -1482,25 +1512,31 @@ fn build_catalog() -> Vec<Value> {
         ),
         mutation_tool(
             "registers.write",
-            "Write one full-width core register in a paused debuggee through the typed SDK, then verify exact read-back. Names are architecture-specific; partial, vector, segment, and debug registers are excluded.",
-            operation_schema(vec![
-                (
-                    "name",
-                    json!({
-                        "type":"string",
-                        "enum":[
-                            "rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","rip",
-                            "r8","r9","r10","r11","r12","r13","r14","r15",
-                            "eax","ebx","ecx","edx","esi","edi","ebp","esp","eip",
-                            "eflags"
-                        ]
-                    }),
-                ),
-                (
-                    "value",
-                    json!({"type":"string","pattern":"^0x[0-9a-f]{1,16}$","minLength":3,"maxLength":18}),
-                ),
-            ]),
+            "Write one full-width core register on an explicit or selected paused thread and verify read-back.",
+            operation_schema_with_optional(
+                vec![
+                    (
+                        "name",
+                        json!({
+                            "type":"string",
+                            "enum":[
+                                "rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","rip",
+                                "r8","r9","r10","r11","r12","r13","r14","r15",
+                                "eax","ebx","ecx","edx","esi","edi","ebp","esp","eip",
+                                "eflags"
+                            ]
+                        }),
+                    ),
+                    (
+                        "value",
+                        json!({"type":"string","pattern":"^0x[0-9a-f]{1,16}$","minLength":3,"maxLength":18}),
+                    ),
+                ],
+                vec![(
+                    "thread_id",
+                    json!({"type":"string","pattern":"^0x[0-9a-f]{1,8}$"}),
+                )],
+            ),
             false,
         ),
         read_tool(

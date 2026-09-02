@@ -4787,16 +4787,12 @@ void Runtime::Worker() noexcept {
                         command = "sti";
                         expected = DebuggeeState::paused;
                         valid = state == DebuggeeState::paused;
-                        expectedStepThread = parsed->targetThreadId
-                                                 ? parsed->targetThreadId
-                                                 : SelectedThreadId();
+                        expectedStepThread = DbgGetThreadId();
                     } else if (parsed->method == "debugger.step_over") {
                         command = "sto";
                         expected = DebuggeeState::paused;
                         valid = state == DebuggeeState::paused;
-                        expectedStepThread = parsed->targetThreadId
-                                                 ? parsed->targetThreadId
-                                                 : SelectedThreadId();
+                        expectedStepThread = DbgGetThreadId();
                     } else {
                         command = "stop";
                         expected = DebuggeeState::absent;
@@ -4815,17 +4811,14 @@ void Runtime::Worker() noexcept {
                     }
                     if (expectedStepThread && *expectedStepThread == 0U) {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
-                                             "no debugger thread is selected", false, false);
+                                             "no debug-event thread is available", false, false);
                     }
-                    if (expectedStepThread && SelectedThreadId() != expectedStepThread) {
-                        const std::string selectCommand =
-                            "switchthread " + HexValue(*expectedStepThread) + ", quiet";
-                        if (!DbgCmdExecDirect(selectCommand.c_str()) ||
-                            SelectedThreadId() != expectedStepThread) {
-                            return ErrorResponse(*parsed, "INVALID_ARGUMENT",
-                                                 "thread_id could not be selected", false,
-                                                 false);
-                        }
+                    if (expectedStepThread && parsed->targetThreadId &&
+                        parsed->targetThreadId != expectedStepThread) {
+                        return ErrorResponse(
+                            *parsed, "INVALID_ARGUMENT",
+                            "thread_id must match x64dbg's current debug-event thread",
+                            false, false);
                     }
                     const std::uint64_t before = generation_.load();
                     const bool isStep = parsed->method == "debugger.step_into" ||
@@ -4843,10 +4836,9 @@ void Runtime::Worker() noexcept {
                                     DebugBreakProcess(processHandle) != FALSE;
                         if (!submitted) pauseInterruptPending_.store(false);
                     } else if (isStep) {
-                        // Keep the verified hActiveThread selection and the one
-                        // run-state mutation in the same executor turn. Queuing
-                        // sti/sto permits a later debug-event update to restore a
-                        // different active thread before the command executes.
+                        // x64dbg's step engine operates on the current debug-event
+                        // thread, not the GUI-selected hActiveThread. Submit the
+                        // one verified run-state mutation in this executor turn.
                         submitted = DbgCmdExecDirect(command);
                     } else {
                         submitted = DbgCmdExec(command);

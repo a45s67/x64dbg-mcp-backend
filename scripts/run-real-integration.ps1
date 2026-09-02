@@ -1905,12 +1905,42 @@ try {
     if (!$workerThreadAtStep -or !$mainThreadAtStep) {
         throw 'Persistent fixture main or worker thread exited before exact-thread stepping.'
     }
+    $eventThreadId = $pauseObservation.active_thread_id
+    $nonEventThread = if ($workerThreadAtStep.thread_id -ne $eventThreadId) {
+        $workerThreadAtStep
+    } else {
+        $mainThreadAtStep
+    }
+    if (!$eventThreadId -or $nonEventThread.thread_id -eq $eventThreadId) {
+        throw 'Pause fixture did not expose a distinct non-event thread.'
+    }
+    $nonEventStep = Invoke-Mcp 'tools/call' @{
+        name = 'debugger.step_into'; arguments = @{
+            operation_id = [Guid]::NewGuid().ToString()
+            instance_id = $script:InstanceId
+            thread_id = $nonEventThread.thread_id
+        }
+    } 333
+    if (!$nonEventStep.isError -or
+        $nonEventStep.structuredContent.error.code -ne 'INVALID_ARGUMENT') {
+        throw 'Step-into did not reject a non-event thread before mutation.'
+    }
+    $afterRejectedStep = Invoke-Tool 'debugger.state' @{} 334
+    if ($afterRejectedStep.state_generation -ne $pause.state_generation -or
+        $afterRejectedStep.debuggee_state -ne 'paused') {
+        throw 'Rejected non-event step changed debugger state.'
+    }
+    $nonTargetThread = if ($mainThreadAtStep.thread_id -ne $eventThreadId) {
+        $mainThreadAtStep
+    } else {
+        $workerThreadAtStep
+    }
     $nonTargetBeforeStep = Invoke-Tool 'registers.read' @{
-        names = @('cip'); thread_id = $mainThreadAtStep.thread_id
+        names = @('cip'); thread_id = $nonTargetThread.thread_id
     } 330
     $stepInto = Invoke-Tool 'debugger.step_into' @{
         operation_id = [Guid]::NewGuid().ToString()
-        thread_id = $workerThreadAtStep.thread_id
+        thread_id = $eventThreadId
     } 17
     $stepIntoObservation = Invoke-Tool 'debugger.wait_for_pause' @{
         after_generation = $pause.state_generation; timeout_ms = 1500
@@ -1918,11 +1948,11 @@ try {
     if ($stepIntoObservation.state_generation -ne $stepInto.state_generation -or
         $stepIntoObservation.pause_reason.kind -ne 'step' -or
         $stepInto.pause_reason.kind -ne 'step' -or !$stepInto.instruction_pointer -or
-        $stepInto.active_thread_id -ne $workerThreadAtStep.thread_id) {
+        $stepInto.active_thread_id -ne $eventThreadId) {
         throw 'Exact-thread step-into callback reason, generation, or thread was not retained.'
     }
     $nonTargetAfterStep = Invoke-Tool 'registers.read' @{
-        names = @('cip'); thread_id = $mainThreadAtStep.thread_id
+        names = @('cip'); thread_id = $nonTargetThread.thread_id
     } 331
     if ($nonTargetAfterStep.registers.cip -ne $nonTargetBeforeStep.registers.cip) {
         throw 'Exact-thread step changed the non-target thread instruction pointer.'

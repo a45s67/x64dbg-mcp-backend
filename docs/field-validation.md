@@ -73,16 +73,16 @@ from any other thread. Runtime acceptance writes and restores a non-selected wor
 steps that worker and proves the prior selected thread's instruction pointer did not move.
 
 `DbgGetThreadId()` is not a selected-thread API: x64dbg implements it from the current debug-event
-record (`GetDebugData()->dwThreadId`), while `switchthread` changes `hActiveThread`. Selected-thread
-identity must therefore be derived from `DbgGetThreadList().CurrentThread` and verified against
-`DbgGetThreadHandle()`. Comparing `switchthread` against `DbgGetThreadId()` rejects a successful
-selection whenever the requested thread differs from the last debug-event thread.
+record (`GetDebugData()->dwThreadId`), while `switchthread` changes only `hActiveThread`. Selected
+identity for register and call-stack reads must therefore be derived from
+`DbgGetThreadList().CurrentThread` and verified against `DbgGetThreadHandle()`.
 
-Selection and stepping must also remain in one debugger-executor turn. A synchronous
-`switchthread <tid>, quiet` followed by queued `sti` or `sto` permits another debug-event update to
-replace `hActiveThread` before the queued command executes. The backend submits the single
-run-state step with `DbgCmdExecDirect` immediately after verifying the selected handle, then still
-requires a callback whose TID matches the requested thread.
+x64dbg's `StepInto()` / `StepOver()` engine has no thread-handle argument and operates on the
+current debug-event thread. `thread_id` on the typed step tools is consequently a required-identity
+assertion, not a request to switch the engine to an arbitrary thread. A non-event TID is rejected
+before mutation. For the event TID, the backend submits the single run-state step with
+`DbgCmdExecDirect` and still requires the resulting callback TID to match. Runtime acceptance proves
+both rejection without a generation change and a callback-correlated exact event-thread step.
 
 ## Direct pause interruption
 

@@ -320,6 +320,11 @@ try {
         $peb.state_generation -ne $state.state_generation) {
         throw 'Typed PEB summary was incomplete or generation-inconsistent.'
     }
+    $pebAddressValue = [Convert]::ToUInt64($peb.address.Substring(2), 16)
+    $pebBeingDebuggedAddress = '0x{0:x}' -f ($pebAddressValue + 2)
+    $pebBeingDebuggedOriginal = Invoke-Tool 'memory.read' @{
+        address = $pebBeingDebuggedAddress; length = 1
+    } 333
     $arguments = Invoke-Tool 'context.arguments' @{ count = 6 } 223
     $expectedConvention = if ($Backend -eq 'x64') { 'windows_x64' } else { 'cdecl' }
     $expectedFirstSource = if ($Backend -eq 'x64') { 'rcx' } else { 'stack' }
@@ -1848,6 +1853,17 @@ try {
     $resume = $null
     $startupPause = $null
     $stableRunning = $false
+    $null = Invoke-Tool 'memory.write' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $pebBeingDebuggedAddress
+        data_hex = '00'
+    } 334
+    $pebBeingDebuggedHidden = Invoke-Tool 'memory.read' @{
+        address = $pebBeingDebuggedAddress; length = 1
+    } 335
+    if ($pebBeingDebuggedHidden.data_hex -ne '00') {
+        throw 'The benign fixture PEB BeingDebugged byte was not hidden before pause qualification.'
+    }
     for ($attempt = 0; $attempt -lt 6; $attempt++) {
         $resume = Invoke-Tool 'debugger.resume' @{
             operation_id = [Guid]::NewGuid().ToString()
@@ -1895,6 +1911,11 @@ try {
         $pauseObservation.pause_reason.kind -ne 'user_pause') {
         throw "Explicit pause was not retained as a generation-consistent user_pause observation: $($pauseObservation | ConvertTo-Json -Compress -Depth 10)"
     }
+    $null = Invoke-Tool 'memory.write' @{
+        operation_id = [Guid]::NewGuid().ToString()
+        address = $pebBeingDebuggedAddress
+        data_hex = $pebBeingDebuggedOriginal.data_hex
+    } 336
     $threadsBeforeExactStep = Invoke-Tool 'threads.list' @{ limit = 256 } 332
     $workerThreadAtStep = @($threadsBeforeExactStep.items | Where-Object {
         $_.thread_id -eq $fixtureWorkerThreadId

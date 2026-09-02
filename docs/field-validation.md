@@ -86,9 +86,12 @@ both rejection without a generation change and a callback-correlated exact event
 
 ## Direct pause interruption
 
-Submitting the textual `pause` command through x64dbg's command queue is not a reliable way to
-interrupt a debuggee whose debugger thread is occupied. `debugger.pause` calls `DebugBreakProcess`
-on the current debuggee process and admits only one pending interrupt request until a pause callback
-or process reset clears it. The resulting callback must be correlated to the returned generation
-and classified as `user_pause`; repeated client retries must not create multiple transient break
-threads.
+Submitting the textual `pause` command through x64dbg's asynchronous command queue is not a
+reliable way to interrupt a debuggee whose debugger thread is occupied. `debugger.pause` invokes
+x64dbg's pause command directly on the executor thread and admits only one pending request until a
+pause callback or process reset clears it. The native command plants a one-shot breakpoint at a
+real debuggee thread's instruction pointer before considering a remote break-in fallback. Calling
+`DebugBreakProcess` directly is incorrect when the debuggee's PEB `BeingDebugged` byte is hidden:
+`DbgUiRemoteBreakin` can exit cleanly without raising a breakpoint. The resulting pause callback
+must be correlated to the returned generation and classified as `user_pause`; repeated client
+retries must not create multiple transient break threads.

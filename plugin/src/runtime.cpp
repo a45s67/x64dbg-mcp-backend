@@ -4830,10 +4830,14 @@ void Runtime::Worker() noexcept {
                                                  "a debugger interrupt is already pending", true,
                                                  false);
                         }
-                        const HANDLE processHandle = DbgGetProcessHandle();
-                        submitted = processHandle != nullptr &&
-                                    processHandle != INVALID_HANDLE_VALUE &&
-                                    DebugBreakProcess(processHandle) != FALSE;
+                        // Use x64dbg's direct pause implementation. A raw
+                        // DebugBreakProcess call enters DbgUiRemoteBreakin,
+                        // which exits without raising EXCEPTION_BREAKPOINT when
+                        // the debuggee's PEB BeingDebugged byte is hidden. The
+                        // debugger command first plants a one-shot breakpoint
+                        // at a real debuggee thread's CIP and therefore remains
+                        // effective in that anti-debug state.
+                        submitted = DbgCmdExecDirect("pause");
                         if (!submitted) pauseInterruptPending_.store(false);
                     } else if (isStep) {
                         // x64dbg's step engine operates on the current debug-event

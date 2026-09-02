@@ -1317,7 +1317,7 @@ fn build_catalog() -> Vec<Value> {
         ),
         mutation_tool(
             "debugger.step_into",
-            "Step x64dbg's current debug-event thread and verify the pause thread. Optional thread_id is an assertion and must match that event thread.",
+            "Step the current debug-event thread; optional thread_id must match it.",
             operation_schema_with_optional(
                 vec![],
                 vec![(
@@ -1329,7 +1329,7 @@ fn build_catalog() -> Vec<Value> {
         ),
         mutation_tool(
             "debugger.step_over",
-            "Step over on x64dbg's current debug-event thread and verify the pause thread. Optional thread_id is an assertion and must match that event thread.",
+            "Step over the current debug-event thread; optional thread_id must match it.",
             operation_schema_with_optional(
                 vec![],
                 vec![(

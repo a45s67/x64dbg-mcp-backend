@@ -4847,6 +4847,7 @@ void Runtime::Worker() noexcept {
                                              "mutation outcome was not callback-confirmed", false,
                                              true);
                     }
+                    if (directPause) pauseInterruptPending_.store(false);
                     const std::uint64_t confirmed = ObservedGeneration(expected);
                     if (isStep) {
                         PauseObservation stepPause;
@@ -7951,7 +7952,6 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     bool markDetaching = false;
     bool exceptionBreakpointCallback = false;
     bool clearPendingException = false;
-    bool ownedPauseInterruptObserved = false;
     EventRecord event;
     switch (callbackType) {
     case CB_INITDEBUG:
@@ -8037,7 +8037,6 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
             event.hasAddress = false;
             event.hasCode = false;
             event.firstChance = false;
-            ownedPauseInterruptObserved = true;
         }
         clearPendingException = true;
         break;
@@ -8231,7 +8230,7 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
         pause.threadId = activeThreadId_.load();
         pause.hasThreadId = true;
     }
-    if (ownedPauseInterruptObserved || callbackType == CB_PAUSEDEBUG || clearProcess) {
+    if (clearProcess) {
         pauseInterruptPending_.store(false);
     }
     const DebuggeeState previous = debuggeeState_.load();

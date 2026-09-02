@@ -2229,25 +2229,29 @@ struct ThreadContextCapture {
     CapturedThreadContext value;
 };
 
+std::optional<std::uint32_t> SelectedThreadId() {
+    THREADLIST list{};
+    DbgGetThreadList(&list);
+    struct ThreadListGuard {
+        THREADALLINFO* value;
+        ~ThreadListGuard() { if (value != nullptr) BridgeFree(value); }
+    } guard{list.list};
+    if (list.count <= 0 || list.count > 65536 || list.list == nullptr ||
+        list.CurrentThread < 0 || list.CurrentThread >= list.count) {
+        return std::nullopt;
+    }
+    const THREADALLINFO& selected = list.list[list.CurrentThread];
+    const HANDLE selectedHandle = DbgGetThreadHandle();
+    if (selected.BasicInfo.ThreadId == 0U || selected.BasicInfo.Handle == nullptr ||
+        selected.BasicInfo.Handle == INVALID_HANDLE_VALUE ||
+        selectedHandle != selected.BasicInfo.Handle) {
+        return std::nullopt;
+    }
+    return selected.BasicInfo.ThreadId;
+}
+
 ThreadContextCapture CaptureThreadContext(
     const std::optional<std::uint32_t> requestedThreadId) {
-    const std::uint32_t activeBefore = DbgGetThreadId();
-    const std::uint32_t requested = requestedThreadId.value_or(activeBefore);
-    if (activeBefore == 0U || requested == 0U) {
-        return {ThreadContextStatus::missing, {}};
-    }
-    if (!requestedThreadId) {
-        REGDUMP_AVX512 dump{};
-        if (!DbgGetRegDumpEx(&dump, sizeof(dump))) {
-            return {ThreadContextStatus::unavailable, {}};
-        }
-        if (DbgGetThreadId() != activeBefore) {
-            return {ThreadContextStatus::changed, {}};
-        }
-        return {ThreadContextStatus::ok,
-                {dump.regcontext, requested, activeBefore, true}};
-    }
-
     THREADLIST list{};
     DbgGetThreadList(&list);
     struct ThreadListGuard {
@@ -2255,8 +2259,16 @@ ThreadContextCapture CaptureThreadContext(
         ~ThreadListGuard() { if (value != nullptr) BridgeFree(value); }
     } guard{list.list};
     if (list.count < 0 || list.count > 65536 ||
-        (list.count > 0 && list.list == nullptr)) {
+        (list.count > 0 && list.list == nullptr) || list.CurrentThread < 0 ||
+        list.CurrentThread >= list.count) {
         return {ThreadContextStatus::invalidList, {}};
+    }
+    const std::uint32_t activeBefore =
+        list.list[list.CurrentThread].BasicInfo.ThreadId;
+    const std::uint32_t requested = requestedThreadId.value_or(activeBefore);
+    if (activeBefore == 0U || requested == 0U ||
+        DbgGetThreadHandle() != list.list[list.CurrentThread].BasicInfo.Handle) {
+        return {ThreadContextStatus::changed, {}};
     }
     const THREADALLINFO* match = nullptr;
     int matchIndex = -1;
@@ -2291,7 +2303,7 @@ ThreadContextCapture CaptureThreadContext(
         }
         registers = CoreRegisterContext(context);
     }
-    if (registers.cip != match->ThreadCip || DbgGetThreadId() != activeBefore) {
+    if (registers.cip != match->ThreadCip || SelectedThreadId() != activeBefore) {
         return {ThreadContextStatus::changed, {}};
     }
     return {ThreadContextStatus::ok,
@@ -4775,12 +4787,16 @@ void Runtime::Worker() noexcept {
                         command = "sti";
                         expected = DebuggeeState::paused;
                         valid = state == DebuggeeState::paused;
-                        expectedStepThread = parsed->targetThreadId.value_or(DbgGetThreadId());
+                        expectedStepThread = parsed->targetThreadId
+                                                 ? parsed->targetThreadId
+                                                 : SelectedThreadId();
                     } else if (parsed->method == "debugger.step_over") {
                         command = "sto";
                         expected = DebuggeeState::paused;
                         valid = state == DebuggeeState::paused;
-                        expectedStepThread = parsed->targetThreadId.value_or(DbgGetThreadId());
+                        expectedStepThread = parsed->targetThreadId
+                                                 ? parsed->targetThreadId
+                                                 : SelectedThreadId();
                     } else {
                         command = "stop";
                         expected = DebuggeeState::absent;
@@ -4801,11 +4817,11 @@ void Runtime::Worker() noexcept {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
                                              "no debugger thread is selected", false, false);
                     }
-                    if (expectedStepThread && DbgGetThreadId() != *expectedStepThread) {
+                    if (expectedStepThread && SelectedThreadId() != expectedStepThread) {
                         const std::string selectCommand =
-                            "switchthread " + HexValue(*expectedStepThread);
+                            "switchthread " + HexValue(*expectedStepThread) + ", quiet";
                         if (!DbgCmdExecDirect(selectCommand.c_str()) ||
-                            DbgGetThreadId() != *expectedStepThread) {
+                            SelectedThreadId() != expectedStepThread) {
                             return ErrorResponse(*parsed, "INVALID_ARGUMENT",
                                                  "thread_id could not be selected", false,
                                                  false);
@@ -7088,13 +7104,14 @@ void Runtime::Worker() noexcept {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
                                              "operation requires a paused debuggee", false, false);
                     }
-                    const std::uint32_t requestedThread =
-                        parsed->targetThreadId.value_or(DbgGetThreadId());
-                    if (requestedThread == 0U) {
+                    const std::optional<std::uint32_t> requestedThreadValue =
+                        parsed->targetThreadId ? parsed->targetThreadId : SelectedThreadId();
+                    if (!requestedThreadValue || *requestedThreadValue == 0U) {
                         return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
                                              "no current debugger thread is available", false,
                                              false);
                     }
+                    const std::uint32_t requestedThread = *requestedThreadValue;
                     THREADLIST list{};
                     DbgGetThreadList(&list);
                     struct CallstackThreadGuard {

@@ -72,6 +72,12 @@ exact `thread_id`, synchronously select it for x64dbg's step engine, and reject 
 from any other thread. Runtime acceptance writes and restores a non-selected worker register, then
 steps that worker and proves the prior selected thread's instruction pointer did not move.
 
+`DbgGetThreadId()` is not a selected-thread API: x64dbg implements it from the current debug-event
+record (`GetDebugData()->dwThreadId`), while `switchthread` changes `hActiveThread`. Selected-thread
+identity must therefore be derived from `DbgGetThreadList().CurrentThread` and verified against
+`DbgGetThreadHandle()`. Comparing `switchthread` against `DbgGetThreadId()` rejects a successful
+selection whenever the requested thread differs from the last debug-event thread.
+
 ## Direct pause interruption
 
 Submitting the textual `pause` command through x64dbg's command queue is not a reliable way to

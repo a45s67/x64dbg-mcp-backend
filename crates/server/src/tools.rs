@@ -947,7 +947,7 @@ fn validate_path(
     object: &serde_json::Map<String, Value>,
     field: &'static str,
 ) -> Result<(), ValidationError> {
-    let value = string(object, field, 3, 32_767)?;
+    let value = string(object, field, 3, 8192)?;
     if value.chars().any(char::is_control) {
         return Err(invalid(field, "must not contain control characters"));
     }
@@ -1041,7 +1041,7 @@ fn discovery_page(object: &serde_json::Map<String, Value>) -> Result<(), Validat
 }
 
 fn validate_hex(value: &str, field: &'static str) -> Result<(), ValidationError> {
-    if !(3..=34).contains(&value.len()) {
+    if !(3..=18).contains(&value.len()) {
         return Err(invalid(field, "must be canonical lowercase hexadecimal"));
     }
     if !value.starts_with("0x")
@@ -1202,7 +1202,7 @@ fn page(object: &serde_json::Map<String, Value>) -> Result<(), ValidationError> 
 }
 
 fn build_catalog() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         read_tool(
             "debugger.state",
             "Read debugger, debuggee, architecture, thread, instruction pointer, and pause state. Use this before state-sensitive operations.",
@@ -1302,7 +1302,7 @@ fn build_catalog() -> Vec<Value> {
         ),
         mutation_tool(
             "debugger.continue_exception",
-            "Continue an exception with optional atomic typed register overrides.",
+            "Continue from an actionable exception pause with optional atomic typed register overrides. Requires the current debug-event thread; overrides are architecture-checked before resuming.",
             operation_schema_with_optional(
                 vec![(
                     "disposition",
@@ -1310,7 +1310,12 @@ fn build_catalog() -> Vec<Value> {
                 )],
                 vec![(
                     "register_overrides",
-                    json!({"type":"array","minItems":1,"maxItems":4}),
+                    json!({"type":"array","minItems":1,"maxItems":4,
+                        "description":"Atomic full-width register writes. Names must be unique (also checked at runtime); values must fit the target register.",
+                        "items":object(vec![
+                            ("name", json!({"type":"string","enum":["rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","rip","r8","r9","r10","r11","r12","r13","r14","r15","eax","ebx","ecx","edx","esi","edi","ebp","esp","eip","eflags"]})),
+                            ("value", canonical_hex()),
+                        ], vec!["name", "value"])}),
                 )],
             ),
             false,
@@ -1442,15 +1447,9 @@ fn build_catalog() -> Vec<Value> {
             "debuggee.launch",
             "Load an existing architecture-matched PE into this debugger instance and wait for a callback-confirmed initial pause. Requires no current debuggee, does not restrict the filename extension, and never accepts arbitrary debugger commands.",
             operation_schema_with_optional(
-                vec![(
-                    "path",
-                    json!({"type":"string","minLength":3,"maxLength":32767}),
-                )],
+                vec![("path", path_schema())],
                 vec![
-                    (
-                        "working_directory",
-                        json!({"type":"string","minLength":3,"maxLength":32767}),
-                    ),
+                    ("working_directory", path_schema()),
                     (
                         "arguments",
                         json!({
@@ -1465,16 +1464,10 @@ fn build_catalog() -> Vec<Value> {
         ),
         mutation_tool(
             "debuggee.launch_dll",
-            "Start one architecture-matched DLL through x64dbg's fixed loaddll helper and return at the initial loader pause without resuming. The target is not yet loaded; resume and wait separately to reach x64dbg's DLL-entry breakpoint.",
+            "Start one architecture-matched DLL through x64dbg's fixed loaddll helper and return at the initial loader pause without resuming. Requires no current debuggee; the canonical DLL path must fit 511 UTF-16 code units. The target is not yet loaded; resume and wait separately to reach x64dbg's DLL-entry breakpoint.",
             operation_schema_with_optional(
-                vec![(
-                    "path",
-                    json!({"type":"string","minLength":3,"maxLength":32767}),
-                )],
-                vec![(
-                    "working_directory",
-                    json!({"type":"string","minLength":3,"maxLength":32767}),
-                )],
+                vec![("path", path_schema())],
+                vec![("working_directory", path_schema())],
             ),
             true,
         ),
@@ -1618,7 +1611,7 @@ fn build_catalog() -> Vec<Value> {
                 ("address", address_ref()),
                 (
                     "data_hex",
-                    json!({"type":"string","pattern":"^(?:[0-9a-f]{2}){1,4096}$"}),
+                    json!({"type":"string","pattern":"^(?:[0-9a-f]{2}){1,4096}$","minLength":2,"maxLength":8192}),
                 ),
             ]),
             true,
@@ -1833,7 +1826,7 @@ fn build_catalog() -> Vec<Value> {
                     ("address", address_ref()),
                     (
                         "instruction",
-                        json!({"type":"string","minLength":1,"maxLength":128,"pattern":"^[ -:<>-~]+$"}),
+                        json!({"type":"string","minLength":1,"maxLength":128,"pattern":"^[ -:<-~]+$"}),
                     ),
                 ],
                 vec!["address", "instruction"],
@@ -1846,7 +1839,7 @@ fn build_catalog() -> Vec<Value> {
                 ("address", address_ref()),
                 (
                     "instruction",
-                    json!({"type":"string","minLength":1,"maxLength":128,"pattern":"^[ -:<>-~]+$"}),
+                    json!({"type":"string","minLength":1,"maxLength":128,"pattern":"^[ -:<-~]+$"}),
                 ),
                 ("expected_bytes_hex", byte_hex_schema()),
                 ("fill_nop", json!({"type":"boolean"})),
@@ -1935,13 +1928,12 @@ fn build_catalog() -> Vec<Value> {
             "Resolve either one exact case-sensitive symbol name in one module or one runtime address against x64dbg's bounded known-symbol database.",
             json!({
                 "type":"object",
-                "additionalProperties":false,
                 "oneOf":[
                     {
                         "required":["module","name"],
                         "properties":{
                             "module":module_name_schema(),
-                            "name":{"type":"string","minLength":1,"maxLength":256}
+                            "name":{"type":"string","minLength":1,"maxLength":256,"pattern":"^[^\\u0000-\\u001f\\u007f-\\u009f]+$"}
                         },
                         "additionalProperties":false
                     },
@@ -2030,7 +2022,137 @@ fn build_catalog() -> Vec<Value> {
                 vec!["address"],
             ),
         ),
-    ]
+    ];
+    for tool in &mut tools {
+        if let Some(schema) = crate::output_schema::for_tool(tool["name"].as_str().unwrap()) {
+            tool["outputSchema"] = schema;
+        }
+        refine_schema(&mut tool["inputSchema"], "");
+        match tool["name"].as_str().unwrap() {
+            "strings.search" => {
+                tool["inputSchema"]["dependentRequired"] = json!({"context_bytes":["query"]});
+            }
+            "debugger.snapshot" => {
+                tool["inputSchema"]["properties"]["registers"]["description"] =
+                    json!("Register names; omitted defaults to cip, csp, cbp, eflags.");
+            }
+            "registers.read" => {
+                tool["inputSchema"]["properties"]["names"]["description"] = json!(
+                    "Register names; omitted or empty selects the architecture's bounded core register set."
+                );
+            }
+            "expressions.evaluate_batch" => {
+                tool["inputSchema"]["properties"]["expressions"]["description"] = json!(
+                    "1-32 expressions, at most 1024 UTF-8 bytes each and 8192 bytes in aggregate; aggregate and byte limits are checked at runtime."
+                );
+            }
+            "memory.search" => {
+                tool["inputSchema"]["properties"]["mask"]["description"] = json!(
+                    "One x (exact) or ? (wildcard) per pattern byte, with at least one x. Runtime checks mask length equals half the pattern_hex length."
+                );
+            }
+            "patches.restore" => {
+                tool["inputSchema"]["properties"]["expected_original_bytes_hex"]["description"] = json!(
+                    "Original bytes; must have the same byte length as, and differ from, expected_patched_bytes_hex. Cross-value comparison is checked at runtime."
+                );
+            }
+            _ => {}
+        }
+    }
+    tools
+}
+
+// JSON Schema lengths count Unicode scalars, not UTF-8 bytes. Keep byte limits
+// explicit rather than claiming maxLength enforces the runtime byte budget.
+fn refine_schema(schema: &mut Value, field: &str) {
+    if schema["type"] == "string"
+        && matches!(
+            field,
+            "module"
+                | "query"
+                | "expression"
+                | "expressions"
+                | "arguments"
+                | "path"
+                | "working_directory"
+        )
+    {
+        schema["pattern"] = json!(if field == "module" {
+            "^[^\\\\/\\u0000-\\u001f\\u007f-\\u009f]+$"
+        } else {
+            "^[^\\u0000-\\u001f\\u007f-\\u009f]*$"
+        });
+    }
+    let description = match field {
+        "operation_id" => Some(
+            "Caller UUID. Reuse only for an identical retry; inspect state before retrying an ambiguous mutation, never blindly issue a new ID.",
+        ),
+        "instance_id" => Some(
+            "Current instance UUID from debugger.state; guards against a replaced debugger instance.",
+        ),
+        "managed_id" => Some(
+            "Backend-issued UUID from the managed breakpoint record; preserve it to prove ownership of the exact record.",
+        ),
+        "trace_id" => Some(
+            "Backend-issued UUID returned by trace.start; identifies the exact retained trace, not an operation ID.",
+        ),
+        "cursor" => Some(
+            "Opaque next_cursor from the preceding page; pass unchanged with the same tool and filters. Omit for the first page. A page is not proof of complete coverage; inspect completeness and continuation fields.",
+        ),
+        "thread_id" => {
+            schema["not"] = json!({"pattern":"^0x0+$"});
+            Some(
+                "Nonzero lowercase hexadecimal 32-bit thread ID. Omit to use the selected thread for reads; stepping requires the current debug-event thread.",
+            )
+        }
+        "query" => Some(
+            "Nonempty case-insensitive literal substring filter, not a regex or debugger expression. Control characters are forbidden. Omit for an unfiltered page.",
+        ),
+        "compact" => Some(
+            "Default false. True omits redundant allocation_base and empty info fields; does not merge regions or change pagination.",
+        ),
+        "length" | "size" => Some("Size in bytes."),
+        "timeout_ms" => Some("Bounded wait duration in milliseconds."),
+        "working_directory" => Some(
+            "Existing absolute directory; omit to use the target file's parent directory. No control characters; minimum 3 UTF-8 bytes is checked at runtime.",
+        ),
+        _ => None,
+    };
+    if let Some(description) = description {
+        schema["description"] = json!(description);
+    }
+    if schema["type"] == "string"
+        && let Some(max) = schema["maxLength"].as_u64()
+        && schema.get("format").is_none()
+        && !schema["pattern"]
+            .as_str()
+            .is_some_and(|pattern| pattern.starts_with("^0x"))
+    {
+        let description = schema["description"].as_str().unwrap_or("");
+        schema["description"] =
+            json!(format!("{description} UTF-8 byte limit: {max} (runtime checked).").trim());
+    }
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        for (name, child) in properties {
+            refine_schema(child, name);
+        }
+    }
+    if let Some(items) = schema.get_mut("items") {
+        refine_schema(items, field);
+    }
+    for keyword in ["oneOf", "allOf", "anyOf"] {
+        if let Some(branches) = schema.get_mut(keyword).and_then(Value::as_array_mut) {
+            for branch in branches {
+                refine_schema(branch, field);
+            }
+        }
+    }
+}
+
+fn path_schema() -> Value {
+    // One Unicode scalar can satisfy the runtime's three-byte minimum.
+    json!({"type":"string","minLength":1,"maxLength":8192,
+        "description":"Existing absolute file path, without control characters. Minimum 3 UTF-8 bytes is checked at runtime; the 8192-byte ceiling also applies at the MCP request boundary. Filesystem and PE architecture checks occur in the debugger."})
 }
 
 fn module_name_schema() -> Value {
@@ -2122,7 +2244,7 @@ fn mixed_tool(name: &str, description: &str, input_schema: Value) -> Value {
 }
 
 fn canonical_hex() -> Value {
-    json!({ "type": "string", "pattern": "^0x[0-9a-f]+$", "minLength": 3, "maxLength": 34 })
+    json!({ "type": "string", "pattern": "^0x[0-9a-f]{1,16}$", "minLength": 3, "maxLength": 18 })
 }
 
 fn byte_hex_schema() -> Value {
@@ -2400,7 +2522,7 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(names.len(), catalog().len());
         for tool in catalog() {
-            if tool["name"] != "scyllahide.profile" {
+            if tool["name"] != "scyllahide.profile" && tool["name"] != "symbols.resolve" {
                 assert_eq!(tool["inputSchema"]["additionalProperties"], false);
             }
             assert!(tool["annotations"]["openWorldHint"].is_boolean());

@@ -43,8 +43,11 @@ foreach ($iteration in 1..$Iterations) {
         if (![string]::IsNullOrWhiteSpace($ServerPath)) {
             $arguments.ServerPath = $ServerPath
         }
+        $timer = [Diagnostics.Stopwatch]::StartNew()
         $json = & $runner @arguments | Out-String
+        $timer.Stop()
         $report = $json | ConvertFrom-Json
+        $report | Add-Member -NotePropertyName elapsed_seconds -NotePropertyValue $timer.Elapsed.TotalSeconds
         if (!$report.debugger_host_process_id -or !$report.sidecar_port -or !$report.instance_id) {
             throw 'Integration report omitted lifecycle ownership fields.'
         }
@@ -77,4 +80,5 @@ foreach ($iteration in 1..$Iterations) {
     runs = $reports.Count
     all_owned_sidecars_exited = $true
     all_loopback_ports_closed = $true
-} | ConvertTo-Json -Depth 4
+    reports = $reports
+} | ConvertTo-Json -Depth 8

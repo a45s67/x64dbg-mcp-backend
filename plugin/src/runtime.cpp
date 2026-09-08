@@ -4739,6 +4739,7 @@ void Runtime::Worker() noexcept {
                     bool valid = false;
                     bool directPause = false;
                     std::optional<std::uint32_t> expectedStepThread;
+                    std::optional<std::uint32_t> exceptionOverrideThread;
                     if (parsed->method == "debugger.pause") {
                         expected = DebuggeeState::paused;
                         valid = state == DebuggeeState::running;
@@ -4772,11 +4773,7 @@ void Runtime::Worker() noexcept {
                                     *parsed, "INVALID_DEBUGGER_STATE",
                                     "exception pause has no correlated thread", false, false);
                             }
-                            const ThreadContextStatus mutation = MutateThreadContext(
-                                pause.threadId, parsed->exceptionRegisterOverrides);
-                            if (mutation != ThreadContextStatus::ok) {
-                                return ThreadContextErrorResponse(*parsed, mutation);
-                            }
+                            exceptionOverrideThread = pause.threadId;
                         }
                         ownedCommand = parsed->exceptionDisposition == "handled" ? "serun" : "erun";
                         command = ownedCommand.c_str();
@@ -4822,6 +4819,15 @@ void Runtime::Worker() noexcept {
                             *parsed, "INVALID_ARGUMENT",
                             "thread_id must match x64dbg's current debug-event thread",
                             false, false);
+                    }
+                    // Validate continuation before writing context; the context update
+                    // and subsequent resume submission are not a single transaction.
+                    if (exceptionOverrideThread) {
+                        const ThreadContextStatus mutation = MutateThreadContext(
+                            *exceptionOverrideThread, parsed->exceptionRegisterOverrides);
+                        if (mutation != ThreadContextStatus::ok) {
+                            return ThreadContextErrorResponse(*parsed, mutation);
+                        }
                     }
                     const std::uint64_t before = generation_.load();
                     const bool isStep = parsed->method == "debugger.step_into" ||

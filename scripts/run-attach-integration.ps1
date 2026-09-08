@@ -59,6 +59,13 @@ function Invoke-Mcp([string]$Method, $Params, [int]$Id) {
 
 function Invoke-Tool([string]$Name, $Arguments, [int]$Id) {
     $result = Invoke-Mcp 'tools/call' @{ name = $Name; arguments = $Arguments } $Id
+    # State snapshots may race the attach/detach callbacks; retry only safe reads.
+    for ($attempt = 0; $attempt -lt 20 -and $Name -eq 'debugger.state' -and
+        $result.isError -and $result.structuredContent.error.code -eq 'BUSY' -and
+        $result.structuredContent.error.safeToRetry; $attempt++) {
+        Start-Sleep -Milliseconds 100
+        $result = Invoke-Mcp 'tools/call' @{ name = $Name; arguments = $Arguments } $Id
+    }
     if ($result.isError) {
         throw "Tool error from $Name`: $($result.structuredContent | ConvertTo-Json -Compress -Depth 8)"
     }

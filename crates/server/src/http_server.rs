@@ -798,7 +798,7 @@ mod tests {
             .unwrap();
         let response = app().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         serde_json::from_slice(&body).unwrap()
     }
 

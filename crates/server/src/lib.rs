@@ -10,4 +10,5 @@ pub mod ipc_adapter;
 pub mod ipc_transport;
 pub mod mcp;
 pub mod operation_ledger;
+mod output_schema;
 pub mod tools;

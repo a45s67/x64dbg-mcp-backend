@@ -1545,6 +1545,40 @@ try {
         $recoveryObserved.data_hex -eq '00000000') {
         throw 'Exception continuation did not execute the ABI-compatible recovery target.'
     }
+    # A rejected continuation must not apply overrides to a nonexception pause.
+    $rejectedOverrideThread = $recoveryPause.active_thread_id
+    if (!$rejectedOverrideThread) {
+        throw 'Recovery checkpoint pause omitted its correlated thread.'
+    }
+    $beforeRejectedOverride = Invoke-Tool 'registers.read' @{
+        thread_id = $rejectedOverrideThread
+    } 700
+    $rejectedOverrideRegister = if ($Backend -eq 'x32') { 'eax' } else { 'rax' }
+    $rejectedOverrideValue = if (
+        [Convert]::ToUInt64($beforeRejectedOverride.registers.$rejectedOverrideRegister.Substring(2), 16) -eq 1
+    ) { '0x2' } else { '0x1' }
+    foreach ($rejectedDisposition in @('handled', 'not_handled')) {
+        $rejectedOverride = Invoke-Mcp 'tools/call' @{
+            name = 'debugger.continue_exception'; arguments = @{
+                operation_id = [Guid]::NewGuid().ToString()
+                disposition = $rejectedDisposition
+                register_overrides = @(@{
+                    name = $rejectedOverrideRegister; value = $rejectedOverrideValue
+                })
+            }
+        } 701
+        if (!$rejectedOverride.isError -or
+            $rejectedOverride.structuredContent.error.code -ne 'INVALID_DEBUGGER_STATE') {
+            throw 'Exception continuation with overrides did not reject a nonexception pause.'
+        }
+        $afterRejectedOverride = Invoke-Tool 'registers.read' @{
+            thread_id = $rejectedOverrideThread
+        } 702
+        if (($beforeRejectedOverride.registers | ConvertTo-Json -Compress) -ne
+            ($afterRejectedOverride.registers | ConvertTo-Json -Compress)) {
+            throw 'Rejected exception continuation changed the paused thread registers.'
+        }
+    }
     $null = Invoke-Tool 'breakpoints.remove' @{
         operation_id = [Guid]::NewGuid().ToString()
         address = $recoveryCheckpointRef
@@ -1640,6 +1674,10 @@ try {
         $mainThread.thread_id -eq $workerThread.thread_id -or
         !$workerThread.instruction_pointer) {
         throw 'Fixture did not expose its exported persistent main and worker threads.'
+    }
+    # Timeout pause can select either fixture thread. Exercise the noncurrent one.
+    if ($workerThread.thread_id -eq $selectedThread.thread_id) {
+        $workerThread = $mainThread
     }
     $defaultSelectedRegisters = Invoke-Tool 'registers.read' @{
         names = @('cip', 'csp', 'cbp', 'eflags')
@@ -2270,6 +2308,8 @@ try {
         exception_breakpoint_foreign_remove_rejected = $true
         exception_breakpoint_removed = !$exceptionRemove.present
         breakpoint_transition_exception = $true
+        exception_rejection_dispositions = @('handled', 'not_handled')
+        exception_rejection_registers_unchanged = $true
         breakpoint_transition_conflict_rejected = $true
         selected_thread_context_equal = $selectedMapsEqual
         noncurrent_thread_context_read = $workerThread.thread_id

@@ -15,7 +15,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $integration = [IO.Path]::GetFullPath($IntegrationRoot)
+$build = Get-Item -LiteralPath (Join-Path $workspace 'build') -ErrorAction SilentlyContinue
+$physicalBuild = if ($build -and $build.Target) {
+    [IO.Path]::GetFullPath([string]@($build.Target)[0]).TrimEnd('\')
+} else { Join-Path $workspace 'build' }
 if (!$integration.StartsWith($workspace + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase) -and
+    !$integration.StartsWith($physicalBuild + [IO.Path]::DirectorySeparatorChar,
         [StringComparison]::OrdinalIgnoreCase)) {
     throw 'IntegrationRoot must remain inside the repository workspace.'
 }
@@ -135,6 +141,12 @@ try {
         throw 'Isolated debugger MCP sidecar did not become ready.'
     }
     $script:instanceId = ([Guid]::Parse([string]$ready.instance_id)).ToString()
+    $endpoint = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop)
+    $sidecar = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.ProcessId -in $endpoint.OwningProcess -and
+        $_.ParentProcessId -eq $debuggerProcess.Id -and $_.ExecutablePath -ieq $server
+    })
+    if ($sidecar.Count -ne 1) { throw 'MCP endpoint is not owned by the launched debugger sidecar.' }
     $null = Invoke-Mcp 'initialize' @{
         protocolVersion = '2025-11-25'
         capabilities = @{}
@@ -211,6 +223,10 @@ try {
         sample = $sampleLeaf
         sample_sha256 = (Get-FileHash -LiteralPath $sample -Algorithm SHA256).Hash.ToLowerInvariant()
         instance_id = $script:instanceId
+        debugger_pid = $debuggerProcess.Id
+        sidecar_pid = $sidecar[0].ProcessId
+        endpoint_port = $port
+        endpoint_parent_verified = $true
         launch_state = $launch.debuggee_state
         pause_reason = $state.pause_reason.kind
         state_generation = $state.state_generation

@@ -100,6 +100,13 @@ try {
         throw 'Installed x64 backend did not become ready.'
     }
     $script:InstanceId = ([Guid]::Parse([string]$ready.instance_id)).ToString()
+    $endpoint = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop)
+    $sidecar = @(Get-CimInstance Win32_Process | Where-Object {
+        $_.ProcessId -in $endpoint.OwningProcess -and
+        $_.ParentProcessId -eq $debuggerProcess.Id -and
+        $_.ExecutablePath -ieq (Join-Path $releaseRoot 'mcp\x96dbg-mcp-server.exe')
+    })
+    if ($sidecar.Count -ne 1) { throw 'Installed MCP endpoint is not owned by the launched debugger sidecar.' }
     if ($ready.debugger_state -ne 'absent' -or $ready.diagnostic_code -ne 'NO_DEBUGGEE' -or
         @($ready.next_actions).Count -ne 2 -or
         $ready.next_actions[0].tool -ne 'debuggee.launch' -or
@@ -684,6 +691,10 @@ try {
     [ordered]@{
         sample = [System.IO.Path]::GetFileName($sample)
         instance_id = $script:InstanceId
+        debugger_pid = $debuggerProcess.Id
+        sidecar_pid = $sidecar[0].ProcessId
+        endpoint_port = $port
+        endpoint_parent_verified = $true
         module_reference = $moduleRef
         resolved_address = $resolved.address
         resolved_module_base = $resolved.module_base

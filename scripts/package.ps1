@@ -6,6 +6,22 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Get-ServerExecutable([string[]]$Messages, [string]$ServerManifest) {
+    $artifacts = @($Messages | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object {
+        $_.reason -ceq 'compiler-artifact' -and
+        $_.target.name -ceq 'x64dbg-mcp-server' -and
+        $_.target.kind.Count -eq 1 -and $_.target.kind[0] -ceq 'bin' -and
+        !$_.profile.test -and
+        ![string]::IsNullOrWhiteSpace($_.manifest_path) -and
+        [IO.Path]::GetFullPath($_.manifest_path) -ieq [IO.Path]::GetFullPath($ServerManifest)
+    })
+    if ($artifacts.Count -ne 1 -or [string]::IsNullOrWhiteSpace($artifacts[0].executable)) {
+        throw 'Expected exactly one server binary artifact with an executable path.'
+    }
+    return $artifacts[0].executable
+}
+
 $workspace = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $workspace 'dist'
@@ -25,8 +41,10 @@ $previousX64dbgRoot = $env:X64DBG_ROOT
 $env:X64DBG_ROOT = $X64dbgRoot
 Push-Location $workspace
 try {
-    & cargo.exe build --offline --locked --release
+    $cargoMessages = & cargo.exe build --offline --locked --release --message-format=json
     if ($LASTEXITCODE -ne 0) { throw 'Rust release build failed.' }
+    $serverSource = Get-ServerExecutable -Messages $cargoMessages `
+        -ServerManifest (Join-Path $workspace 'crates\server\Cargo.toml')
     & cmd.exe /d /c (Join-Path $workspace 'scripts\build-plugin.cmd') x86
     if ($LASTEXITCODE -ne 0) { throw 'x86 plugin build failed.' }
     & cmd.exe /d /c (Join-Path $workspace 'scripts\build-plugin.cmd') x64
@@ -40,7 +58,7 @@ try {
         -Destination (Join-Path $stage 'x32')
     Copy-Item -LiteralPath 'build\windows-x64\x64dbg-mcp-backend.dp64' `
         -Destination (Join-Path $stage 'x64')
-    Copy-Item -LiteralPath 'target\release\x64dbg-mcp-server.exe' `
+    Copy-Item -LiteralPath $serverSource `
         -Destination (Join-Path $stage 'mcp\x96dbg-mcp-server.exe')
     Copy-Item -LiteralPath 'build\windows-x64\x96dbg-mcp-control.exe' `
         -Destination (Join-Path $stage 'mcp\x96dbg-mcp-control.exe')

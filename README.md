@@ -144,10 +144,24 @@ executes them automatically. The schema is
 
 Prefer `{ "module": "sample.exe", "rva": "0x1000" }` where an address schema
 accepts module-relative input. Every mutation requires the current backend
-`instance_id` and a fresh lowercase UUID `operation_id`.
+`instance_id` and a lowercase UUID `operation_id` for the logical operation.
+Generate a new ID for a new operation, not for a blind retry of an ambiguous
+mutation. Inspect state and retry guidance before attempting reconciliation.
 
 Tool schemas and limits are authoritative in `crates/server/src/tools.rs`.
 Native implementations are in `plugin/src/runtime.cpp`.
+Core tools also advertise `outputSchema`; their full results remain in
+`structuredContent`, with bounded text previews in `content`. Check completion,
+pagination, and read-completeness fields rather than treating `isError: false`
+as proof that an execution target or exhaustive search completed.
+
+Memory `length` and breakpoint `size` inputs are byte counts. Existing names
+are preserved, with no aliases. JSON integers use decimal syntax: reading
+16 bytes uses `{ "address": "0x100000", "length": 16 }`.
+
+The [2026-09-08 interface validation](docs/validation/mcp-interface-2026-09-08.md)
+records the schema review, naming decisions, real-debugger coverage, and known
+remaining test risk.
 
 ## Build and test
 

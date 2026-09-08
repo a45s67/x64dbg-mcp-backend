@@ -213,25 +213,6 @@ fn tool_success(name: &str, value: Value) -> Value {
 }
 
 fn tool_failure(name: &str, error: ToolError) -> Value {
-    let debugger_message = error
-        .details
-        .get("debugger_message")
-        .and_then(Value::as_str)
-        .filter(|message| message.len() <= 512 && !message.chars().any(char::is_control));
-    let mut text = debugger_message.map_or_else(
-        || {
-            format!(
-                "{name} failed: {}: {}; recoverable={}; safeToRetry={}.",
-                error.code, error.message, error.recoverable, error.safe_to_retry
-            )
-        },
-        |message| {
-            format!(
-                "{name} failed: {}: {message}; recoverable={}; safeToRetry={}.",
-                error.code, error.recoverable, error.safe_to_retry
-            )
-        },
-    );
     let suggested_action = error.suggested_action.filter(|value| {
         !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
     });
@@ -242,39 +223,6 @@ fn tool_failure(name: &str, error: ToolError) -> Value {
         .take(4)
         .collect();
     let has_guidance = suggested_action.is_some() || !next_actions.is_empty();
-    if let Some(state) = error
-        .details
-        .get("current_state")
-        .or_else(|| error.details.get("debuggee_state"))
-        .and_then(Value::as_str)
-        .filter(|state| {
-            !state.is_empty() && state.len() <= 64 && !state.chars().any(char::is_control)
-        })
-    {
-        text.push_str("\nCurrent state: ");
-        text.push_str(state);
-        text.push('.');
-    }
-    let mut displayed_actions = 0_usize;
-    if let Some(action) = suggested_action.as_deref() {
-        text.push_str("\nNext: ");
-        text.push_str(action);
-        displayed_actions += 1;
-    }
-    for action in next_actions
-        .iter()
-        .take(2_usize.saturating_sub(displayed_actions))
-    {
-        text.push_str("\nNext (");
-        text.push_str(&action.code);
-        text.push_str("): ");
-        if let Some(tool) = action.tool.as_deref() {
-            text.push_str("call ");
-            text.push_str(tool);
-            text.push_str(" — ");
-        }
-        text.push_str(&action.reason);
-    }
     let mut error_value = json!({
         "code": error.code,
         "message": error.message,
@@ -301,6 +249,7 @@ fn tool_failure(name: &str, error: ToolError) -> Value {
         );
     }
     let value = json!({ "ok": false, "error": error_value });
+    let text = crate::content::error_summary(name, &value);
     json!({
         "content": [{ "type": "text", "text": text }],
         "structuredContent": value,
@@ -760,10 +709,10 @@ mod contract_tests {
                 instance_id(),
             )
             .await;
-            let bytes = to_bytes(response.into_body(), 64 * 1024)
+            let bytes = to_bytes(response.into_body(), 1024 * 1024)
                 .await
                 .unwrap_or_else(|error| panic!("seed={SEED:#x} case={case}: {error}"));
-            assert!(bytes.len() <= 64 * 1024, "seed={SEED:#x} case={case}");
+            assert!(bytes.len() <= 1024 * 1024, "seed={SEED:#x} case={case}");
             let value: Value = serde_json::from_slice(&bytes)
                 .unwrap_or_else(|error| panic!("seed={SEED:#x} case={case}: {error}"));
             assert_eq!(value["jsonrpc"], "2.0", "seed={SEED:#x} case={case}");

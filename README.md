@@ -256,8 +256,10 @@ The gate runs Rust, C++, Python unit/HTTP, live x32/x64, and host-control checks
 and writes JUnit plus per-scenario JSON reports. It verifies that the tested server
 matches the newly packaged executable. Set `X64DBG_MCP_TEST_PYTHON` for standalone
 PowerShell runners too; pytest automatically passes its interpreter to them.
-CI runs Rust, native, and Python unit/HTTP tests before packaging. It does not
-run live debugger tests because its SDK-only environment lacks the runtime.
+CI runs Rust and Python unit/HTTP tests, then builds both native plugins and
+verifies the package. Native CTest is temporarily limited to the local release
+gate because CI's SDK-only installation lacks runtime DLLs such as `jansson.dll`.
+Live debugger tests also remain in the local release gate.
 Native test builds also build and discover their own current release server,
 including custom Cargo target directories, rather than trusting a cached path.
 
@@ -265,7 +267,7 @@ To qualify a fresh package with Flare without replacing an existing installation
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\run-flare-qualification.ps1 `
-  -PackageRoot "$PWD\dist\x64dbg-mcp-backend-0.2.0" `
+  -PackageRoot "$PWD\dist\x64dbg-mcp-backend-0.0.0-beta" `
   -X64dbgRoot C:\tools\x64dbg `
   -SamplePath 'C:\samples\checksum.exe' `
   -OutputDirectory "$PWD\build\flare-qualification-new" -Iterations 3
@@ -279,6 +281,8 @@ Reports contain no credentials; do not publish the generated runtime/config dire
 The plugin/sidecar wire contract is
 [`docs/contracts/ipc-v1.md`](docs/contracts/ipc-v1.md). A pushed `v*` tag
 builds and publishes the minimal ZIP through GitHub Actions.
+The current CI qualification version is `v0.0.0-beta`; its GitHub release is
+marked as a prerelease and is not promoted to Latest.
 
 ## Uninstall
 

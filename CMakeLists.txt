@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
-project(x64dbg_mcp_backend VERSION 0.2.0 LANGUAGES CXX)
+# CMake project versions are numeric; Cargo and package metadata carry -beta.
+project(x64dbg_mcp_backend VERSION 0.0.0 LANGUAGES CXX)
 include(CTest)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 

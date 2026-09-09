@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing tag to publish, for example v0.2.0
+        description: Existing tag to publish, for example v0.0.0-beta
         required: false
         type: string
 
@@ -70,14 +70,6 @@ jobs:
           cargo clippy --offline --locked --workspace --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw 'Clippy failed.' }
 
-      - name: Build and test native x86 and x64 targets
-        shell: pwsh
-        run: |
-          foreach ($architecture in @('x86', 'x64')) {
-            & ./scripts/build-plugin.cmd $architecture test
-            if ($LASTEXITCODE -ne 0) { throw "Native $architecture tests failed." }
-          }
-
       - name: Build debug server and run Python unit and HTTP tests
         shell: pwsh
         run: |
@@ -106,7 +98,9 @@ jobs:
           path: artifacts/pytest-ci.xml
           if-no-files-found: warn
 
-      - name: Build and package
+      # Native CTest needs runtime DLLs absent from the SDK-only CI install.
+      # Keep it in the local release gate; packaging still builds both plugins.
+      - name: Build x86/x64 plugins and package
         shell: pwsh
         run: ./scripts/package.ps1 -X64dbgRoot $env:X64DBG_ROOT
 
@@ -114,8 +108,8 @@ jobs:
         if: github.ref_type == 'tag' || inputs.release_tag != ''
         uses: actions/upload-artifact@v4
         with:
-          name: x64dbg-mcp-backend-0.2.0
-          path: dist/x64dbg-mcp-backend-0.2.0.zip
+          name: x64dbg-mcp-backend-0.0.0-beta
+          path: dist/x64dbg-mcp-backend-0.0.0-beta.zip
           if-no-files-found: error
           compression-level: 0
 
@@ -127,7 +121,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           gh release create $env:RELEASE_TAG `
-            './dist/x64dbg-mcp-backend-0.2.0.zip#x64dbg-mcp-backend-0.2.0.zip' `
+            './dist/x64dbg-mcp-backend-0.0.0-beta.zip#x64dbg-mcp-backend-0.0.0-beta.zip' `
             --verify-tag `
-            --title 'x64dbg-mcp-backend 0.2.0' `
+            --title 'x64dbg-mcp-backend 0.0.0-beta' `
+            --prerelease --latest=false `
             --notes-from-tag

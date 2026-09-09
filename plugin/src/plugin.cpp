@@ -41,7 +41,7 @@ extern "C" __declspec(dllexport) bool pluginit(PLUG_INITSTRUCT* initStruct) {
                                     CB_EXITPROCESS, CB_PAUSEDEBUG, CB_RESUMEDEBUG,
                                     CB_STEPPED, CB_ATTACH, CB_DETACH, CB_STOPPINGDEBUG, CB_DEBUGEVENT,
                                     CB_SYSTEMBREAKPOINT, CB_BREAKPOINT, CB_EXCEPTION,
-                                    CB_TRACEEXECUTE};
+                                    CB_TRACEEXECUTE, CB_CREATETHREAD};
     for (const CBTYPE callback : callbacks) {
         _plugin_registercallback(g_pluginHandle, callback, DebuggerCallback);
     }
@@ -69,16 +69,23 @@ extern "C" __declspec(dllexport) void plugsetup(PLUG_SETUPSTRUCT* setupStruct) {
 
 extern "C" __declspec(dllexport) bool plugstop() {
     g_runtime.Stop();
+    // The SDK still unregisters a plugin returning false, but retains its DLL.
+    // Keep ownership/TID handles across a reload if a live helper or unresolved
+    // trace remains; never make a fresh runtime forget a delayed interrupt.
+    const bool canUnload = g_runtime.CanUnload();
     _plugin_unregistercommand(g_pluginHandle, kFenceCommand);
     constexpr CBTYPE callbacks[] = {CB_INITDEBUG, CB_STOPDEBUG, CB_CREATEPROCESS,
                                     CB_EXITPROCESS, CB_PAUSEDEBUG, CB_RESUMEDEBUG,
                                     CB_STEPPED, CB_ATTACH, CB_DETACH, CB_STOPPINGDEBUG, CB_DEBUGEVENT,
                                     CB_SYSTEMBREAKPOINT, CB_BREAKPOINT, CB_EXCEPTION,
-                                    CB_TRACEEXECUTE};
+                                    CB_TRACEEXECUTE, CB_CREATETHREAD};
     for (const CBTYPE callback : callbacks) {
         _plugin_unregistercallback(g_pluginHandle, callback);
     }
     _plugin_logputs("[x64dbg-mcp-backend] plugin stopped");
+    if (!canUnload) {
+        _plugin_logputs("[x64dbg-mcp-backend] trace ownership unresolved or helper still live; retaining DLL until safe recovery or debugger exit");
+    }
     g_pluginHandle = 0;
-    return true;
+    return canUnload;
 }

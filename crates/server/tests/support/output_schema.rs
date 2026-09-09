@@ -1,6 +1,6 @@
-//! Conservative contracts for MCP `structuredContent`, not the IPC or `CallToolResult` wrapper.
+//! Internal contracts for the JSON payload in MCP text content, not the IPC or result wrapper.
 //! Native success objects remain unwrapped. Error results use {ok:false,error:{...}}.
-//! Unmodeled fields are deliberately open; unsupported tools advertise no contract.
+//! Unmodeled fields are deliberately open; these schemas are not advertised to clients.
 //! Shapes follow the result serializers in plugin/src/runtime.cpp, including `LocationJson`
 //! and the state-dependent execution replies. IPC envelope fields are not result fields.
 //! Error compatibility follows `mcp::tool_failure`, including arbitrary JSON details.
@@ -161,7 +161,7 @@ pub fn for_tool(name: &str) -> Option<Value> {
         _ => return None,
     };
     // MCP serializes code/message/details without imposing the checked-in error schema's
-    // length, pattern or object restrictions. Do not advertise constraints it cannot ensure.
+    // length, pattern or object restrictions. Do not assert constraints it cannot ensure.
     let error = json!({
         "type":"object", "required":["ok","error"],
         "properties":{

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(x64dbg_mcp_backend VERSION 0.1.2 LANGUAGES CXX)
+project(x64dbg_mcp_backend VERSION 0.2.0 LANGUAGES CXX)
 include(CTest)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -25,11 +25,16 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 endif()
 
 set(X64DBG_ROOT "$ENV{X64DBG_ROOT}" CACHE PATH "Root of the pinned x64dbg SDK/release")
+set(MCP_TEST_SERVER "" CACHE FILEPATH "Freshly built Rust server executable for native lifecycle tests")
 if(NOT EXISTS "${X64DBG_ROOT}/pluginsdk/_plugins.h")
   message(FATAL_ERROR "Set X64DBG_ROOT to an x64dbg distribution containing pluginsdk")
 endif()
 
 if(BUILD_TESTING)
+  if(NOT IS_ABSOLUTE "${MCP_TEST_SERVER}" OR NOT EXISTS "${MCP_TEST_SERVER}" OR
+      IS_DIRECTORY "${MCP_TEST_SERVER}")
+    message(FATAL_ERROR "Set MCP_TEST_SERVER to the built Rust executable, or use scripts/build-plugin.cmd <x86|x64> test")
+  endif()
   add_executable(x64dbg_mcp_control_policy_test
     controller/tests/control_policy_test.cpp
     controller/src/control_policy.cpp
@@ -293,26 +298,26 @@ if(BUILD_TESTING)
   add_test(NAME control-policy-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_control_policy_test)
   add_test(NAME lifecycle-${MCP_TEST_ARCH}
     COMMAND x64dbg_mcp_lifecycle_test
-      "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe" "${MCP_TEST_PORT}")
+      "${MCP_TEST_SERVER}" "${MCP_TEST_PORT}")
   math(EXPR MCP_CRASH_TEST_PORT "${MCP_TEST_PORT} + 1")
   add_test(NAME sidecar-crash-${MCP_TEST_ARCH}
     COMMAND x64dbg_mcp_lifecycle_test
-      "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe" "${MCP_CRASH_TEST_PORT}"
+      "${MCP_TEST_SERVER}" "${MCP_CRASH_TEST_PORT}"
       sidecar-crash)
   math(EXPR MCP_INSTALLED_CONFIG_TEST_PORT "${MCP_TEST_PORT} + 2")
   add_test(NAME installed-config-${MCP_TEST_ARCH}
     COMMAND x64dbg_mcp_lifecycle_test
-      "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe"
+      "${MCP_TEST_SERVER}"
       "${MCP_INSTALLED_CONFIG_TEST_PORT}" installed-config)
   math(EXPR MCP_ACTIVE_WAIT_TEST_PORT "${MCP_TEST_PORT} + 3")
   add_test(NAME active-wait-shutdown-${MCP_TEST_ARCH}
     COMMAND x64dbg_mcp_lifecycle_test
-      "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe"
+      "${MCP_TEST_SERVER}"
       "${MCP_ACTIVE_WAIT_TEST_PORT}" active-wait-shutdown)
   math(EXPR MCP_ACTIVE_TRACE_TEST_PORT "${MCP_TEST_PORT} + 4")
   add_test(NAME active-trace-shutdown-${MCP_TEST_ARCH}
     COMMAND x64dbg_mcp_lifecycle_test
-      "${CMAKE_SOURCE_DIR}/target/release/x64dbg-mcp-server.exe"
+      "${MCP_TEST_SERVER}"
       "${MCP_ACTIVE_TRACE_TEST_PORT}" active-trace-shutdown)
   set_tests_properties(executor-${MCP_TEST_ARCH} command-fence-${MCP_TEST_ARCH}
     utf8-${MCP_TEST_ARCH}

@@ -16,6 +16,9 @@ extern "C" __declspec(dllexport) volatile std::uint32_t* mcp_fixture_invalid_poi
 extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_worker_ready{0U};
 extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_main_thread_id{0U};
 extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_worker_thread_id{0U};
+extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_trace_wait_trigger{0U};
+extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_trace_wait_release{0U};
+extern "C" __declspec(dllexport) std::atomic<std::uint32_t> mcp_fixture_trace_wait_observed{0U};
 extern "C" __declspec(dllexport) char mcp_fixture_discovery_ascii[] =
     "MCP_DISCOVERY_ASCII_SENTINEL";
 extern "C" __declspec(dllexport) wchar_t mcp_fixture_discovery_utf16[] =
@@ -136,6 +139,19 @@ DWORD WINAPI FixtureWorker(void*) {
 
 } // namespace
 
+extern "C" __declspec(dllexport) __declspec(noinline) void mcp_fixture_trace_wait() {
+    mcp_fixture_trace_wait_observed.store(1U);
+    while (mcp_fixture_trace_wait_release.load() == 0U) Sleep(10U);
+    mcp_fixture_trace_wait_observed.store(2U);
+}
+
+extern "C" __declspec(dllexport) __declspec(noinline) void mcp_fixture_trace_wait_callsite() {
+    // Disassemble this export and stop at the call to mcp_fixture_trace_wait.
+    // The observable store after it prevents tail-call folding on both targets.
+    mcp_fixture_trace_wait();
+    mcp_fixture_trace_wait_observed.store(3U);
+}
+
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     mcp_fixture_main_thread_id.store(GetCurrentThreadId());
     if (!WriteObservedArguments()) return 2;
@@ -145,6 +161,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     mcp_fixture_marker.store(mcp_fixture_analysis_target(mcp_fixture_marker.load()));
     std::uint32_t value = mcp_fixture_marker.load();
     while (value != 0U) {
+        if (mcp_fixture_trace_wait_trigger.exchange(0U) != 0U) {
+            mcp_fixture_trace_wait_callsite();
+        }
         if (mcp_fixture_exception_trigger.exchange(0U) != 0U) {
             RaiseHandledFixtureException();
         }

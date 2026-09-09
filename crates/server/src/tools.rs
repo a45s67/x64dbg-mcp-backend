@@ -2024,9 +2024,6 @@ fn build_catalog() -> Vec<Value> {
         ),
     ];
     for tool in &mut tools {
-        if let Some(schema) = crate::output_schema::for_tool(tool["name"].as_str().unwrap()) {
-            tool["outputSchema"] = schema;
-        }
         refine_schema(&mut tool["inputSchema"], "");
         match tool["name"].as_str().unwrap() {
             "strings.search" => {

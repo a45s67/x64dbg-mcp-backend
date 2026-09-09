@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <thread>
 
 #include <string>
@@ -15,8 +16,85 @@
 
 #include "runtime.h"
 #include "_plugins.h"
+#include "jansson/jansson.h"
 
 namespace {
+struct JsonDeleter {
+    void operator()(json_t* value) const noexcept { json_decref(value); }
+};
+using Json = std::unique_ptr<json_t, JsonDeleter>;
+
+bool JsonStringEquals(const json_t* value, const std::string_view expected) {
+    return json_is_string(value) &&
+           std::string_view(json_string_value(value), json_string_length(value)) == expected;
+}
+
+bool JsonIntegerEquals(const json_t* value, const std::uint64_t expected) {
+    return json_is_integer(value) && json_integer_value(value) >= 0 &&
+           static_cast<std::uint64_t>(json_integer_value(value)) == expected;
+}
+
+Json DecodeToolResult(const std::string_view response, const std::uint64_t requestId,
+                      const bool expectError = false) {
+    const auto separator = response.find("\r\n\r\n");
+    if (!response.starts_with("HTTP/1.1 200 ") || separator == std::string_view::npos) {
+        return {};
+    }
+    const auto body = response.substr(separator + 4U);
+    const Json envelope(json_loadb(body.data(), body.size(), JSON_REJECT_DUPLICATES, nullptr));
+    const json_t* result = json_object_get(envelope.get(), "result");
+    const json_t* content = json_object_get(result, "content");
+    const json_t* block = json_array_get(content, 0U);
+    const json_t* text = json_object_get(block, "text");
+    // Enforce the content-only contract, including no structuredContent mirror.
+    if (!json_is_object(envelope.get()) || json_object_size(envelope.get()) != 3U ||
+        !JsonStringEquals(json_object_get(envelope.get(), "jsonrpc"), "2.0") ||
+        !JsonIntegerEquals(json_object_get(envelope.get(), "id"), requestId) ||
+        !json_is_object(result) || json_object_size(result) != 2U ||
+        (expectError ? !json_is_true(json_object_get(result, "isError"))
+                     : !json_is_false(json_object_get(result, "isError"))) ||
+        !json_is_array(content) || json_array_size(content) != 1U ||
+        !json_is_object(block) || json_object_size(block) != 2U ||
+        !JsonStringEquals(json_object_get(block, "type"), "text") || !json_is_string(text)) {
+        return {};
+    }
+    Json payload(json_loadb(json_string_value(text), json_string_length(text),
+                            JSON_REJECT_DUPLICATES, nullptr));
+    if (!json_is_object(payload.get())) return {};
+    return payload;
+}
+
+bool ExerciseContentDecoding() {
+    const auto response = [](const std::string_view result) {
+        return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n"
+               "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":" + std::string(result) + "}";
+    };
+    constexpr std::string_view valid =
+        R"({"content":[{"type":"text","text":"{ \"debuggee_state\": \"abse\u006et\" }"}],"isError":false})";
+    const Json decoded = DecodeToolResult(response(valid), 1U);
+    if (!JsonStringEquals(json_object_get(decoded.get(), "debuggee_state"), "absent") ||
+        DecodeToolResult(response(valid), 2U)) return false;
+    for (const auto invalid : {
+             R"({"content":[{"type":"text","text":"{}"}],"isError":false,"structuredContent":{}})",
+             R"({"content":[{"type":"text","text":"{}"}],"isError":true})",
+             R"({"content":[{"type":"text","text":"{}"}],"isError":0})",
+             R"({"content":[{"type":"text","text":"{}"}]})",
+             R"({"content":[],"isError":false})",
+             R"({"content":[{"type":"text","text":"{}"},{"type":"text","text":"{}"}],"isError":false})",
+             R"({"content":[{"type":"image","text":"{}"}],"isError":false})",
+             R"({"content":[{"type":"text","text":{}}],"isError":false})",
+             R"({"content":[{"type":"text","text":"not JSON"}],"isError":false})",
+             R"({"content":[{"type":"text","text":"[]"}],"isError":false})",
+             R"({"content":[{"type":"text","text":"{} trailing"}],"isError":false})",
+             R"({"content":[{"type":"text","text":"{\"x\":1,\"x\":2}"}],"isError":false})",
+             R"({"content":[{"type":"text","text":"{}"}],"isError":true,"isError":false})"}) {
+        if (DecodeToolResult(response(invalid), 1U)) return false;
+    }
+    return !DecodeToolResult("HTTP/1.1 500 Error\r\n\r\n{}", 1U) &&
+           !DecodeToolResult("HTTP/1.1 200 OK\r\n\r\n{", 1U) &&
+           !DecodeToolResult(response(valid) + " trailing", 1U);
+}
+
 std::string PostMcp(const unsigned short port, const std::string_view body) {
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
@@ -80,9 +158,11 @@ std::string PostMcp(const unsigned short port, const std::string_view body) {
 bool ExerciseStateTool(const unsigned short port) {
     constexpr std::string_view body =
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"debugger.state\",\"arguments\":{}}}";
-    const std::string response = PostMcp(port, body);
-    return response.starts_with("HTTP/1.1 200") &&
-           response.find("\"debuggee_state\":\"absent\"") != std::string::npos;
+    const Json result = DecodeToolResult(PostMcp(port, body), 1U);
+    return JsonStringEquals(json_object_get(result.get(), "debuggee_state"), "absent") &&
+           JsonStringEquals(json_object_get(result.get(), "plugin_state"), "ready") &&
+           JsonStringEquals(json_object_get(result.get(), "diagnostic_code"), "NO_DEBUGGEE") &&
+           json_is_null(json_object_get(result.get(), "process_id"));
 }
 
 bool ExerciseActiveWaitShutdown(mcp::Runtime& runtime, const unsigned short port) {
@@ -103,11 +183,227 @@ bool ExerciseActiveWaitShutdown(mcp::Runtime& runtime, const unsigned short port
 }
 
 bool ExerciseActiveTraceShutdown(mcp::Runtime& runtime) {
+    runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+    runtime.OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
     if (!runtime.StartTraceForTesting()) return false;
     const auto start = std::chrono::steady_clock::now();
     runtime.Stop();
     return runtime.TraceReasonForTesting() == mcp::TraceReason::backendShutdown &&
            std::chrono::steady_clock::now() - start < std::chrono::seconds(3);
+}
+
+bool ExerciseTraceCommitCallbacks(mcp::Runtime& runtime) {
+    runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+    DEBUG_EVENT raw{};
+    raw.dwDebugEventCode = EXCEPTION_DEBUG_EVENT;
+    raw.dwProcessId = 42U;
+    raw.dwThreadId = 99U;
+    raw.u.Exception.ExceptionRecord.ExceptionCode = EXCEPTION_BREAKPOINT;
+    raw.u.Exception.dwFirstChance = 1U;
+    PLUG_CB_DEBUGEVENT rawInfo{&raw};
+    runtime.OnDebuggerEvent(CB_DEBUGEVENT, &rawInfo);
+    BRIDGEBP breakpoint{};
+    breakpoint.type = bp_normal;
+    breakpoint.addr = 0x401000U;
+    PLUG_CB_BREAKPOINT bpInfo{&breakpoint};
+    runtime.OnDebuggerEvent(CB_BREAKPOINT, &bpInfo);
+    // CB_BREAKPOINT exposes a paused snapshot before handleBreakCondition
+    // clears native tracing. Only this raw event's CB_PAUSEDEBUG admits a trace.
+    if (!runtime.BeginPausedSnapshotForTesting() || runtime.StartTraceForTesting()) return false;
+    runtime.OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
+    runtime.OnDebuggerEvent(CB_DEBUGEVENT, &rawInfo);
+    runtime.OnDebuggerEvent(CB_BREAKPOINT, &bpInfo);
+    if (runtime.StartTraceForTesting()) return false; // Previous raw event's commit is stale.
+    runtime.OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
+    const auto before = runtime.PauseForTesting().generation;
+    if (!runtime.StartTraceForTesting(true)) return false;
+    if (runtime.CanUnload()) return false;
+    PLUG_CB_TRACEEXECUTE step{};
+    step.cip = 0x401001U;
+    step.stop = true;
+    runtime.OnDebuggerEvent(CB_TRACEEXECUTE, &step);
+    if (runtime.TraceReasonForTesting() != mcp::TraceReason::none ||
+        runtime.StartTraceForTesting()) return false;
+    // The debug loop can pause before native run emits CB_RESUMEDEBUG.
+    runtime.OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
+    const auto paused = runtime.PauseForTesting().generation;
+    if (paused <= before || runtime.StartTraceForTesting()) return false;
+    runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+    if (!runtime.BeginPausedSnapshotForTesting() ||
+        runtime.TraceReasonForTesting() != mcp::TraceReason::none) return false;
+    runtime.SubmitTraceForTesting();
+    if (runtime.TraceReasonForTesting() != mcp::TraceReason::interrupted ||
+        !runtime.BeginPausedSnapshotForTesting() || !runtime.StartTraceForTesting()) return false;
+    // A refinement still on the preceding pause's callback stack cannot
+    // finalize or change the newly admitted trace's state/generation.
+    runtime.OnDebuggerEvent(CB_STEPPED, nullptr);
+    runtime.OnDebuggerEvent(CB_EXCEPTION, nullptr);
+    runtime.OnDebuggerEvent(CB_BREAKPOINT, nullptr);
+    if (runtime.TraceReasonForTesting() != mcp::TraceReason::none ||
+        runtime.PauseForTesting().generation != paused || runtime.StartTraceForTesting()) return false;
+    runtime.OnDebuggerEvent(CB_STOPPINGDEBUG, nullptr);
+    if (runtime.TraceReasonForTesting() != mcp::TraceReason::none) return false;
+    runtime.OnDebuggerEvent(CB_STOPDEBUG, nullptr);
+    return runtime.TraceReasonForTesting() == mcp::TraceReason::processExit && runtime.CanUnload();
+}
+
+bool ExerciseOwnedTraceCreatePause(mcp::Runtime& runtime, const unsigned short port) {
+    DEBUG_EVENT raw{};
+    raw.dwDebugEventCode = EXCEPTION_DEBUG_EVENT;
+    raw.dwProcessId = 42U;
+    raw.dwThreadId = 98U;
+    PLUG_CB_DEBUGEVENT rawInfo{&raw};
+    runtime.OnDebuggerEvent(CB_DEBUGEVENT, &rawInfo);
+    runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+    runtime.OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
+    if (!runtime.StartTraceForTesting()) return false;
+    runtime.IssueTraceInterruptForTesting(99U, 0x77000001U);
+    const auto before = runtime.PauseForTesting().generation;
+    CREATE_THREAD_DEBUG_INFO created{};
+    created.lpStartAddress = reinterpret_cast<LPTHREAD_START_ROUTINE>(0x77000001U);
+    PLUG_CB_CREATETHREAD createdInfo{&created, 99U};
+    // Even a matching raw INT3 must never consume ownership or change exception
+    // disposition. The new interrupt has no dependency on exception filters.
+    raw.dwThreadId = 99U;
+    raw.u.Exception.ExceptionRecord.ExceptionCode = EXCEPTION_BREAKPOINT;
+    raw.u.Exception.ExceptionRecord.ExceptionAddress = reinterpret_cast<void*>(0x77000001U);
+    raw.u.Exception.dwFirstChance = 1U;
+    runtime.OnDebuggerEvent(CB_DEBUGEVENT, &rawInfo);
+    runtime.OnDebuggerEvent(CB_CREATETHREAD, &createdInfo);
+    if (runtime.TraceReasonForTesting() != mcp::TraceReason::none ||
+        runtime.PauseForTesting().generation != before) return false;
+    raw.dwDebugEventCode = CREATE_THREAD_DEBUG_EVENT;
+    raw.u.CreateThread = created;
+    raw.dwProcessId = 43U;
+    runtime.OnDebuggerEvent(CB_DEBUGEVENT, &rawInfo);
+    runtime.OnDebuggerEvent(CB_CREATETHREAD, &createdInfo);
+    if (runtime.TraceReasonForTesting() != mcp::TraceReason::none) return false;
+    raw.dwProcessId = 42U;
+    raw.dwThreadId = 100U;
+    runtime.OnDebuggerEvent(CB_DEBUGEVENT, &rawInfo);
+    runtime.OnDebuggerEvent(CB_CREATETHREAD, &createdInfo);
+    if (runtime.TraceReasonForTesting() != mcp::TraceReason::none) return false;
+    raw.dwThreadId = 99U;
+    runtime.OnDebuggerEvent(CB_DEBUGEVENT, &rawInfo);
+    if (runtime.TraceReasonForTesting() != mcp::TraceReason::none) return false;
+    std::thread callback([&] { runtime.OnDebuggerEvent(CB_CREATETHREAD, &createdInfo); });
+    const auto pauseDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (runtime.TraceReasonForTesting() == mcp::TraceReason::none &&
+           std::chrono::steady_clock::now() < pauseDeadline) std::this_thread::yield();
+    const auto paused = runtime.PauseForTesting();
+    const bool committed = runtime.TraceReasonForTesting() == mcp::TraceReason::timeout &&
+        paused.generation > before && paused.kind == mcp::PauseReasonKind::userPause &&
+        !paused.hasExceptionCode && runtime.BeginPausedSnapshotForTesting() && !runtime.CanUnload();
+    const Json state = DecodeToolResult(PostMcp(port,
+        "{\"jsonrpc\":\"2.0\",\"id\":69,\"method\":\"tools/call\",\"params\":{\"name\":\"debugger.state\",\"arguments\":{}}}"), 69U);
+    const char* instance = json_string_value(json_object_get(state.get(), "instance_id"));
+    bool rejectedBeforeDispatch = committed && instance != nullptr;
+    const HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (entered && release) {
+        std::atomic_bool executorFinished{false};
+        std::thread blocker([&] {
+            runtime.HoldExecutorForTesting(entered, release);
+            executorFinished.store(true);
+        });
+        rejectedBeforeDispatch = rejectedBeforeDispatch && WaitForSingleObject(entered, 2000U) == WAIT_OBJECT_0;
+        for (unsigned index = 0U; rejectedBeforeDispatch && index < 2U; ++index) {
+            const std::string method = index == 0U ? "breakpoints.set" : "breakpoints.remove";
+            const std::string body =
+                "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(70U + index) +
+                ",\"method\":\"tools/call\",\"params\":{\"name\":\"" + method +
+                "\",\"arguments\":{\"operation_id\":\"00000000-0000-4000-8000-00000000007" +
+                std::to_string(index) + "\",\"instance_id\":\"" + instance +
+                "\",\"address\":\"0x401005\"}}}";
+            const std::string response = PostMcp(port, body);
+            const Json rejected = DecodeToolResult(response, 70U + index, true);
+            const auto* error = json_object_get(rejected.get(), "error");
+            const auto* details = json_object_get(error, "details");
+            // This response must arrive while the executor is still occupied,
+            // with no SDK/command admission, no unknown outcome and no mutation.
+            rejectedBeforeDispatch = !executorFinished.load() &&
+                JsonStringEquals(json_object_get(error, "code"), "INVALID_DEBUGGER_STATE") &&
+                json_is_false(json_object_get(error, "safeToRetry")) && json_is_object(details) &&
+                json_object_size(details) == 1U && json_is_string(json_object_get(details, "debugger_message")) &&
+                json_object_get(details, "outcome") == nullptr &&
+                runtime.PauseForTesting().generation == paused.generation;
+            if (!rejectedBeforeDispatch) std::cerr << "helper admission response: " << response << '\n';
+        }
+        SetEvent(release);
+        blocker.join();
+    } else {
+        rejectedBeforeDispatch = false;
+    }
+    if (entered) CloseHandle(entered);
+    if (release) CloseHandle(release);
+    // _plugin_debugpause's native stack frame remains live until explicit run.
+    runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+    callback.join();
+    if (!committed || !rejectedBeforeDispatch || !runtime.CanUnload()) return false;
+    runtime.OnDebuggerEvent(CB_CREATETHREAD, &createdInfo);
+    if (runtime.PauseForTesting().generation != paused.generation) return false;
+    runtime.OnDebuggerEvent(CB_STOPDEBUG, nullptr);
+    return true;
+}
+
+bool ExerciseTraceReloadReconciliation() {
+    std::array<wchar_t, 32768U> executable{};
+    if (!GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()))) return false;
+    std::wstring command = L"\"" + std::wstring(executable.data()) + L"\" trace-exit-probe";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
+                        CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) return false;
+    bool valid = false;
+    {
+        mcp::Runtime retained;
+        retained.SetTraceProcessForTesting(process.hProcess);
+        retained.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+        retained.OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
+        valid = retained.StartTraceForTesting();
+        retained.IssueTraceInterruptForTesting(99U, 0x77000001U);
+        // Model a retained DLL with its callbacks unregistered. Alive means no
+        // reload; actual process-handle death must be reconciled by Start itself.
+        valid = valid && !retained.Start() && !retained.CanUnload();
+        const DWORD resumed = ResumeThread(process.hThread);
+        valid = valid && resumed != static_cast<DWORD>(-1);
+        const DWORD exited = WaitForSingleObject(process.hProcess, 5000U);
+        valid = valid && exited == WAIT_OBJECT_0;
+        if (valid) {
+            valid = retained.Start() && retained.TraceReasonForTesting() == mcp::TraceReason::timeout &&
+                retained.CanUnload();
+            const auto readyDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(7);
+            while (valid && !retained.IsReady() && std::chrono::steady_clock::now() < readyDeadline) {
+                std::this_thread::yield();
+            }
+            valid = valid && retained.IsReady();
+        }
+        retained.Stop();
+    }
+    if (valid) {
+        mcp::Runtime newer;
+        newer.SetTraceProcessForTesting(process.hProcess);
+        newer.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
+        newer.OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
+        valid = newer.StartTraceForTesting();
+        newer.IssueTraceInterruptForTesting(99U, 0x77000001U);
+        // Same PID but a new process epoch must not be erased by reconciliation.
+        PLUG_CB_CREATEPROCESS created{};
+        created.fdProcessInfo = &process;
+        newer.OnDebuggerEvent(CB_CREATEPROCESS, &created);
+        newer.ReconcileTraceProcessForTesting();
+        valid = valid && newer.SessionOriginForTesting() == mcp::SessionOrigin::launched &&
+            newer.PauseForTesting().kind == mcp::PauseReasonKind::processCreated &&
+            newer.TraceReasonForTesting() == mcp::TraceReason::timeout;
+    }
+    if (WaitForSingleObject(process.hProcess, 0U) != WAIT_OBJECT_0) {
+        TerminateProcess(process.hProcess, ERROR_CANCELLED);
+        WaitForSingleObject(process.hProcess, 5000U);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return valid;
 }
 
 bool ExercisePauseCallbacks(mcp::Runtime& runtime) {
@@ -219,21 +515,31 @@ bool ExerciseEventRingBoundary(mcp::Runtime& runtime, const unsigned short port)
     }
     constexpr std::string_view body =
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"events.list\",\"arguments\":{\"after_sequence\":0,\"types\":[\"resumed\"],\"limit\":1}}}";
-    const std::string response = PostMcp(port, body);
-    const bool valid = response.starts_with("HTTP/1.1 200") &&
-                       response.find("\"overflowed\":true") != std::string::npos &&
-                       response.find("\"has_more\":true") != std::string::npos &&
-                       response.find("\"type\":\"resumed\"") != std::string::npos;
+    const Json result = DecodeToolResult(PostMcp(port, body), 3U);
+    const json_t* items = json_object_get(result.get(), "items");
+    const json_t* first = json_array_get(items, 0U);
+    const bool valid = json_is_true(json_object_get(result.get(), "overflowed")) &&
+                       json_is_true(json_object_get(result.get(), "has_more")) &&
+                       json_is_array(items) && json_array_size(items) == 1U &&
+                       JsonStringEquals(json_object_get(first, "type"), "resumed") &&
+                       JsonIntegerEquals(json_object_get(first, "sequence"), events.front().sequence) &&
+                       JsonIntegerEquals(json_object_get(result.get(), "oldest_sequence"),
+                                         events.front().sequence) &&
+                       JsonIntegerEquals(json_object_get(result.get(), "latest_sequence"),
+                                         events.back().sequence) &&
+                       JsonIntegerEquals(json_object_get(result.get(), "next_after_sequence"),
+                                         events.front().sequence);
     const std::string waitBody =
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{"
         "\"name\":\"events.wait\",\"arguments\":{\"after_sequence\":" +
         std::to_string(previousLatest + 299U) +
         ",\"types\":[\"resumed\"],\"timeout_ms\":100}}}";
-    const std::string waitResponse = PostMcp(port, waitBody);
-    const bool waitValid = waitResponse.starts_with("HTTP/1.1 200") &&
-                           waitResponse.find("\"overflowed\":false") != std::string::npos &&
-                           waitResponse.find("\"type\":\"resumed\"") != std::string::npos &&
-                           waitResponse.find("\"event\":{") != std::string::npos;
+    const Json waitResult = DecodeToolResult(PostMcp(port, waitBody), 4U);
+    const json_t* waitedEvent = json_object_get(waitResult.get(), "event");
+    const bool waitValid = json_is_false(json_object_get(waitResult.get(), "overflowed")) &&
+                           JsonStringEquals(json_object_get(waitedEvent, "type"), "resumed") &&
+                           JsonIntegerEquals(json_object_get(waitedEvent, "sequence"),
+                                             events.back().sequence);
     const std::string futureWaitBody =
         "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{"
         "\"name\":\"events.wait\",\"arguments\":{\"after_sequence\":" +
@@ -246,19 +552,27 @@ bool ExerciseEventRingBoundary(mcp::Runtime& runtime, const unsigned short port)
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     runtime.OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
     futureWait.join();
+    const Json futureWaitResult = DecodeToolResult(futureWaitResponse, 5U);
+    const json_t* futureEvent = json_object_get(futureWaitResult.get(), "event");
     const bool futureWaitValid =
-        futureWaitResponse.starts_with("HTTP/1.1 200") &&
-        futureWaitResponse.find("\"type\":\"paused\"") != std::string::npos;
+        json_is_false(json_object_get(futureWaitResult.get(), "overflowed")) &&
+        JsonStringEquals(json_object_get(futureEvent, "type"), "paused") &&
+        JsonIntegerEquals(json_object_get(futureEvent, "sequence"), events.back().sequence + 1U);
     runtime.OnDebuggerEvent(CB_STOPDEBUG, nullptr);
     return valid && waitValid && futureWaitValid;
 }
 } // namespace
 
 int wmain(const int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"trace-exit-probe") return 0;
     if (argc < 3 || argc > 4) {
         std::cerr << "usage: lifecycle_harness <server-exe> <unused-port> "
                      "[sidecar-crash|installed-config|active-wait-shutdown|active-trace-shutdown]\n";
         return 2;
+    }
+    if (!ExerciseContentDecoding()) {
+        std::cerr << "content-only JSON decoding contract failed\n";
+        return 14;
     }
     const bool installedConfig = argc == 4 && std::wstring_view(argv[3]) == L"installed-config";
     std::filesystem::path serverPath = argv[1];
@@ -305,6 +619,10 @@ int wmain(const int argc, wchar_t** argv) {
         return 3;
     }
 
+    if (!ExerciseTraceReloadReconciliation()) {
+        std::cerr << "retained trace process reconciliation failed\n";
+        return 15;
+    }
     mcp::Runtime runtime;
     if (!runtime.Start()) {
         std::cerr << "runtime startup failed\n";
@@ -335,6 +653,16 @@ int wmain(const int argc, wchar_t** argv) {
         runtime.Stop();
         std::cerr << "attach/detach session-origin callback contract failed\n";
         return 11;
+    }
+    if (!ExerciseTraceCommitCallbacks(runtime)) {
+        runtime.Stop();
+        std::cerr << "trace pause/submission publication contract failed\n";
+        return 14;
+    }
+    if (!ExerciseOwnedTraceCreatePause(runtime, static_cast<unsigned short>(parsedPort))) {
+        runtime.Stop();
+        std::cerr << "owned create-thread pause contract failed\n";
+        return 16;
     }
     if (!ExerciseEventRingBoundary(runtime, static_cast<unsigned short>(parsedPort))) {
         runtime.Stop();

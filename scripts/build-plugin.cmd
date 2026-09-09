@@ -10,7 +10,7 @@ if /I "%~1"=="x64" (
 ) else if /I "%~1"=="x86" (
   set "MCP_ARCH=x86"
 ) else (
-  echo Usage: scripts\build-plugin.cmd ^<x86^|x64^>
+  echo Usage: scripts\build-plugin.cmd ^<x86^|x64^> [test]
   exit /b 2
 )
 set "MCP_BUILD_TESTING=OFF"
@@ -34,10 +34,25 @@ if not defined VSINSTALL (
   exit /b 2
 )
 
+rem Build the host server before selecting the native plugin's compiler architecture.
+rem The helper emits only the current Cargo executable path on stdout, never a fallback.
+set "MCP_TEST_SERVER="
+if /I "%MCP_BUILD_TESTING%"=="ON" (
+  for /f "usebackq delims=" %%I in (`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0build-test-server.ps1"`) do set "MCP_TEST_SERVER=%%I"
+)
+if /I "%MCP_BUILD_TESTING%"=="ON" if not defined MCP_TEST_SERVER (
+  echo Rust test server build or artifact discovery failed.
+  exit /b 1
+)
+
 call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=%MCP_ARCH% -host_arch=x64 >nul
 if errorlevel 1 exit /b 1
 
-cmake --preset windows-%MCP_ARCH% --fresh -DBUILD_TESTING=%MCP_BUILD_TESTING%
+if /I "%MCP_BUILD_TESTING%"=="ON" (
+  cmake --preset windows-%MCP_ARCH% --fresh -DBUILD_TESTING=ON "-DMCP_TEST_SERVER:FILEPATH=%MCP_TEST_SERVER%"
+) else (
+  cmake --preset windows-%MCP_ARCH% --fresh -DBUILD_TESTING=OFF
+)
 if errorlevel 1 exit /b 1
 
 cmake --build --preset windows-%MCP_ARCH%-release

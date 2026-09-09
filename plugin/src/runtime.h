@@ -88,6 +88,7 @@ public:
 
     bool Start();
     void Stop() noexcept;
+    [[nodiscard]] bool CanUnload() noexcept;
     void OnDebuggerEvent(int callbackType, void* callbackInfo) noexcept;
     bool OnCommandFence(std::uint64_t token) noexcept;
     [[nodiscard]] bool IsReady() const noexcept;
@@ -98,8 +99,13 @@ public:
     [[nodiscard]] bool PausedSnapshotCurrentForTesting(std::uint64_t generation) noexcept;
     [[nodiscard]] SessionOrigin SessionOriginForTesting() const noexcept;
     [[nodiscard]] std::vector<EventRecord> EventsForTesting() noexcept;
-    [[nodiscard]] bool StartTraceForTesting() noexcept;
+    [[nodiscard]] bool StartTraceForTesting(bool submissionPending = false) noexcept;
+    void SubmitTraceForTesting() noexcept;
     [[nodiscard]] TraceReason TraceReasonForTesting() noexcept;
+    void SetTraceProcessForTesting(HANDLE process) noexcept;
+    void ReconcileTraceProcessForTesting() noexcept;
+    void IssueTraceInterruptForTesting(std::uint32_t threadId, std::uintptr_t entry) noexcept;
+    void HoldExecutorForTesting(HANDLE entered, HANDLE release) noexcept;
 #endif
 
 private:
@@ -107,6 +113,10 @@ private:
     bool LaunchSidecar();
     void Worker() noexcept;
     void TraceSupervisor() noexcept;
+    void CommitTraceEventLocked(int callbackType) noexcept;
+    void ReconcileTraceProcessExit() noexcept;
+    [[nodiscard]] bool TracePauseCommittedLocked() const noexcept;
+    [[nodiscard]] bool TraceHelperRejectsMutation(std::string_view method) noexcept;
     void CloseHandleValue(HANDLE& handle) noexcept;
     std::string StateResponse(const std::string& requestId);
     std::string ScyllaHideProfileResponse(const std::string& requestId,
@@ -164,8 +174,18 @@ private:
     std::mutex traceMutex_;
     std::condition_variable traceChanged_;
     TracePolicy trace_;
+    TraceStopCoordinator traceStop_;
+    std::atomic<std::uint64_t> processEpoch_{0U};
+    std::atomic<std::uint64_t> rawEventSequence_{0U};
+    std::optional<std::uint64_t> nativePauseEvent_;
+    std::optional<EventRecord> pendingTraceThread_;
+    std::uint64_t traceAdmissionEvent_{0U};
+    std::uint64_t traceAdmissionGeneration_{0U};
+    HANDLE traceProcess_{nullptr};
+    HANDLE traceInterruptThread_{nullptr};
+    std::uintptr_t traceInterruptAddress_{0U};
+    bool tracePauseCallbackInFlight_{false};
     bool traceSupervisorStopping_{false};
-    bool tracePauseSubmitted_{false};
     PauseObservation latestPause_;
     PendingExceptionObservation pendingException_;
     static constexpr std::size_t kEventCapacity = 256U;

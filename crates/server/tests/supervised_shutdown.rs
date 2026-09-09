@@ -277,10 +277,28 @@ async fn replacement_sidecar_rejects_stale_mutation_without_ipc_dispatch() {
         .unwrap();
     let response = String::from_utf8(response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200"));
-    assert!(response.contains("BACKEND_RESTARTED"));
-    assert!(response.contains("REFRESH_DEBUGGER_STATE"));
-    assert!(response.contains("\"safeToRetry\":false"));
-    assert!(!response.contains("\"retryable\""));
+    let (_, body) = response.split_once("\r\n\r\n").unwrap();
+    let response: serde_json::Value = serde_json::from_str(body).unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        response,
+        serde_json::json!({
+            "jsonrpc":"2.0","id":7,"result":{
+                "content":[{"type":"text","text":payload.to_string()}],"isError":true
+            }
+        })
+    );
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["error"]["code"], "BACKEND_RESTARTED");
+    assert_eq!(
+        payload["error"]["nextActions"][0]["code"],
+        "REFRESH_DEBUGGER_STATE"
+    );
+    assert_eq!(payload["error"]["recoverable"], true);
+    assert_eq!(payload["error"]["safeToRetry"], false);
+    assert_eq!(payload["error"]["details"]["outcome"], "not_started");
+    assert!(payload["error"].get("retryable").is_none());
     assert!(
         tokio::time::timeout(
             Duration::from_millis(150),

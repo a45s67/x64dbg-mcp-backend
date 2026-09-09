@@ -1,17 +1,11 @@
-# Field Validation Notes
+# Debugger Behavior Notes
 
-This document records failures reproduced against an isolated Windows 10 dynamic-analysis VM.
-It is evidence for regression tests and release acceptance, not a substitute for the tool
-contract or architecture documentation.
+Operational behavior and constraints for MCP clients using the native debugger.
+Tool schemas remain authoritative for accepted arguments and limits.
 
 ## Codex initialization compatibility
 
-The released v0.1.2 server accepted only MCP protocol `2025-11-25`. A Codex host that initialized
-with `2025-06-18` received JSON-RPC error `-32602` (`Unsupported protocol version`) and reported the
-server as `failed (0 tools)`. The debugger plugin, bearer authentication, `/health/live`, and an
-explicit `2025-11-25` raw MCP initialization were all healthy at the same time.
-
-The server supports the common tool-only contract for both handshake-era revisions. It now accepts
+The server supports the common tool-only contract for both handshake-era revisions. It accepts
 and echoes `2025-06-18` or `2025-11-25` during initialization and accepts either value in the
 subsequent `MCP-Protocol-Version` transport header. No tasks, elicitation, sampling, prompts, or
 resources are advertised, so no revision-dependent implementation is required for the exposed
@@ -67,10 +61,9 @@ modified exception context.
 Debugger GUI selection is mutable state and is not authoritative evidence of which native thread
 was read, written, or stepped. `registers.write` accepts an optional exact `thread_id`; the plugin
 uses the corresponding native handle for one `GetThreadContext` / `SetThreadContext` / read-back
-cycle without changing GUI selection. `debugger.step_into` and `debugger.step_over` also accept an
-exact `thread_id`, synchronously select it for x64dbg's step engine, and reject a completion callback
-from any other thread. Runtime acceptance writes and restores a non-selected worker register, then
-steps that worker and proves the prior selected thread's instruction pointer did not move.
+cycle without changing GUI selection. Runtime acceptance writes and restores a non-selected worker
+register, then verifies that a rejected non-event-thread step changes neither debugger generation
+nor the requested thread's registers.
 
 `DbgGetThreadId()` is not a selected-thread API: x64dbg implements it from the current debug-event
 record (`GetDebugData()->dwThreadId`), while `switchthread` changes only `hActiveThread`. Selected
@@ -83,8 +76,16 @@ assertion, not a request to switch the engine to an arbitrary thread. A non-even
 before mutation. For the event TID, the backend submits the single run-state step with
 `DbgCmdExecDirect` and still requires the resulting callback TID to match. Runtime acceptance proves
 both rejection without a generation change and a callback-correlated exact event-thread step.
+This is not exclusive-thread execution: x64dbg may run other runnable threads while continuing
+the debug event. Their instruction pointers need not remain unchanged across an accepted step.
 
 ## Direct pause interruption
+
+Trace timeout/cancellation uses a separate ownership protocol described in
+[Trace stopping](../README.md#trace-stopping). Unlike the
+explicit `debugger.pause` operation below, trace fallback enters at the verified
+RET following `DbgBreakPoint` and pauses inside its correlated thread-create
+callback; it does not raise an INT3 exception.
 
 Submitting the textual `pause` command through x64dbg's asynchronous command queue is not a
 reliable way to interrupt a debuggee whose selected thread is blocked in a kernel wait. Calling

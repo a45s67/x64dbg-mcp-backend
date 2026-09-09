@@ -13,6 +13,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'python-test-runtime.ps1')
+$python = Get-TestPython
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $integration = [IO.Path]::GetFullPath($IntegrationRoot)
 $build = Get-Item -LiteralPath (Join-Path $workspace 'build') -ErrorAction SilentlyContinue
@@ -81,32 +83,6 @@ $tokenBytes = New-Object byte[] 32
 $token = [Convert]::ToBase64String($tokenBytes)
 $baseUri = "http://127.0.0.1:$port"
 $headers = @{ Authorization = "Bearer $token"; Accept = 'application/json' }
-$script:requestId = 0
-$script:instanceId = $null
-
-function Invoke-Mcp([string]$Method, $Parameters) {
-    $script:requestId++
-    $body = @{ jsonrpc = '2.0'; id = $script:requestId; method = $Method; params = $Parameters } |
-        ConvertTo-Json -Depth 14 -Compress
-    $response = Invoke-RestMethod -UseBasicParsing -Method Post -Uri "$baseUri/mcp" `
-        -Headers $headers -ContentType 'application/json; charset=utf-8' `
-        -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 35
-    if ($response.error) {
-        throw "JSON-RPC error from $Method`: $($response.error | ConvertTo-Json -Compress)"
-    }
-    return $response.result
-}
-
-function Invoke-Tool([string]$Name, $Arguments) {
-    if ($null -ne $Arguments.operation_id) {
-        $Arguments.instance_id = $script:instanceId
-    }
-    $result = Invoke-Mcp 'tools/call' @{ name = $Name; arguments = $Arguments }
-    if ($result.isError) {
-        throw "Tool error from $Name`: $($result.structuredContent | ConvertTo-Json -Depth 10 -Compress)"
-    }
-    return $result.structuredContent
-}
 
 $previous = @{
     Port = $env:X64DBG_MCP_PORT
@@ -114,7 +90,6 @@ $previous = @{
     Server = $env:X64DBG_MCP_SERVER_PATH
 }
 $debuggerProcess = $null
-$stopSubmitted = $false
 $summary = $null
 try {
     $env:X64DBG_MCP_PORT = [string]$port
@@ -140,109 +115,30 @@ try {
     if ($ready.status -ne 'ready') {
         throw 'Isolated debugger MCP sidecar did not become ready.'
     }
-    $script:instanceId = ([Guid]::Parse([string]$ready.instance_id)).ToString()
+    $instanceId = ([Guid]::Parse([string]$ready.instance_id)).ToString()
     $endpoint = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop)
     $sidecar = @(Get-CimInstance Win32_Process | Where-Object {
         $_.ProcessId -in $endpoint.OwningProcess -and
         $_.ParentProcessId -eq $debuggerProcess.Id -and $_.ExecutablePath -ieq $server
     })
     if ($sidecar.Count -ne 1) { throw 'MCP endpoint is not owned by the launched debugger sidecar.' }
-    $null = Invoke-Mcp 'initialize' @{
-        protocolVersion = '2025-11-25'
-        capabilities = @{}
-        clientInfo = @{ name = 'generic-sample-smoke'; version = '1' }
-    }
-    $initial = Invoke-Tool 'debugger.state' @{}
-    if ($initial.debuggee_state -ne 'absent' -or
-        $initial.instance_id -ne $script:instanceId) {
-        throw 'Fresh isolated backend state or identity is invalid.'
-    }
-
-    $launch = Invoke-Tool 'debuggee.launch' @{
-        operation_id = [Guid]::NewGuid().ToString()
-        path = $stagedSample
-        working_directory = $backendRoot
-        arguments = @()
-    }
-    $state = Invoke-Tool 'debugger.state' @{}
-    $snapshot = Invoke-Tool 'debugger.snapshot' @{ disassembly_count = 8 }
-    $modules = Invoke-Tool 'modules.list' @{ limit = 256 }
-    $module = @($modules.items | Where-Object {
-        $_.name -ieq $sampleLeaf
-    } | Select-Object -First 1)
-    if ($module.Count -ne 1) {
-        throw 'Launched sample was not present in the bounded module list.'
-    }
-    $sections = Invoke-Tool 'sections.list' @{ module = $sampleLeaf; limit = 64 }
-    $imports = Invoke-Tool 'imports.list' @{ module = $sampleLeaf; limit = 64 }
-    $mzSearch = Invoke-Tool 'memory.search' @{
-        scope = @{ start = @{ absolute = $module[0].base }; length = 4096 }
-        pattern_hex = '4d5a'; mask = 'xx'; limit = 4
-    }
-    if (@($mzSearch.items).Count -lt 1 -or
-        $mzSearch.items[0].location.address -ne $module[0].base -or
-        $mzSearch.state_generation -ne $state.state_generation) {
-        throw 'Runtime PE signature search was incomplete or generation-inconsistent.'
-    }
-    $expectedPatternMatches = $null
+    $pythonArgs = @($python.Arguments)
+    $pythonArgs += @(
+        (Join-Path $PSScriptRoot '..\tests\python\generic_sample_smoke.py'),
+        '--base-url', $baseUri, '--instance-id', $instanceId, '--backend', $Backend,
+        '--sample', $sample, '--staged-sample', $stagedSample, '--backend-root', $backendRoot,
+        '--debugger-pid', [string]$debuggerProcess.Id,
+        '--sidecar-pid', [string]$sidecar[0].ProcessId, '--port', [string]$port
+    )
     if (![string]::IsNullOrEmpty($ExpectedAsciiPattern)) {
-        if ($ExpectedAsciiPattern.ToCharArray() | Where-Object {
-            [int]$_ -lt 0x20 -or [int]$_ -gt 0x7e
-        }) {
-            throw 'ExpectedAsciiPattern must contain printable ASCII only.'
-        }
-        $patternBytes = [Text.Encoding]::ASCII.GetBytes($ExpectedAsciiPattern)
-        $patternHex = -join @($patternBytes | ForEach-Object { $_.ToString('x2') })
-        $patternMask = [string]::new([char]'x', $patternBytes.Length)
-        $expectedSearch = Invoke-Tool 'memory.search' @{
-            scope = @{ module = $sampleLeaf }
-            pattern_hex = $patternHex; mask = $patternMask; limit = 32
-        }
-        $expectedPatternMatches = @($expectedSearch.items).Count
-        if ($expectedPatternMatches -lt 1 -or
-            $expectedSearch.state_generation -ne $state.state_generation) {
-            throw 'Expected runtime ASCII pattern was not found in the sample module.'
-        }
+        # Windows PowerShell native argv handling strips embedded double quotes.
+        $patternBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ExpectedAsciiPattern))
+        $pythonArgs += "--expected-ascii-pattern-base64=$patternBase64"
     }
-    $events = Invoke-Tool 'events.list' @{
-        types = @('process_created', 'system_breakpoint', 'dll_loaded'); limit = 64
-    }
-    if ($state.debuggee_state -ne 'paused' -or
-        $snapshot.state_generation -ne $state.state_generation -or
-        @($sections.items).Count -lt 1 -or @($events.items).Count -lt 1) {
-        throw 'Initial-pause sample observations were incomplete or generation-inconsistent.'
-    }
-
-    $stopSubmitted = $true
-    $stop = Invoke-Tool 'debugger.stop' @{
-        operation_id = [Guid]::NewGuid().ToString()
-    }
-    $summary = [ordered]@{
-        backend = $Backend
-        architecture = $state.architecture
-        sample = $sampleLeaf
-        sample_sha256 = (Get-FileHash -LiteralPath $sample -Algorithm SHA256).Hash.ToLowerInvariant()
-        instance_id = $script:instanceId
-        debugger_pid = $debuggerProcess.Id
-        sidecar_pid = $sidecar[0].ProcessId
-        endpoint_port = $port
-        endpoint_parent_verified = $true
-        launch_state = $launch.debuggee_state
-        pause_reason = $state.pause_reason.kind
-        state_generation = $state.state_generation
-        instruction_pointer = $state.instruction_pointer
-        snapshot_instruction_count = @($snapshot.disassembly).Count
-        module_base = $module[0].base
-        section_count = @($sections.items).Count
-        import_page_count = @($imports.items).Count
-        pe_signature_matches = @($mzSearch.items).Count
-        expected_ascii_pattern = if ([string]::IsNullOrEmpty($ExpectedAsciiPattern)) {
-            $null
-        } else { $ExpectedAsciiPattern }
-        expected_ascii_pattern_matches = $expectedPatternMatches
-        startup_event_count = @($events.items).Count
-        stopped = $stop.debuggee_state -eq 'absent'
-    }
+    # The bearer token is inherited through X64DBG_MCP_TOKEN, never argv.
+    $reportJson = & $python.Source @pythonArgs
+    if ($LASTEXITCODE -ne 0) { throw "Generic sample Python scenario failed (exit $LASTEXITCODE)." }
+    $summary = ($reportJson -join "`n") | ConvertFrom-Json
 } finally {
     if ($debuggerProcess -and !$debuggerProcess.HasExited) {
         $null = $debuggerProcess.CloseMainWindow()
@@ -255,9 +151,6 @@ try {
     $env:X64DBG_MCP_SERVER_PATH = $previous.Server
     $token = $null
     $headers = $null
-    if (!$stopSubmitted) {
-        Write-Verbose 'No mutation was retried; debugger ownership handled teardown.'
-    }
 }
 
 if ($debuggerProcess -and !$debuggerProcess.HasExited) {

@@ -426,6 +426,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn content_only_http_limits_count_full_escaped_utf8_response_bytes() {
+        use crate::adapter::{DebuggerAdapter, ToolError};
+
+        struct ReplyAdapter(Result<Value, ToolError>);
+
+        #[async_trait::async_trait]
+        impl DebuggerAdapter for ReplyAdapter {
+            fn is_ready(&self) -> bool {
+                true
+            }
+
+            async fn call(&self, name: &str, arguments: &Value) -> Result<Value, ToolError> {
+                assert_eq!(name, "expression.evaluate");
+                assert_eq!(arguments, &serde_json::json!({"expression":"cip"}));
+                self.0.clone()
+            }
+        }
+
+        let native = serde_json::json!({
+            "extension":{"text":"\u{754c}\u{1f980}e\u{301}\n\0\"\\".repeat(20_000)},
+            "data_hex":"00aBfF41".repeat(16_384),
+            "next_cursor":"opaque/\u{754c}+cursor=="
+        });
+        for failed in [false, true] {
+            let payload = if failed {
+                serde_json::json!({"ok":false,"error":{
+                    "code":"TIMEOUT","message":"outcome unknown",
+                    "recoverable":true,"safeToRetry":false,"details":native
+                }})
+            } else {
+                native.clone()
+            };
+            let adapter = Arc::new(ReplyAdapter(if failed {
+                Err(ToolError::new(
+                    "TIMEOUT",
+                    "outcome unknown",
+                    true,
+                    false,
+                    native.clone(),
+                ))
+            } else {
+                Ok(native.clone())
+            }));
+            let expected = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{
+                "content":[{"type":"text","text":payload.to_string()}],"isError":failed
+            }});
+            let encoded = serde_json::to_vec(&expected).unwrap();
+            assert!(encoded.len() > 512 * 1024);
+            assert!(encoded.len() < 4 * 1024 * 1024);
+            // Limits apply to wire bytes, including the second layer of JSON escaping.
+            for limit in [
+                encoded.len() + 1,
+                encoded.len(),
+                encoded.len() - 1,
+                payload.to_string().len(),
+                expected.to_string().chars().count(),
+            ] {
+                let mut config = Config::for_test(TOKEN);
+                config.max_output_bytes = limit;
+                let app = router(AppState::with_adapter_and_instance(
+                    Arc::new(config),
+                    adapter.clone(),
+                    instance_id(),
+                ));
+                let response = app.oneshot(
+                    Request::post("/mcp")
+                        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::ACCEPT, "application/json")
+                        .body(Body::from(
+                            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"expression.evaluate","arguments":{"expression":"cip"}}}"#,
+                        )).unwrap(),
+                ).await.unwrap();
+                assert_eq!(response.headers()[header::CONTENT_TYPE], JSON_UTF8);
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), limit).await.unwrap();
+                if limit >= encoded.len() {
+                    assert_eq!(status, StatusCode::OK);
+                    assert_eq!(bytes.as_ref(), encoded.as_slice());
+                    let actual: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(content_payload(&actual["result"], failed), payload);
+                } else {
+                    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                    assert!(bytes.len() < 256);
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&bytes).unwrap(),
+                        serde_json::json!({
+                            "error":{"code":"OUTPUT_LIMIT_EXCEEDED",
+                                "message":"response exceeds configured output limit","details":{}}
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn readiness_requires_bearer_authentication() {
         let response = app()
             .oneshot(Request::get("/health/ready").body(Body::empty()).unwrap())
@@ -664,6 +761,7 @@ mod tests {
             mcp_request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#).await;
         let tools = value["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 64);
+        assert!(tools.iter().all(|tool| tool.get("outputSchema").is_none()));
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.state"));
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.snapshot"));
         assert!(tools.iter().any(|tool| tool["name"] == "trace.start"));
@@ -731,15 +829,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_call_returns_summary_and_structured_content() {
+    async fn tools_call_returns_only_json_text_content() {
         let value = mcp_request(
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"debugger.state","arguments":{}}}"#,
         )
         .await;
         let result = &value["result"];
-        assert_eq!(result["isError"], false);
-        assert_eq!(result["structuredContent"]["debuggee_state"], "paused");
-        assert!(result["content"][0]["text"].as_str().unwrap().len() < 256);
+        let payload = content_payload(result, false);
+        assert_eq!(payload["debuggee_state"], "paused");
     }
 
     #[tokio::test]
@@ -749,11 +846,11 @@ mod tests {
         )
         .await;
         let result = &value["result"];
-        assert_eq!(result["isError"], false);
-        assert_eq!(result["structuredContent"]["address"], "0x0000000140001000");
-        assert_eq!(result["structuredContent"]["module"], "sample.exe");
-        assert_eq!(result["structuredContent"]["rva"], "0x1000");
-        assert_eq!(result["structuredContent"]["state_generation"], 7);
+        let payload = content_payload(result, false);
+        assert_eq!(payload["address"], "0x0000000140001000");
+        assert_eq!(payload["module"], "sample.exe");
+        assert_eq!(payload["rva"], "0x1000");
+        assert_eq!(payload["state_generation"], 7);
     }
 
     #[tokio::test]
@@ -763,13 +860,10 @@ mod tests {
         )
         .await;
         let result = &value["result"];
-        assert_eq!(result["isError"], false);
-        assert_eq!(result["structuredContent"]["state_generation"], 8);
-        assert_eq!(
-            result["structuredContent"]["pause_reason"]["kind"],
-            "breakpoint"
-        );
-        assert_eq!(result["structuredContent"]["pause_reason"]["hit_count"], 1);
+        let payload = content_payload(result, false);
+        assert_eq!(payload["state_generation"], 8);
+        assert_eq!(payload["pause_reason"]["kind"], "breakpoint");
+        assert_eq!(payload["pause_reason"]["hit_count"], 1);
     }
 
     #[tokio::test]
@@ -778,15 +872,23 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"debugger.resume","arguments":{}}}"#,
         )
         .await;
-        assert_eq!(value["result"]["isError"], true);
+        let payload = content_payload(&value["result"], true);
+        assert_eq!(payload["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(payload["error"]["details"]["field"], "operation_id");
+    }
+
+    fn content_payload(result: &Value, is_error: bool) -> Value {
+        assert!(result.get("structuredContent").is_none());
+        let payload: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(
-            value["result"]["structuredContent"]["error"]["code"],
-            "INVALID_ARGUMENT"
+            result,
+            &serde_json::json!({
+                "content": [{"type": "text", "text": payload.to_string()}],
+                "isError": is_error
+            })
         );
-        assert_eq!(
-            value["result"]["structuredContent"]["error"]["details"]["field"],
-            "operation_id"
-        );
+        payload
     }
 
     async fn mcp_request(body: &'static str) -> Value {

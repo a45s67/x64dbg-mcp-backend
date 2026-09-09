@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     adapter::{ActionExecution, DebuggerAdapter, NextAction, ToolError},
-    content, tools,
+    tools,
 };
 
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
@@ -121,20 +121,17 @@ async fn call_tool(
         return Err((-32602, "Tool arguments must be an object"));
     }
     if let Err(error) = tools::validate_arguments(name, arguments) {
-        return Ok(tool_failure(
-            name,
-            ToolError {
-                code: "INVALID_ARGUMENT",
-                message: error.message,
-                recoverable: true,
-                safe_to_retry: false,
-                suggested_action: Some(
-                    "Correct the reported field before calling the tool again.".to_owned(),
-                ),
-                next_actions: Vec::new(),
-                details: json!({ "field": error.field }),
-            },
-        ));
+        return Ok(tool_failure(ToolError {
+            code: "INVALID_ARGUMENT",
+            message: error.message,
+            recoverable: true,
+            safe_to_retry: false,
+            suggested_action: Some(
+                "Correct the reported field before calling the tool again.".to_owned(),
+            ),
+            next_actions: Vec::new(),
+            details: json!({ "field": error.field }),
+        }));
     }
     let mut dispatched_arguments = arguments.clone();
     if tools::is_mutation_call(name, arguments) {
@@ -145,7 +142,6 @@ async fn call_tool(
             .expect("validated mutation instance_id must be a UUID");
         if supplied != instance_id {
             return Ok(tool_failure(
-                name,
                 ToolError {
                     code: "BACKEND_RESTARTED",
                     message: "backend instance changed; mutation was not dispatched",
@@ -182,37 +178,32 @@ async fn call_tool(
                 && value.get("instance_id").and_then(Value::as_str)
                     != Some(expected_instance_id.as_str()) =>
         {
-            tool_failure(
-                name,
-                ToolError {
-                    code: "BACKEND_IDENTITY_MISMATCH",
-                    message: "plugin and sidecar instance identities do not match",
-                    recoverable: true,
-                    safe_to_retry: false,
-                    suggested_action: Some(
-                        "Restart the debugger host so the plugin and sidecar establish one identity."
-                            .to_owned(),
-                    ),
-                    next_actions: Vec::new(),
-                    details: json!({ "instance_id": instance_id }),
-                },
-            )
+            tool_failure(ToolError {
+                code: "BACKEND_IDENTITY_MISMATCH",
+                message: "plugin and sidecar instance identities do not match",
+                recoverable: true,
+                safe_to_retry: false,
+                suggested_action: Some(
+                    "Restart the debugger host so the plugin and sidecar establish one identity."
+                        .to_owned(),
+                ),
+                next_actions: Vec::new(),
+                details: json!({ "instance_id": instance_id }),
+            })
         }
-        Ok(value) => tool_success(name, value),
-        Err(error) => tool_failure(name, error),
+        Ok(value) => tool_success(value),
+        Err(error) => tool_failure(error),
     })
 }
 
-fn tool_success(name: &str, value: Value) -> Value {
-    let text = content::success_summary(name, &value);
+fn tool_success(value: Value) -> Value {
     json!({
-        "content": [{ "type": "text", "text": text }],
-        "structuredContent": value,
+        "content": [{ "type": "text", "text": value.to_string() }],
         "isError": false
     })
 }
 
-fn tool_failure(name: &str, error: ToolError) -> Value {
+fn tool_failure(error: ToolError) -> Value {
     let suggested_action = error.suggested_action.filter(|value| {
         !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
     });
@@ -249,10 +240,8 @@ fn tool_failure(name: &str, error: ToolError) -> Value {
         );
     }
     let value = json!({ "ok": false, "error": error_value });
-    let text = crate::content::error_summary(name, &value);
     json!({
-        "content": [{ "type": "text", "text": text }],
-        "structuredContent": value,
+        "content": [{ "type": "text", "text": value.to_string() }],
         "isError": true
     })
 }
@@ -295,6 +284,20 @@ mod contract_tests {
 
     fn instance_id() -> uuid::Uuid {
         uuid::Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap()
+    }
+
+    fn content_payload(result: &Value, is_error: bool) -> Value {
+        assert!(result.get("structuredContent").is_none());
+        let payload: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            result,
+            &json!({
+                "content": [{"type": "text", "text": payload.to_string()}],
+                "isError": is_error
+            })
+        );
+        payload
     }
 
     struct RecordingAdapter {
@@ -439,40 +442,36 @@ mod contract_tests {
     }
 
     #[test]
-    fn bounded_debugger_diagnostic_is_included_in_content() {
-        let result = tool_failure(
-            "debuggee.launch",
-            ToolError {
-                code: "TIMEOUT",
-                message: "debugger rejected the operation",
-                recoverable: true,
-                safe_to_retry: false,
-                suggested_action: Some("Rename the analysis copy and try again.".to_owned()),
-                next_actions: Vec::new(),
-                details: json!({
-                    "debugger_message": "x32dbg handles .PIF with ResolveShortcut before CreateProcessW; rename and try again",
-                    "outcome": "unknown"
-                }),
-            },
-        );
-        assert!(
-            result["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("ResolveShortcut before CreateProcessW")
-        );
-        assert_eq!(result["structuredContent"]["error"]["recoverable"], true);
-        assert_eq!(result["structuredContent"]["error"]["safeToRetry"], false);
-        assert!(
-            result["structuredContent"]["error"]
-                .get("retryable")
-                .is_none()
-        );
-        assert!(
-            result["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Next: Rename the analysis copy and try again.")
+    fn debugger_diagnostic_and_guidance_are_preserved_in_json_content() {
+        let result = tool_failure(ToolError {
+            code: "TIMEOUT",
+            message: "debugger rejected the operation",
+            recoverable: true,
+            safe_to_retry: false,
+            suggested_action: Some("Rename the analysis copy and try again.".to_owned()),
+            next_actions: Vec::new(),
+            details: json!({
+                "debugger_message": "x32dbg handles .PIF with ResolveShortcut before CreateProcessW; rename and try again",
+                "outcome": "unknown"
+            }),
+        });
+        assert_eq!(
+            content_payload(&result, true),
+            json!({
+                "ok": false,
+                "error": {
+                    "code": "TIMEOUT",
+                    "message": "debugger rejected the operation",
+                    "recoverable": true,
+                    "safeToRetry": false,
+                    "suggestedAction": "Rename the analysis copy and try again.",
+                    "adviceSource": "x64dbg-mcp-backend",
+                    "details": {
+                        "debugger_message": "x32dbg handles .PIF with ResolveShortcut before CreateProcessW; rename and try again",
+                        "outcome": "unknown"
+                    }
+                }
+            })
         );
     }
 
@@ -486,19 +485,17 @@ mod contract_tests {
             json!({}),
         );
         action.reason = "bad\nreason".to_owned();
-        let result = tool_failure(
-            "debugger.resume",
-            ToolError {
-                code: "BUSY",
-                message: "debugger is busy",
-                recoverable: true,
-                safe_to_retry: true,
-                suggested_action: Some("x".repeat(513)),
-                next_actions: vec![action],
-                details: json!({}),
-            },
-        );
-        let error = &result["structuredContent"]["error"];
+        let result = tool_failure(ToolError {
+            code: "BUSY",
+            message: "debugger is busy",
+            recoverable: true,
+            safe_to_retry: true,
+            suggested_action: Some("x".repeat(513)),
+            next_actions: vec![action],
+            details: json!({}),
+        });
+        let payload = content_payload(&result, true);
+        let error = &payload["error"];
         assert!(error.get("suggestedAction").is_none());
         assert!(error.get("nextActions").is_none());
         assert!(error.get("adviceSource").is_none());
@@ -511,7 +508,7 @@ mod contract_tests {
     }
 
     #[tokio::test]
-    async fn memory_read_has_readable_content_and_unchanged_structured_result() {
+    async fn memory_read_has_one_json_content_item_with_unchanged_payload() {
         let exact = json!({
             "address":"0x1e56090",
             "location":{
@@ -547,12 +544,97 @@ mod contract_tests {
         .await;
         let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["result"]["structuredContent"], exact);
-        let content = value["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(content.starts_with("24 bytes at checksum.exe+0x16090 (0x1e56090)"));
-        assert!(content.contains("34 7F 25 A5 5F 0D 85 DC  65 0F 6B BD 24 AD 2F 2A"));
-        assert!(!content.contains("347f25a55f0d85dc650f6bbd24ad2f2a"));
+        assert_eq!(content_payload(&value["result"], false), exact);
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn guidance_filtering_keeps_byte_limits_action_order_and_four_action_cap() {
+        let actions: Vec<_> = (0..6)
+            .map(|index| {
+                NextAction::tool(
+                    &format!("ACTION_{index}"),
+                    ActionExecution::RequiredBeforeRetry,
+                    "Inspect \u{754c} state",
+                    "debugger.state",
+                    json!({"index":index,"nested":{"text":"\u{754c}\n\0"}}),
+                )
+            })
+            .collect();
+        let mut invalid = actions[0].clone();
+        invalid.reason = "bad\nreason".to_owned();
+        let mut supplied = vec![invalid.clone(), actions[0].clone(), invalid];
+        supplied.extend_from_slice(&actions[1..]);
+
+        for (guidance, accepted) in [
+            (None, false),
+            (Some(String::new()), false),
+            (Some("bad\nreason".to_owned()), false),
+            (Some("bad\u{85}reason".to_owned()), false),
+            (Some("x".repeat(513)), false),
+            (Some("\u{754c}".repeat(171)), false),
+            (Some("x".repeat(512)), true),
+            (Some(format!("{}ab", "\u{754c}".repeat(170))), true),
+        ] {
+            for next_actions in [vec![], supplied.clone()] {
+                let has_actions = !next_actions.is_empty();
+                let result = tool_failure(ToolError {
+                    code: "BUSY",
+                    message: "debugger is busy",
+                    recoverable: true,
+                    safe_to_retry: true,
+                    suggested_action: guidance.clone(),
+                    next_actions,
+                    details: json!({"diagnostic":"unchanged\n\0\u{754c}"}),
+                });
+                let mut expected = json!({
+                    "code":"BUSY","message":"debugger is busy","recoverable":true,
+                    "safeToRetry":true,"details":{"diagnostic":"unchanged\n\0\u{754c}"}
+                });
+                if accepted {
+                    expected["suggestedAction"] = json!(guidance);
+                }
+                if has_actions {
+                    expected["nextActions"] = json!(&actions[..4]);
+                }
+                if accepted || has_actions {
+                    expected["adviceSource"] = json!("x64dbg-mcp-backend");
+                }
+                assert_eq!(
+                    content_payload(&result, true),
+                    json!({"ok":false,"error":expected})
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn next_action_serialized_byte_boundary_is_preserved() {
+        let mut action = NextAction::tool(
+            "INSPECT_STATE",
+            ActionExecution::Suggested,
+            "Inspect state",
+            "debugger.state",
+            json!({"text":"\u{754c}\n\0\"\\","padding":""}),
+        );
+        let overhead = serde_json::to_vec(&action).unwrap().len();
+        for size in [4096, 4097] {
+            action.arguments.as_mut().unwrap()["padding"] = json!("x".repeat(size - overhead));
+            assert_eq!(serde_json::to_vec(&action).unwrap().len(), size);
+            let result = tool_failure(
+                ToolError::new("BUSY", "debugger is busy", true, false, json!({}))
+                    .with_guidance("", vec![action.clone()]),
+            );
+            let mut expected = json!({"ok":false,"error":{
+                "code":"BUSY","message":"debugger is busy","recoverable":true,
+                "safeToRetry":false,"details":{}
+            }});
+            if size == 4096 {
+                expected["error"]["nextActions"] = json!([action]);
+                expected["error"]["adviceSource"] = json!("x64dbg-mcp-backend");
+            }
+            assert_eq!(content_payload(&result, true), expected);
+        }
     }
 
     #[tokio::test]
@@ -581,37 +663,14 @@ mod contract_tests {
         .await;
         let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["result"]["isError"], true);
-        assert_eq!(
-            value["result"]["structuredContent"]["error"]["code"],
-            "BACKEND_RESTARTED"
-        );
-        assert_eq!(
-            value["result"]["structuredContent"]["error"]["recoverable"],
-            true
-        );
-        assert_eq!(
-            value["result"]["structuredContent"]["error"]["safeToRetry"],
-            false
-        );
-        assert!(
-            value["result"]["structuredContent"]["error"]
-                .get("retryable")
-                .is_none()
-        );
-        assert_eq!(
-            value["result"]["structuredContent"]["error"]["details"]["outcome"],
-            "not_started"
-        );
-        assert!(
-            value["result"]["structuredContent"]["error"]["details"]
-                .get("diagnostic_code")
-                .is_none()
-        );
-        assert_eq!(
-            value["result"]["structuredContent"]["error"]["nextActions"][0]["tool"],
-            "debugger.state"
-        );
+        let payload = content_payload(&value["result"], true);
+        assert_eq!(payload["error"]["code"], "BACKEND_RESTARTED");
+        assert_eq!(payload["error"]["recoverable"], true);
+        assert_eq!(payload["error"]["safeToRetry"], false);
+        assert!(payload["error"].get("retryable").is_none());
+        assert_eq!(payload["error"]["details"]["outcome"], "not_started");
+        assert!(payload["error"]["details"].get("diagnostic_code").is_none());
+        assert_eq!(payload["error"]["nextActions"][0]["tool"], "debugger.state");
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
     }
 
@@ -640,7 +699,12 @@ mod contract_tests {
         .await;
         let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["result"]["isError"], false);
+        assert_eq!(
+            content_payload(&value["result"], false),
+            json!({
+                "debuggee_state": "running", "state_generation": 8
+            })
+        );
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
     }
 

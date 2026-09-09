@@ -105,10 +105,17 @@ Invoke-RestMethod http://127.0.0.1:43164/health/ready -Headers $headers
 
 ## Result contract
 
-Successful tool calls place exact data in `structuredContent`. Text `content`
-is a bounded summary: `memory.read` previews at most 128 bytes as a hexdump,
-execution and breakpoint tools summarize only the same operation's returned
-observations, and discovery tools do not duplicate item arrays.
+Tool calls return exactly one `content` block with `type: "text"`. Its `text`
+is the complete JSON-serialized payload, not a summary or preview. Decode it
+with `json.loads(result["content"][0]["text"])` in Python. Success payloads keep
+their existing shapes; failures contain `{ "ok": false, "error": { ... } }`.
+The enclosing `isError` remains `false` for success and `true` for tool failures.
+
+`structuredContent` has been removed. This is a breaking change for consumers
+that read that field or treat `content` as a plain-language summary. There is no
+legacy fallback or new `context` field. Complete arrays, memory bytes, cursors,
+and nested error details are preserved within the existing response-size limit;
+oversized responses fail rather than returning truncated JSON.
 
 Errors contain `code`, `message`, `recoverable`, `safeToRetry`, and `details`.
 `recoverable` means a state, input, configuration, or manual change can allow
@@ -150,18 +157,38 @@ mutation. Inspect state and retry guidance before attempting reconciliation.
 
 Tool schemas and limits are authoritative in `crates/server/src/tools.rs`.
 Native implementations are in `plugin/src/runtime.cpp`.
-Core tools also advertise `outputSchema`; their full results remain in
-`structuredContent`, with bounded text previews in `content`. Check completion,
-pagination, and read-completeness fields rather than treating `isError: false`
-as proof that an execution target or exhaustive search completed.
+Tools no longer advertise `outputSchema`, which describes structured output,
+not JSON embedded in text. Payload schemas remain internal contract-test
+fixtures. Check completion, pagination, and read-completeness fields in decoded
+`content` rather than treating `isError: false` as proof that an execution target
+or exhaustive search completed.
 
 Memory `length` and breakpoint `size` inputs are byte counts. Existing names
 are preserved, with no aliases. JSON integers use decimal syntax: reading
 16 bytes uses `{ "address": "0x100000", "length": 16 }`.
 
-The [2026-09-08 interface validation](docs/validation/mcp-interface-2026-09-08.md)
-records the schema review, naming decisions, real-debugger coverage, and known
-remaining test risk.
+The [debugger behavior notes](docs/field-validation.md) cover protocol negotiation,
+exception continuation, thread identity, and native pause behavior.
+
+### Trace stopping
+
+Trace admission requires a committed native pause with the selected thread matching
+the debug-event thread. `trace.start` reports native admission, which can precede
+the first completed step; cancellation may legitimately retain only the initial
+point. A timeout requests stopping at its deadline. After a bounded 50 ms
+cooperative opportunity, an independently supervised helper can pause a blocked
+step-over through x64dbg's thread-create callback, without delivering a synthetic
+exception to the debuggee. This requires remote-thread access and an unmodified
+`ntdll!DbgBreakPoint`/RET sequence.
+
+At a helper pause, do not start tracing or stepping the helper. Prearm an application
+breakpoint before starting the trace, release any controlled wait via `memory.write`
+if necessary, then explicitly `debugger.resume` to an application-thread debug event.
+Other mutations are rejected there except `trace.cancel`, `debugger.stop` (subject
+to attached-session restrictions), and ScyllaHide configuration. Read-only tools
+retain their usual state requirements. An unresolved interrupt is not reported as
+successful cancellation: the backend fails closed instead of admitting a new trace
+or automatically resuming through an unrelated pause.
 
 ## Build and test
 
@@ -170,22 +197,84 @@ Required baseline:
 - Visual Studio 2026 Build Tools with MSVC C++, CMake, and Ninja
 - Rust stable `x86_64-pc-windows-msvc`
 - x64dbg SDK 2026.05.27
+- Python 3.11+ (CI uses 3.13) and `requirements-test.txt` for pytest
 
 ```powershell
 $env:X64DBG_ROOT = 'C:\tools\x64dbg'
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-test.txt
+cargo fmt --all -- --check
 cargo test --offline --locked --workspace --all-targets
 cargo clippy --offline --locked --workspace --all-targets -- -D warnings
 scripts\build-plugin.cmd x86 test
 scripts\build-plugin.cmd x64 test
+cargo build --offline --locked --bin x64dbg-mcp-server
+.venv\Scripts\python.exe -m pytest --server-path target\debug\x64dbg-mcp-server.exe
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\package.ps1
 ```
+
+Rust and C++ tests stay native. HTTP scenario assertions live in `tests/python`;
+PowerShell wrappers retain Windows preparation, debugger ownership, readiness
+waits, and cleanup. The shared Python MCP client validates the content-only
+contract, preserves integer and Unicode data, and never retries automatically.
+Scenario-specific retries are limited to explicitly safe `BUSY` state reads and
+the attach scenario's read-only module snapshot, which can race attach callbacks.
+
+Without `--server-path`, pytest runs offline harness tests and skips real HTTP
+tests. Normal runs never launch a debugger. Live tests require prepared isolated
+runtime trees (the full x64dbg runtime, not just the SDK), and run serially:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\prepare-integration.ps1 `
+  -X64dbgRoot C:\tools\x64dbg -Destination "$PWD\artifacts\python-integration"
+.venv\Scripts\python.exe -m pytest tests/python/test_live.py --run-live `
+  --integration-root artifacts/python-integration `
+  --server-path target/debug/x64dbg-mcp-server.exe `
+  --report-directory artifacts/python-reports --junitxml artifacts/pytest-live.xml
+```
+
+Use a fresh integration destination; preparation refuses to overwrite an existing
+tree. Adjust `--server-path` if Cargo uses a custom target directory. Live pytest
+covers real integration/soak, attach/detach, and generic fixture smoke on x32 and
+x64. Installed Flare qualification is separately opt-in via `--flare-sample` and
+`--x64dbg-root`. Never run concurrent suites against the same debugger trees.
+
+For offline Python provisioning, first download wheels with
+`py -3 -m pip download -r requirements-test.txt -d artifacts/python-wheels`, then
+install with `--no-index --find-links artifacts/python-wheels -r requirements-test.txt`.
+Rust offline commands likewise require dependencies cached by `cargo fetch --locked`.
 
 Run the complete local release gate with:
 
 ```powershell
+$env:X64DBG_MCP_TEST_PYTHON = "$PWD\.venv\Scripts\python.exe"
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File scripts\run-release-gate.ps1 -X64dbgRoot C:\tools\x64dbg
 ```
+
+The gate runs Rust, C++, Python unit/HTTP, live x32/x64, and host-control checks,
+and writes JUnit plus per-scenario JSON reports. It verifies that the tested server
+matches the newly packaged executable. Set `X64DBG_MCP_TEST_PYTHON` for standalone
+PowerShell runners too; pytest automatically passes its interpreter to them.
+CI runs Rust, native, and Python unit/HTTP tests before packaging. It does not
+run live debugger tests because its SDK-only environment lacks the runtime.
+Native test builds also build and discover their own current release server,
+including custom Cargo target directories, rather than trusting a cached path.
+
+To qualify a fresh package with Flare without replacing an existing installation:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\run-flare-qualification.ps1 `
+  -PackageRoot "$PWD\dist\x64dbg-mcp-backend-0.2.0" `
+  -X64dbgRoot C:\tools\x64dbg `
+  -SamplePath 'C:\samples\checksum.exe' `
+  -OutputDirectory "$PWD\build\flare-qualification-new" -Iterations 3
+```
+
+Supply your newly qualified package and sample paths, and an unused output directory.
+This creates a separate installed-layout runtime with only this project's plugin,
+independent credentials, verified binary hashes, and per-run JSON/JUnit evidence.
+Reports contain no credentials; do not publish the generated runtime/config directory.
 
 The plugin/sidecar wire contract is
 [`docs/contracts/ipc-v1.md`](docs/contracts/ipc-v1.md). A pushed `v*` tag

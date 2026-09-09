@@ -2489,9 +2489,58 @@ bool AtomicReplaceScyllaHideConfig(const std::string_view text) {
 }
 } // namespace
 
-Runtime::~Runtime() { Stop(); }
+Runtime::~Runtime() {
+    Stop();
+    CloseHandleValue(traceInterruptThread_);
+    CloseHandleValue(traceProcess_);
+}
 
 bool Runtime::IsReady() const noexcept { return pluginState_.load() == PluginState::ready; }
+
+bool Runtime::CanUnload() noexcept {
+    ReconcileTraceProcessExit();
+    std::lock_guard lock(traceMutex_);
+    return !trace_.Active() && !traceStop_.Unresolved() && !traceStop_.InFlight() &&
+        !tracePauseCallbackInFlight_ &&
+        (!traceInterruptThread_ || WaitForSingleObject(traceInterruptThread_, 0U) == WAIT_OBJECT_0);
+}
+
+bool Runtime::TracePauseCommittedLocked() const noexcept {
+    return debuggeeState_.load() == DebuggeeState::paused && nativePauseEvent_ &&
+        *nativePauseEvent_ == rawEventSequence_.load();
+}
+
+bool Runtime::TraceHelperRejectsMutation(const std::string_view method) noexcept {
+    std::lock_guard lock(traceMutex_);
+    return (tracePauseCallbackInFlight_ ||
+            (traceInterruptThread_ && activeThreadId_.load() == GetThreadId(traceInterruptThread_))) &&
+        !TraceHelperAllowsMutation(method);
+}
+
+void Runtime::ReconcileTraceProcessExit() noexcept {
+    std::lock_guard stateLock(stateMutex_);
+    std::lock_guard lock(traceMutex_);
+    if (!traceProcess_ || WaitForSingleObject(traceProcess_, 0U) != WAIT_OBJECT_0) return;
+    // An owned kernel handle proves death even when unload removed callbacks.
+    // Never overwrite a newer process's state (including a reused PID).
+    if (traceStop_.Identity().process == processEpoch_.load() &&
+        processId_.load() == GetProcessId(traceProcess_)) {
+        debuggeeState_.store(DebuggeeState::exited);
+        processId_.store(0U);
+        activeThreadId_.store(0U);
+        nativePauseEvent_.reset();
+        latestPause_ = {};
+        generation_.fetch_add(1U);
+    }
+    traceStop_.ProcessExited(trace_);
+    if (!traceStop_.InFlight() && !tracePauseCallbackInFlight_) {
+        CloseHandleValue(traceInterruptThread_);
+        CloseHandleValue(traceProcess_);
+        traceInterruptAddress_ = 0U;
+    }
+    traceChanged_.notify_all();
+    stateChanged_.notify_all();
+}
 
 #ifdef MCP_LIFECYCLE_HARNESS
 DWORD Runtime::SidecarProcessIdForTesting() const noexcept {
@@ -2525,26 +2574,78 @@ std::vector<EventRecord> Runtime::EventsForTesting() noexcept {
     return events;
 }
 
-bool Runtime::StartTraceForTesting() noexcept {
+bool Runtime::StartTraceForTesting(const bool submissionPending) noexcept {
+    std::lock_guard stateLock(stateMutex_);
     std::lock_guard lock(traceMutex_);
+    if (!TracePauseCommittedLocked()) return false;
     const bool started = trace_.Start(
         "00000000-0000-4000-8000-000000000001", TraceMode::over,
         TracePolicy::kMaxSteps, std::chrono::steady_clock::now() + std::chrono::seconds(30),
         0x401000U, {});
     if (started) {
-        tracePauseSubmitted_ = false;
+        const auto ticket = traceStop_.Begin(processEpoch_.load(), processId_.load());
+        traceAdmissionEvent_ = rawEventSequence_.load();
+        traceAdmissionGeneration_ = generation_.load();
+        if (!submissionPending) {
+            traceStop_.Resumed();
+            traceStop_.Submitted(trace_, ticket, true);
+        }
         traceChanged_.notify_all();
     }
     return started;
+}
+
+void Runtime::SubmitTraceForTesting() noexcept {
+    std::lock_guard lock(traceMutex_);
+    traceStop_.Submitted(trace_, traceStop_.Identity(), true);
+    traceChanged_.notify_all();
 }
 
 TraceReason Runtime::TraceReasonForTesting() noexcept {
     std::lock_guard lock(traceMutex_);
     return trace_.Reason();
 }
+
+void Runtime::SetTraceProcessForTesting(const HANDLE process) noexcept {
+    std::lock_guard stateLock(stateMutex_);
+    std::lock_guard lock(traceMutex_);
+    CloseHandleValue(traceProcess_);
+    (void)DuplicateHandle(GetCurrentProcess(), process, GetCurrentProcess(),
+                          &traceProcess_, 0U, FALSE, DUPLICATE_SAME_ACCESS);
+    processId_.store(GetProcessId(process));
+}
+
+void Runtime::ReconcileTraceProcessForTesting() noexcept { ReconcileTraceProcessExit(); }
+
+void Runtime::HoldExecutorForTesting(const HANDLE entered, const HANDLE release) noexcept {
+    (void)executor_.Execute([entered, release] {
+        SetEvent(entered);
+        WaitForSingleObject(release, 5000U);
+        return std::string{};
+    }, std::chrono::steady_clock::now() + std::chrono::seconds(6));
+}
+
+void Runtime::IssueTraceInterruptForTesting(const std::uint32_t threadId,
+                                           const std::uintptr_t entry) noexcept {
+    std::lock_guard lock(traceMutex_);
+    const auto now = std::chrono::steady_clock::now();
+    traceStop_.Request(trace_, TraceReason::timeout, now);
+    const auto ticket = traceStop_.Reserve(trace_, now + TraceStopCoordinator::kCooperativeGrace);
+    if (ticket) {
+        traceInterruptAddress_ = entry;
+        (void)traceStop_.Issue(*ticket, threadId, entry);
+        traceStop_.FinishInterrupt(trace_, *ticket, false);
+    }
+}
 #endif
 
 bool Runtime::Start() {
+    ReconcileTraceProcessExit();
+    {
+        std::lock_guard lock(traceMutex_);
+        if (trace_.Active() || traceStop_.Unresolved() || traceStop_.InFlight() ||
+            tracePauseCallbackInFlight_) return false;
+    }
     PluginState expected = PluginState::stopped;
     if (!pluginState_.compare_exchange_strong(expected, PluginState::starting)) {
         return false;
@@ -2574,7 +2675,6 @@ bool Runtime::Start() {
         {
             std::lock_guard lock(traceMutex_);
             traceSupervisorStopping_ = false;
-            tracePauseSubmitted_ = false;
         }
         traceSupervisor_ = std::thread(&Runtime::TraceSupervisor, this);
         worker_ = std::thread(&Runtime::Worker, this);
@@ -2753,6 +2853,20 @@ void Runtime::Worker() noexcept {
             break;
         }
         const auto requestDeadline = SteadyDeadline(parsed->deadlineUnixMs);
+        const auto helperRejection = [this, parsed]() -> std::optional<std::string> {
+            if (parsed->mutation && TraceHelperRejectsMutation(parsed->method)) {
+                return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                    "trace helper pause permits only memory.write, trace.cancel, debugger.resume/stop and profile configuration; prearm breakpoints before trace.start or reach an application pause",
+                    false, false);
+            }
+            return std::nullopt;
+        };
+        // Reject before admission to either executor/command queue. Recheck on
+        // execution as well: the helper can pause while this request is queued.
+        if (const auto rejected = helperRejection()) {
+            if (!WriteFrame(pipe_, *rejected)) break;
+            continue;
+        }
         if (parsed->method == "scyllahide.profile") {
             const std::string response =
                 std::chrono::steady_clock::now() >= requestDeadline
@@ -2765,7 +2879,25 @@ void Runtime::Worker() noexcept {
             continue;
         }
         const ExecutionResult execution = executor_.Execute(
-            [this, parsed, requestDeadline] {
+            [this, parsed, requestDeadline, helperRejection] {
+                if (const auto rejected = helperRejection()) return *rejected;
+                if (parsed->mutation && parsed->method != "trace.cancel" &&
+                    parsed->method != "debugger.stop" &&
+                    (parsed->method.starts_with("debugger.") ||
+                     parsed->method.starts_with("debuggee.") ||
+                     parsed->method == "trace.start")) {
+                    std::lock_guard lock(traceMutex_);
+                    if (traceStop_.Unresolved() || traceStop_.InFlight()) {
+                        return ErrorResponse(*parsed, "OUTCOME_UNKNOWN",
+                                             "trace stop ownership is not yet resolved; stop or process exit can recover",
+                                             false, true);
+                    }
+                    if (trace_.Active()) {
+                        return ErrorResponse(*parsed, "BUSY",
+                                             "a trace is active; cancel it before changing run state",
+                                             true, false);
+                    }
+                }
                 const auto submitFencedCommand = [this, requestDeadline](
                                                       const std::string& command) {
                     std::uint64_t fenceToken = 0U;
@@ -2914,6 +3046,11 @@ void Runtime::Worker() noexcept {
                         if (!trace_.Matches(parsed->traceId)) {
                             return ErrorResponse(*parsed, "NOT_FOUND",
                                                  "trace_id is not retained", false, false);
+                        }
+                        if (traceStop_.Blocked()) {
+                            return ErrorResponse(*parsed, "OUTCOME_UNKNOWN",
+                                "debuggee paused with a trace interrupt still pending; stop or process exit required",
+                                false, true);
                         }
                         copied = trace_;
                     }
@@ -3075,7 +3212,31 @@ void Runtime::Worker() noexcept {
                                              "trace start requires a paused debuggee", false,
                                              false);
                     }
+                    {
+                        std::lock_guard lock(stateMutex_);
+                        if (!TracePauseCommittedLocked()) {
+                            return ErrorResponse(*parsed, "BUSY",
+                                "native pause phase has not committed for the current debug event",
+                                true, false);
+                        }
+                    }
                     REGDUMP_AVX512 registers{};
+                    const auto eventThread = DbgGetThreadId();
+                    const auto selectedThread = SelectedThreadId();
+                    if (eventThread == 0U || (selectedThread && *selectedThread != eventThread)) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                            "trace requires the selected thread to match the native debug-event thread",
+                            false, false);
+                    }
+                    {
+                        std::lock_guard lock(traceMutex_);
+                        if (traceInterruptThread_ != nullptr &&
+                            eventThread == GetThreadId(traceInterruptThread_)) {
+                            return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                                "trace interrupt helper is the debug-event thread; reposition into an application thread before tracing",
+                                false, false);
+                        }
+                    }
                     const auto modules = CaptureModuleRecords();
                     if (!DbgGetRegDumpEx(&registers, sizeof(registers)) || !modules ||
                         registers.regcontext.cip == 0U) {
@@ -3110,30 +3271,77 @@ void Runtime::Worker() noexcept {
                                                : TraceMode::over;
                     const auto traceDeadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(parsed->traceTimeoutMs);
+                    const std::string command =
+                        std::string(mode == TraceMode::into ? "TraceIntoConditional 0, ."
+                                                           : "TraceOverConditional 0, .") +
+                        std::to_string(parsed->traceMaxSteps);
+                    const auto processEpoch = processEpoch_.load();
+                    const auto processId = processId_.load();
+                    std::unique_ptr<void, decltype(&CloseHandle)> process(OpenProcess(
+                        PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
+                        PROCESS_VM_WRITE | PROCESS_VM_READ | SYNCHRONIZE, FALSE, processId), CloseHandle);
+                    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+                    const auto localBreak = ntdll ? GetProcAddress(ntdll, "DbgBreakPoint") : nullptr;
+                    std::uintptr_t remoteBreak = 0U;
+                    for (const auto& module : traceModules) {
+                        if (_stricmp(module.name.c_str(), "ntdll.dll") == 0 && localBreak) {
+                            remoteBreak = static_cast<std::uintptr_t>(module.base) +
+                                reinterpret_cast<std::uintptr_t>(localBreak) -
+                                reinterpret_cast<std::uintptr_t>(ntdll);
+                        }
+                    }
+                    std::array<unsigned char, 2U> opcodes{};
+                    SIZE_T read = 0U;
+                    if (!process || !remoteBreak ||
+                        !ReadProcessMemory(process.get(), reinterpret_cast<const void*>(remoteBreak),
+                                           opcodes.data(), opcodes.size(), &read) ||
+                        read != opcodes.size() || opcodes[1] != 0xc3U) {
+                        return ErrorResponse(*parsed, "INVALID_DEBUGGER_STATE",
+                            "trace requires the verified RET following ntdll DbgBreakPoint",
+                            false, false);
+                    }
+                    TraceStopCoordinator::Ticket ticket;
                     {
+                        std::lock_guard stateLock(stateMutex_);
                         std::lock_guard lock(traceMutex_);
-                        if (!trace_.Start(*id, mode, parsed->traceMaxSteps, traceDeadline,
+                        if (processEpoch != processEpoch_.load() || processId != processId_.load() ||
+                            generation_.load() != *snapshot ||
+                            !TracePauseCommittedLocked() ||
+                            !trace_.Start(*id, mode, parsed->traceMaxSteps, traceDeadline,
                                           registers.regcontext.cip,
                                           std::move(traceModules))) {
                             return ErrorResponse(*parsed, "BUSY",
                                                  "trace session could not be admitted", true,
                                                  false);
                         }
-                        tracePauseSubmitted_ = false;
+                        CloseHandleValue(traceProcess_);
+                        CloseHandleValue(traceInterruptThread_);
+                        traceProcess_ = process.release();
+                        traceInterruptAddress_ = remoteBreak + 1U;
+                        traceAdmissionEvent_ = rawEventSequence_.load();
+                        traceAdmissionGeneration_ = *snapshot;
+                        ticket = traceStop_.Begin(processEpoch, processId);
                     }
                     traceChanged_.notify_all();
-                    const std::string command =
-                        std::string(mode == TraceMode::into ? "TraceIntoConditional 0, ."
-                                                           : "TraceOverConditional 0, .") +
-                        std::to_string(parsed->traceMaxSteps);
-                    if (!DbgCmdExec(command.c_str())) {
-                        {
-                            std::lock_guard lock(traceMutex_);
-                            (void)trace_.Finalize(TraceReason::interrupted);
-                        }
-                        traceChanged_.notify_all();
+                    // Direct submission cannot leave a queued start behind a terminal trace.
+                    // No runtime lock is held: resume/step/pause may reenter synchronously.
+                    bool current = false;
+                    {
+                        std::lock_guard stateLock(stateMutex_);
+                        std::lock_guard lock(traceMutex_);
+                        current = trace_.Matches(*id) && traceStop_.Current(ticket) &&
+                            processEpoch_.load() == ticket.process &&
+                            TracePauseCommittedLocked();
+                    }
+                    const bool accepted = current && DbgCmdExecDirect(command.c_str());
+                    {
+                        std::lock_guard lock(traceMutex_);
+                        traceStop_.Submitted(trace_, ticket, accepted);
+                    }
+                    traceChanged_.notify_all();
+                    if (!accepted) {
                         return ErrorResponse(*parsed, "BUSY",
-                                             "debugger command queue rejected trace start", true,
+                                             "debugger rejected synchronous trace start", true,
                                              false);
                     }
                     TracePolicy copied;
@@ -3165,7 +3373,6 @@ void Runtime::Worker() noexcept {
                            TraceStatusJson(copied, generation) + "}";
                 }
                 if (parsed->method == "trace.cancel") {
-                    bool submitPause = false;
                     {
                         std::lock_guard lock(traceMutex_);
                         if (!trace_.Matches(parsed->traceId)) {
@@ -3181,28 +3388,24 @@ void Runtime::Worker() noexcept {
                                    ",\"status\":\"ok\",\"result\":" +
                                    TraceStatusJson(copied, generation) + "}";
                         }
-                        (void)trace_.RequestStop(TraceReason::cancelled);
-                        submitPause = !tracePauseSubmitted_;
-                        tracePauseSubmitted_ = true;
+                        traceStop_.Request(trace_, TraceReason::cancelled,
+                                           std::chrono::steady_clock::now());
                     }
                     traceChanged_.notify_all();
-                    if (submitPause) {
-                        std::lock_guard lock(traceMutex_);
-                        if (trace_.Active() && trace_.Matches(parsed->traceId) &&
-                            !DbgCmdExec("pause")) {
-                            return ErrorResponse(*parsed, "OUTCOME_UNKNOWN",
-                                                 "trace cancellation pause was rejected", false,
-                                                 true);
-                        }
-                    }
                     TracePolicy copied;
                     {
                         std::unique_lock lock(traceMutex_);
                         const bool terminal = traceChanged_.wait_until(
                             lock, requestDeadline, [this, parsed] {
                                 return pluginState_.load() != PluginState::ready ||
-                                       !trace_.Matches(parsed->traceId) || trace_.Terminal();
+                                        !trace_.Matches(parsed->traceId) || trace_.Terminal() ||
+                                        traceStop_.Blocked();
                             });
+                        if (traceStop_.Blocked()) {
+                            return ErrorResponse(*parsed, "OUTCOME_UNKNOWN",
+                                "another pause won while the trace interrupt remains pending",
+                                false, true);
+                        }
                         if (!terminal || !trace_.Matches(parsed->traceId) || !trace_.Terminal()) {
                             return ErrorResponse(*parsed, "TIMEOUT",
                                                  "trace cancellation outcome is unknown", false,
@@ -5301,25 +5504,21 @@ void Runtime::Worker() noexcept {
                     const bool setting = parsed->method == "breakpoints.set";
                     const std::string command = std::string(setting ? "bp " : "bc ") +
                                                 HexValue(address);
-                    if (!DbgCmdExec(command.c_str())) {
-                        return ErrorResponse(*parsed, "BUSY",
-                                             "debugger command queue rejected the operation", true,
-                                             false);
+                    // A native step-over breakpoint is absent from the user BP
+                    // list. bp rejects that collision via IsBPXEnabled; queue
+                    // acceptance followed by polling used to hide the rejection.
+                    const bool alreadyAbsent = !setting &&
+                        (DbgGetBpxTypeAt(address) & bp_normal) == 0;
+                    if (!alreadyAbsent && !DbgCmdExecDirect(command.c_str())) {
+                        return ErrorResponse(*parsed, "OUTCOME_UNKNOWN",
+                            "native breakpoint command failed; an internal step breakpoint may own the address",
+                            false, true);
                     }
-                    bool observed = false;
-                    while (pluginState_.load() == PluginState::ready &&
-                           std::chrono::steady_clock::now() < requestDeadline) {
-                        const bool exists = (DbgGetBpxTypeAt(address) & bp_normal) != 0;
-                        if (exists == setting) {
-                            observed = true;
-                            break;
-                        }
-                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    }
-                    if (!observed) {
-                        return ErrorResponse(*parsed, "TIMEOUT",
-                                             "breakpoint outcome could not be confirmed", false,
-                                             true);
+                    const bool exists = (DbgGetBpxTypeAt(address) & bp_normal) != 0;
+                    if (exists != setting) {
+                        return ErrorResponse(*parsed, "OUTCOME_UNKNOWN",
+                            "native breakpoint command returned without the requested user breakpoint state",
+                            false, true);
                     }
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
                            ",\"state_generation\":" + std::to_string(generation_.load()) +
@@ -7762,23 +7961,29 @@ std::string Runtime::ScyllaHideProfileResponse(
 
 void Runtime::ReconcileDebuggerLiveness() noexcept {
 #ifndef MCP_LIFECYCLE_HARNESS
+    const auto before = generation_.load();
     const DebuggeeState observed = debuggeeState_.load();
-    if (observed == DebuggeeState::absent || observed == DebuggeeState::starting ||
-        DbgIsDebugging()) {
+    if (observed == DebuggeeState::starting || DbgIsDebugging()) {
         return;
     }
     std::lock_guard lock(stateMutex_);
-    if (DbgIsDebugging()) return;
+    if (generation_.load() != before) return;
+    if (observed == DebuggeeState::absent) {
+        CommitTraceEventLocked(CB_STOPDEBUG);
+        return;
+    }
     debuggeeState_.store(DebuggeeState::absent);
     sessionOrigin_.store(SessionOrigin::none);
     processId_.store(0U);
     activeThreadId_.store(0U);
     pauseInterruptPending_.store(false);
     ownedPauseException_.store(false);
+    nativePauseEvent_.reset();
     ownedPauseSelectedThreadId_.store(0U);
     latestPause_ = {};
     const std::uint64_t generation = generation_.fetch_add(1U) + 1U;
     absentGeneration_.store(generation);
+    CommitTraceEventLocked(CB_STOPDEBUG);
     stateChanged_.notify_all();
 #endif
 }
@@ -8006,15 +8211,68 @@ void Runtime::RecordEventLocked(EventRecord event) noexcept {
 }
 
 void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) noexcept {
+    if (callbackType == CB_CREATETHREAD) {
+        const auto* info = static_cast<const PLUG_CB_CREATETHREAD*>(callbackInfo);
+        if (!info || !info->CreateThread) return;
+        std::optional<EventRecord> raw;
+        {
+            std::lock_guard lock(stateMutex_);
+            raw = pendingTraceThread_;
+        }
+        const auto entry = reinterpret_cast<std::uintptr_t>(info->CreateThread->lpStartAddress);
+        if (!raw || raw->threadId != info->dwThreadId || raw->address != entry) return;
+        {
+            std::unique_lock lock(traceMutex_);
+            const auto ticket = traceStop_.Identity();
+            // A create callback may precede CreateRemoteThread's return. Its
+            // caller holds no SDK/runtime lock and publishes the handle before
+            // resume. Wait for that ownership handshake, never guess by address.
+            if (trace_.Active() && traceStop_.InFlight() && !traceInterruptThread_ &&
+                entry == traceInterruptAddress_) {
+                if (!traceChanged_.wait_for(lock, std::chrono::seconds(1), [this, ticket] {
+                        return !traceStop_.Current(ticket) || !traceStop_.InFlight() ||
+                            traceInterruptThread_ != nullptr || traceSupervisorStopping_;
+                    })) {
+                    traceStop_.AbandonIssue(ticket);
+                    return;
+                }
+                if (!traceInterruptThread_) {
+                    traceStop_.AbandonIssue(ticket);
+                    return;
+                }
+            }
+            if (!trace_.Active() || !traceStop_.ThreadCreated(
+                    processEpoch_.load(), raw->processId, info->dwThreadId,
+                    raw->kind == EventKind::threadCreated, entry)) return;
+            tracePauseCallbackInFlight_ = true;
+        }
+        // In SDK 9c8ca1, CB_CREATETHREAD follows ThreadCreate and selection of
+        // hActiveThread. This supported API clears native tracing and emits
+        // CB_PAUSEDEBUG before waiting. No exception or synthetic INT3 is used.
+#ifndef MCP_LIFECYCLE_HARNESS
+        _plugin_debugpause();
+#else
+        OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
+        {
+            std::unique_lock lock(stateMutex_);
+            stateChanged_.wait(lock, [this] { return debuggeeState_.load() != DebuggeeState::paused; });
+        }
+#endif
+        {
+            std::lock_guard lock(traceMutex_);
+            tracePauseCallbackInFlight_ = false;
+        }
+        traceChanged_.notify_all();
+        return;
+    }
     if (callbackType == CB_TRACEEXECUTE) {
         auto* info = static_cast<PLUG_CB_TRACEEXECUTE*>(callbackInfo);
         if (info == nullptr) return;
         {
             std::lock_guard lock(traceMutex_);
-            if (trace_.Active()) {
-                info->stop = trace_.OnStep(static_cast<std::uint64_t>(info->cip), info->stop,
-                                           std::chrono::steady_clock::now()) ||
-                             info->stop;
+            if (trace_.Active() && traceStop_.Identity().process == processEpoch_.load()) {
+                info->stop = traceStop_.Step(trace_, static_cast<std::uint64_t>(info->cip),
+                                             info->stop, std::chrono::steady_clock::now());
             }
         }
         traceChanged_.notify_all();
@@ -8143,8 +8401,6 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     case CB_RESUMEDEBUG:
         event.kind = EventKind::resumed;
         next = DebuggeeState::running;
-        ownedPauseException_.store(false);
-        ownedPauseSelectedThreadId_.store(0U);
         clearPendingException = true;
         break;
     case CB_ATTACH: {
@@ -8191,6 +8447,9 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
         if (info != nullptr && info->DebugEvent != nullptr) {
             std::lock_guard lock(stateMutex_);
             const DEBUG_EVENT& debugEvent = *info->DebugEvent;
+            rawEventSequence_.fetch_add(1U);
+            nativePauseEvent_.reset();
+            pendingTraceThread_.reset();
             processId_.store(debugEvent.dwProcessId);
             activeThreadId_.store(debugEvent.dwThreadId);
             const std::uint64_t observed = generation_.fetch_add(1U) + 1U;
@@ -8218,6 +8477,7 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
                 generic.address = reinterpret_cast<std::uintptr_t>(
                     debugEvent.u.CreateThread.lpStartAddress);
                 generic.hasAddress = generic.address != 0U;
+                pendingTraceThread_ = generic;
                 break;
             case EXIT_THREAD_DEBUG_EVENT:
                 generic.kind = EventKind::threadExited;
@@ -8257,30 +8517,23 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     }
     default: return;
     }
-    TraceReason traceFallback = TraceReason::none;
-    switch (callbackType) {
-    case CB_BREAKPOINT: traceFallback = TraceReason::breakpoint; break;
-    case CB_EXCEPTION:
-        traceFallback = pause.kind == PauseReasonKind::userPause
-                            ? TraceReason::userPause
-                            : TraceReason::exception;
-        break;
-    case CB_PAUSEDEBUG: traceFallback = TraceReason::userPause; break;
-    case CB_EXITPROCESS:
-    case CB_STOPDEBUG:
-    case CB_STOPPINGDEBUG: traceFallback = TraceReason::processExit; break;
-    case CB_STEPPED:
-    case CB_SYSTEMBREAKPOINT: traceFallback = TraceReason::interrupted; break;
-    default: break;
-    }
-    if (traceFallback != TraceReason::none) {
-        {
-            std::lock_guard traceLock(traceMutex_);
-            if (trace_.Finalize(traceFallback)) tracePauseSubmitted_ = false;
-        }
-        traceChanged_.notify_all();
-    }
     std::lock_guard lock(stateMutex_);
+    {
+        std::lock_guard traceLock(traceMutex_);
+        // Check under the state/admission lock, not before it: pause and native
+        // resume callbacks can execute concurrently during direct submission.
+        if (callbackType == CB_RESUMEDEBUG && trace_.Active() && traceStop_.LateResume()) return;
+        // Refinements belong to the raw event that paused, not to a trace
+        // admitted while the preceding callback stack is still unwinding.
+        if (trace_.Active() && rawEventSequence_.load() <= traceAdmissionEvent_ &&
+            (callbackType == CB_STEPPED || callbackType == CB_BREAKPOINT ||
+             callbackType == CB_EXCEPTION || callbackType == CB_SYSTEMBREAKPOINT)) return;
+    }
+    if (callbackType == CB_RESUMEDEBUG) {
+        ownedPauseException_.store(false);
+        ownedPauseSelectedThreadId_.store(0U);
+    }
+    if (next != DebuggeeState::paused || markAttached || markLaunched) nativePauseEvent_.reset();
     if (exceptionBreakpointCallback && pendingException_.valid && pause.hasAddress &&
         pendingException_.code == pause.address &&
         (pendingException_.processId == 0U ||
@@ -8305,6 +8558,7 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     }
     if (resetOrigin) sessionOrigin_.store(SessionOrigin::none);
     if (markAttached) sessionOrigin_.store(SessionOrigin::attached);
+    if (markAttached || markLaunched) processEpoch_.fetch_add(1U);
     if (markLaunched && sessionOrigin_.load() != SessionOrigin::attached) {
         sessionOrigin_.store(SessionOrigin::launched);
     }
@@ -8325,10 +8579,16 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
         ownedPauseSelectedThreadId_.store(0U);
     }
     const DebuggeeState previous = debuggeeState_.load();
-    if (next == DebuggeeState::paused && previous == DebuggeeState::paused) {
+    bool newTracePause = false;
+    if (callbackType == CB_PAUSEDEBUG) {
+        std::lock_guard traceLock(traceMutex_);
+        newTracePause = trace_.Active() && latestPause_.generation <= traceAdmissionGeneration_;
+    }
+    if (next == DebuggeeState::paused && previous == DebuggeeState::paused && !newTracePause) {
         if (callbackType == CB_PAUSEDEBUG ||
             (pause.kind == PauseReasonKind::userPause &&
              latestPause_.kind == PauseReasonKind::userPause)) {
+            CommitTraceEventLocked(callbackType);
             return;
         }
         if (refineCurrentPause ||
@@ -8374,7 +8634,31 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     event.hasProcessId = event.hasProcessId || event.processId != 0U;
     event.hasThreadId = event.hasThreadId || event.threadId != 0U;
     RecordEventLocked(event);
+    CommitTraceEventLocked(callbackType);
     stateChanged_.notify_all();
+}
+
+void Runtime::CommitTraceEventLocked(const int callbackType) noexcept {
+    // stateMutex_ is already held. Publish terminal only after the state and
+    // pause generation are committed, never from breakpoint/step refinements.
+    std::lock_guard lock(traceMutex_);
+    if (callbackType == CB_PAUSEDEBUG) nativePauseEvent_ = rawEventSequence_.load();
+    if (callbackType == CB_RESUMEDEBUG && trace_.Active()) traceStop_.Resumed();
+    if (callbackType == CB_PAUSEDEBUG && trace_.Active()) {
+        const TraceReason fallback = latestPause_.kind == PauseReasonKind::breakpoint
+            ? TraceReason::breakpoint : latestPause_.kind == PauseReasonKind::exception
+            ? TraceReason::exception : TraceReason::userPause;
+        traceStop_.PauseCommitted(trace_, fallback);
+    }
+    if ((callbackType == CB_EXITPROCESS &&
+         traceStop_.Identity().process == processEpoch_.load() &&
+         (!traceProcess_ || GetProcessId(traceProcess_) == processId_.load())) ||
+        (callbackType == CB_STOPDEBUG &&
+         ((!traceStop_.Unresolved() && !traceStop_.InFlight()) ||
+          (traceProcess_ && WaitForSingleObject(traceProcess_, 0U) == WAIT_OBJECT_0)))) {
+        traceStop_.ProcessExited(trace_);
+    }
+    traceChanged_.notify_all();
 }
 
 bool Runtime::OnCommandFence(const std::uint64_t token) noexcept {
@@ -8384,34 +8668,51 @@ bool Runtime::OnCommandFence(const std::uint64_t token) noexcept {
 void Runtime::TraceSupervisor() noexcept {
     std::unique_lock lock(traceMutex_);
     while (!traceSupervisorStopping_) {
-        traceChanged_.wait(lock, [this] {
-            return traceSupervisorStopping_ || (trace_.Active() && !tracePauseSubmitted_);
-        });
-        if (traceSupervisorStopping_) break;
-        const std::string id = trace_.Id();
-        const auto deadline = trace_.Deadline();
-        if (traceChanged_.wait_until(lock, deadline, [this, &id] {
-                return traceSupervisorStopping_ || !trace_.Active() ||
-                       !trace_.Matches(id) || tracePauseSubmitted_;
-            })) {
+        if (!trace_.Active()) {
+            traceChanged_.wait(lock);
             continue;
         }
-        if (!trace_.Active() || !trace_.Matches(id) || tracePauseSubmitted_) continue;
-        (void)trace_.RequestStop(TraceReason::timeout);
-        tracePauseSubmitted_ = true;
+        const auto ticket = traceStop_.Reserve(trace_, std::chrono::steady_clock::now());
+        if (!ticket) {
+            traceChanged_.wait_until(lock, traceStop_.WakeAt(trace_));
+            continue;
+        }
+#ifndef MCP_LIFECYCLE_HARNESS
+        const HANDLE process = traceProcess_;
+        const auto address = traceInterruptAddress_;
+        lock.unlock();
+        // The never-run suspended helper can be retired if a cooperative pause
+        // wins during creation. The helper entry is RET, never INT3: only the
+        // correlated CB_CREATETHREAD is allowed to invoke _plugin_debugpause.
+        DWORD threadId = 0U;
+        HANDLE thread = CreateRemoteThread(process, nullptr, 0U,
+            reinterpret_cast<LPTHREAD_START_ROUTINE>(address), nullptr,
+            CREATE_SUSPENDED, &threadId);
+        lock.lock();
+        traceInterruptThread_ = thread;
+        const bool issue = thread && traceStop_.Issue(*ticket, threadId, address);
         traceChanged_.notify_all();
         lock.unlock();
-#ifndef MCP_LIFECYCLE_HARNESS
-        const auto pauseDeadline = std::chrono::steady_clock::now() +
-                                   std::chrono::milliseconds(2000);
-        (void)executor_.Execute([this, id] {
-            std::lock_guard traceLock(traceMutex_);
-            if (!trace_.Active() || !trace_.Matches(id)) return std::string{};
-            (void)DbgCmdExec("pause");
-            return std::string{};
-        }, pauseDeadline);
-#endif
+        bool retired = thread == nullptr;
+        if (thread) {
+            if (issue) {
+                // After a successful resume, never terminate this thread. Its
+                // correlated create-thread pause or process exit is the retirement proof.
+                (void)ResumeThread(thread); // Failure also remains owned/unknown, never retried.
+            } else {
+                retired = TerminateThread(thread, ERROR_CANCELLED) != FALSE;
+            }
+        }
         lock.lock();
+        traceStop_.FinishInterrupt(trace_, *ticket, retired);
+#else
+        // Model native interrupt delivery in the SDK-free lifecycle harness.
+        traceStop_.FinishInterrupt(trace_, *ticket, true);
+        lock.unlock();
+        OnDebuggerEvent(CB_PAUSEDEBUG, nullptr);
+        lock.lock();
+#endif
+        traceChanged_.notify_all();
     }
 }
 
@@ -8421,34 +8722,20 @@ void Runtime::Stop() noexcept {
         pluginState_.store(PluginState::stopped);
         return;
     }
-    bool pauseTrace = false;
     {
-        std::lock_guard lock(traceMutex_);
+        std::unique_lock lock(traceMutex_);
         if (trace_.Active()) {
-            (void)trace_.RequestStop(TraceReason::backendShutdown);
-            pauseTrace = !tracePauseSubmitted_;
-            tracePauseSubmitted_ = true;
+            traceStop_.Request(trace_, TraceReason::backendShutdown,
+                               std::chrono::steady_clock::now());
+            traceChanged_.notify_all();
+            traceChanged_.wait_for(lock, std::chrono::milliseconds(1000), [this] {
+                return !trace_.Active();
+            });
         }
         traceSupervisorStopping_ = true;
     }
     traceChanged_.notify_all();
-#ifndef MCP_LIFECYCLE_HARNESS
-    if (pauseTrace) {
-        const auto pauseDeadline = std::chrono::steady_clock::now() +
-                                   std::chrono::milliseconds(1000);
-        (void)executor_.Execute([] {
-            (void)DbgCmdExec("pause");
-            return std::string{};
-        }, pauseDeadline);
-    }
-#else
-    (void)pauseTrace;
-#endif
     if (traceSupervisor_.joinable()) traceSupervisor_.join();
-    {
-        std::lock_guard lock(traceMutex_);
-        if (trace_.Active()) (void)trace_.Finalize(TraceReason::backendShutdown);
-    }
     traceChanged_.notify_all();
     commandFence_.Stop();
     stateChanged_.notify_all();

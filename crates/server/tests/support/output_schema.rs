@@ -59,6 +59,25 @@ pub fn for_tool(name: &str) -> Option<Value> {
                 "address":string,"location":location,"data_hex":{"type":"string","pattern":"^(?:[0-9a-fA-F]{2})*$"},
                 "bytes_read":integer,"complete":boolean,"state_generation":integer
             });
+            properties["view"] = json!({"oneOf":[
+                {"type":"object","required":["format","text"],"additionalProperties":false,
+                    "properties":{"format":{"const":"bytes"},"text":{"type":"string","pattern":"^[0-9A-F]{2}(?: [0-9A-F]{2})*$"}}},
+                {"type":"object","required":["format","byte_order","values"],"additionalProperties":false,
+                    "properties":{"format":{"enum":["word","dword","qword"]},"byte_order":{"enum":["little","big"]},
+                        "values":{"type":"array","minItems":1,"items":{"type":"string","pattern":"^0x[0-9a-f]+$"}}},
+                    "allOf":[
+                        {"if":{"properties":{"format":{"const":"word"}}},"then":{"properties":{"values":{"items":{"pattern":"^0x[0-9a-f]{4}$"}}}}},
+                        {"if":{"properties":{"format":{"const":"dword"}}},"then":{"properties":{"values":{"items":{"pattern":"^0x[0-9a-f]{8}$"}}}}},
+                        {"if":{"properties":{"format":{"const":"qword"}}},"then":{"properties":{"values":{"items":{"pattern":"^0x[0-9a-f]{16}$"}}}}}
+                    ]},
+                {"type":"object","required":["format","encoding","status","text","terminated","text_bytes","bytes_consumed"],"additionalProperties":false,
+                    "properties":{"format":{"enum":["str","wstr"]},"encoding":{"enum":["utf-8","utf-16le"]},"status":{"const":"ok"},
+                        "text":string,"terminated":boolean,"text_bytes":integer,"bytes_consumed":integer}},
+                {"type":"object","required":["format","encoding","status","error"],"additionalProperties":false,
+                    "properties":{"format":{"enum":["str","wstr"]},"encoding":{"enum":["utf-8","utf-16le"]},"status":{"const":"decode_error"},
+                        "error":{"type":"object","required":["kind","byte_offset"],"additionalProperties":false,
+                            "properties":{"kind":{"enum":["invalid_utf8","invalid_utf16"]},"byte_offset":integer}}}}
+            ]});
             &[
                 "address",
                 "data_hex",
@@ -70,6 +89,17 @@ pub fn for_tool(name: &str) -> Option<Value> {
         "memory.write" => {
             properties = json!({"address":string,"location":location,"bytes_written":integer,"verified":boolean});
             &["address", "location", "bytes_written", "verified"]
+        }
+        "events.list" => {
+            properties = json!({"session_id":string,"items":{"type":"array","items":{"type":"object"}},
+                "next_cursor":nullable_string,"latest_sequence":integer,"history_complete":boolean});
+            &[
+                "session_id",
+                "items",
+                "next_cursor",
+                "latest_sequence",
+                "history_complete",
+            ]
         }
         "memory.map" | "memory.search" | "strings.search" | "symbols.search" => {
             properties = json!({

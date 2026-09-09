@@ -134,11 +134,11 @@ executes them automatically. The schema is
   `debuggee.attach`, `debuggee.detach`, `debugger.stop`.
 - Execution: `debugger.pause`, `debugger.resume`, `debugger.continue_exception`, `debugger.step_into`,
   `debugger.step_over`, `debugger.step_out`, `debugger.run_to_address`,
-  `debugger.wait_for_pause`, `events.wait`.
-- Context: `debugger.snapshot`, `events.list`, `context.arguments`,
+  `debugger.wait_for_pause`.
+- Context: `debugger.snapshot`, `events.list`, `events.wait`, `context.arguments`,
   `process.peb`, `registers.read`, `registers.write`, `threads.list`,
   `callstack.read`, `address.resolve`.
-- Memory/code: `memory.read`, `memory.write`, `memory.map`, `memory.search`,
+- Memory/code: `memory.read`, `memory.dump`, `memory.write`, `memory.map`, `memory.search`,
   `disassembly.read`, `expression.evaluate`, `expressions.evaluate_batch`,
   `assembly.preview`, `assembly.patch`, `patches.list`, `patches.restore`.
 - Breakpoints: list, set/remove, enable/disable, and typed hardware, memory,
@@ -147,6 +147,7 @@ executes them automatically. The schema is
   `symbols.resolve`, `functions.list`, `functions.at`, `strings.search`,
   `references.to`, `imports.list`, `exports.list`, `analysis.function`.
 - Trace: `trace.start`, `trace.status`, `trace.cancel`, `trace.results`.
+- Logs: `logs.status`, `logs.read`.
 - Configuration: `scyllahide.profile`.
 
 Prefer `{ "module": "sample.exe", "rva": "0x1000" }` where an address schema
@@ -166,6 +167,57 @@ or exhaustive search completed.
 Memory `length` and breakpoint `size` inputs are byte counts. Existing names
 are preserved, with no aliases. JSON integers use decimal syntax: reading
 16 bytes uses `{ "address": "0x100000", "length": 16 }`.
+
+### Memory views and dumps
+
+`memory.read` always preserves the native `data_hex`. Its optional `format` is
+one of `bytes`, `word`, `dword`, `qword`, `str`, or `wstr` and adds a `view`
+without changing the raw bytes. Numeric views require byte lengths divisible by
+2, 4, or 8 respectively and accept `byte_order: "little" | "big"` (little is
+the default). `byte_order` is invalid for nonnumeric views. `str` is strict,
+bounded UTF-8 and `wstr` is strict, bounded UTF-16LE; decoding errors are
+reported in `view` rather than replacing data or failing the underlying read.
+
+`memory.dump` is a mutation for writing 1 through 67,108,864 raw runtime bytes
+to a drive-absolute regular-file path on the debugger host. It does not rebuild
+a PE. Supply `instance_id` and `operation_id`; `overwrite` defaults to `false`.
+Successful results include the destination path, byte count, SHA-256, resolved
+location, and generation. Publication is atomic: a failure never exposes a
+partial destination, and an existing destination is preserved unless
+`overwrite: true` was explicitly requested.
+
+### Events and logs
+
+`events.list` accepts optional `cursor`, `types`, and `limit` fields. It returns
+the current `session_id`, ordered `items`, opaque `next_cursor`,
+`latest_sequence`, and `history_complete`. Cursors bind the session and filter;
+do not parse them or reuse them after a session change. History covers the
+current established debuggee session, remains readable after stop, and resets
+when the next session is established. At most 65,536 events are retained in the
+debugger host; `history_complete=false` explicitly reports allocation failure or
+oldest-event eviction. It is diagnostic history, not an execution trace.
+
+Every `events.wait` argument is optional. `{}` arms a wait for the first event
+of any type that occurs only after arming, for up to the default 5,000 ms. It
+never returns retained history. `types` narrows the event kinds and `timeout_ms`
+is bounded to 1 through 9,000. A debug-session change cancels the wait. An event
+does not imply that the debuggee is paused or that an operation completed; read
+`debugger.state` or use `debugger.wait_for_pause` when pause state matters.
+
+`logs.status` and `logs.read` expose the configured local audit store through
+the same loopback-only, bearer-authenticated MCP interface. Logs are JSONL,
+rotate at 5 MiB, and retain five backups by default. `logs.read` returns bounded
+chunks selected by an opaque cursor, optional item `limit` (at most 100), and
+optional `max_bytes` (at most 262,144); rotation may invalidate a cursor. Audit
+records contain full tool request and response payloads except credentials, so
+treat the log directory as sensitive. Log history spans debugger sessions and
+is deliberately separate from current-session event history. By default files
+are under `%LOCALAPPDATA%\x64dbg-mcp-backend\logs\<backend>`;
+`X64DBG_MCP_LOG_DIRECTORY`/`log_directory` overrides the parent directory and
+`X64DBG_MCP_LOG_BACKUP_COUNT`/`log_backup_count` sets 1 through 100 backups.
+Unavailable storage disables persistence without disabling MCP. Calls to the log
+tools themselves are recorded as metadata only to avoid recursively embedding
+log contents.
 
 The [debugger behavior notes](docs/field-validation.md) cover protocol negotiation,
 exception continuation, thread identity, and native pause behavior.

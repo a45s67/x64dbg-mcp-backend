@@ -1,4 +1,5 @@
 #include "runtime.h"
+#include "dump_memory.h"
 #include "utf8.h"
 #include "control_policy.h"
 
@@ -187,7 +188,7 @@ struct Request {
     std::optional<std::uint32_t> targetThreadId;
     std::string symbolName;
     std::optional<std::uint64_t> cursorSnapshotFingerprint;
-    std::uint64_t afterEventSequence{0U};
+    std::string eventCursor;
     std::vector<EventKind> eventTypes;
     std::string operationId;
     std::size_t runToTimeoutMs{9000U};
@@ -212,6 +213,7 @@ struct Request {
     std::string expectedConfigGeneration;
     std::string exceptionDisposition;
     std::vector<RegisterAssignment> exceptionRegisterOverrides;
+    bool overwrite{false};
 };
 
 bool IsMutation(const std::string_view method) {
@@ -220,7 +222,7 @@ bool IsMutation(const std::string_view method) {
            method == "debugger.step_into" || method == "debugger.step_over" ||
            method == "debugger.step_out" || method == "debugger.run_to_address" ||
            method == "registers.write" ||
-           method == "debugger.stop" || method == "memory.write" ||
+           method == "debugger.stop" || method == "memory.write" || method == "memory.dump" ||
            method == "breakpoints.set" || method == "breakpoints.remove" ||
            method == "breakpoints.hardware.set" ||
            method == "breakpoints.hardware.remove" ||
@@ -582,7 +584,8 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
     std::optional<std::uint32_t> targetThreadId;
     std::string symbolName;
     std::optional<std::uint64_t> cursorSnapshotFingerprint;
-    std::uint64_t afterEventSequence = 0U;
+    std::string eventCursor;
+    bool overwrite = false;
     std::vector<EventKind> eventTypes;
     std::size_t runToTimeoutMs = 9000U;
     bool memorySearchModuleScope = false;
@@ -641,16 +644,16 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             return std::nullopt;
         }
     } else if (methodValue == "events.list") {
-        json_t* after = json_object_get(payload, "after_sequence");
+        json_t* cursor = json_object_get(payload, "cursor");
         json_t* types = json_object_get(payload, "types");
         json_t* limit = json_object_get(payload, "limit");
-        const std::size_t expectedFields = (after ? 1U : 0U) + (types ? 1U : 0U) +
+        const std::size_t expectedFields = (cursor ? 1U : 0U) + (types ? 1U : 0U) +
                                            (limit ? 1U : 0U);
         if (json_object_size(payload) != expectedFields) return std::nullopt;
-        if (after != nullptr) {
-            if (!json_is_integer(after) || json_integer_value(after) < 0 ||
-                json_integer_value(after) > 9007199254740991LL) return std::nullopt;
-            afterEventSequence = static_cast<std::uint64_t>(json_integer_value(after));
+        if (cursor != nullptr) {
+            if (!json_is_string(cursor) || json_string_length(cursor) == 0U ||
+                json_string_length(cursor) > 512U) return std::nullopt;
+            eventCursor.assign(json_string_value(cursor), json_string_length(cursor));
         }
         if (types != nullptr) {
             if (!json_is_array(types) || json_array_size(types) < 1U ||
@@ -671,25 +674,23 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             pageLimit = static_cast<std::size_t>(json_integer_value(limit));
         }
     } else if (methodValue == "events.wait") {
-        json_t* after = json_object_get(payload, "after_sequence");
         json_t* types = json_object_get(payload, "types");
         json_t* timeout = json_object_get(payload, "timeout_ms");
-        const std::size_t expectedFields = timeout == nullptr ? 2U : 3U;
-        if (json_object_size(payload) != expectedFields || !json_is_integer(after) ||
-            json_integer_value(after) < 0 ||
-            json_integer_value(after) > 9007199254740991LL || !json_is_array(types) ||
-            json_array_size(types) < 1U || json_array_size(types) > 19U) {
+        const std::size_t expectedFields = (timeout ? 1U : 0U) + (types ? 1U : 0U);
+        if (json_object_size(payload) != expectedFields || (types && (!json_is_array(types) ||
+            json_array_size(types) < 1U || json_array_size(types) > 19U))) {
             return std::nullopt;
         }
-        afterEventSequence = static_cast<std::uint64_t>(json_integer_value(after));
-        for (std::size_t index = 0U; index < json_array_size(types); ++index) {
-            json_t* value = json_array_get(types, index);
-            if (!json_is_string(value)) return std::nullopt;
-            const auto parsedKind = ParseEventKind(std::string_view(
-                json_string_value(value), json_string_length(value)));
-            if (!parsedKind || std::find(eventTypes.begin(), eventTypes.end(), *parsedKind) !=
-                                   eventTypes.end()) return std::nullopt;
-            eventTypes.push_back(*parsedKind);
+        if (types != nullptr) {
+            for (std::size_t index = 0U; index < json_array_size(types); ++index) {
+                json_t* value = json_array_get(types, index);
+                if (!json_is_string(value)) return std::nullopt;
+                const auto parsedKind = ParseEventKind(std::string_view(
+                    json_string_value(value), json_string_length(value)));
+                if (!parsedKind || std::find(eventTypes.begin(), eventTypes.end(), *parsedKind) !=
+                                       eventTypes.end()) return std::nullopt;
+                eventTypes.push_back(*parsedKind);
+            }
         }
         if (timeout != nullptr) {
             if (!json_is_integer(timeout) || json_integer_value(timeout) < 1 ||
@@ -968,6 +969,19 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
             !ParseAddressReference(json_object_get(payload, "address"), addressValue)) {
             return std::nullopt;
         }
+    } else if (methodValue == "memory.dump") {
+        json_t* destination = json_object_get(payload, "path");
+        json_t* length = json_object_get(payload, "length");
+        json_t* replace = json_object_get(payload, "overwrite");
+        if (json_object_size(payload) != (replace ? 5U : 4U) ||
+            !ParseAddressReference(json_object_get(payload, "address"), addressValue) ||
+            !json_is_integer(length) || json_integer_value(length) < 1 ||
+            json_integer_value(length) > 67108864 || !json_is_string(destination) ||
+            json_string_length(destination) < 3U || json_string_length(destination) > 8192U ||
+            (replace && !json_is_boolean(replace))) return std::nullopt;
+        path.assign(json_string_value(destination), json_string_length(destination));
+        lengthValue = static_cast<std::size_t>(json_integer_value(length));
+        overwrite = replace && json_is_true(replace);
     } else if (methodValue == "memory.read") {
         json_t* address = json_object_get(payload, "address");
         json_t* length = json_object_get(payload, "length");
@@ -1681,7 +1695,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(instruction), std::move(expectedBytes),
                    std::move(expectedOriginalBytes), fillNop, addressProvided,
                    targetThreadId, std::move(symbolName), cursorSnapshotFingerprint,
-                   afterEventSequence, std::move(eventTypes), std::move(operationIdValue),
+                    std::move(eventCursor), std::move(eventTypes), std::move(operationIdValue),
                    runToTimeoutMs, memorySearchModuleScope, std::move(memoryPattern),
                    exceptionCode, std::move(exceptionChance),
                    std::move(managedBreakpointId), std::move(conditionalSpec),
@@ -1691,7 +1705,7 @@ std::optional<Request> ParseRequest(const std::string_view bytes) {
                    std::move(callingConvention), argumentCount,
                    std::move(scyllaAction), std::move(scyllaProfile),
                    std::move(expectedConfigGeneration), std::move(exceptionDisposition),
-                   std::move(exceptionRegisterOverrides)};
+                    std::move(exceptionRegisterOverrides), overwrite};
 }
 
 bool IsCanonicalUuid(const std::string_view value) {
@@ -1903,8 +1917,10 @@ std::optional<EventKind> ParseEventKind(const std::string_view value) noexcept {
     return std::nullopt;
 }
 
-std::string EventJson(const EventRecord& event) {
+std::string BuildEventJson(const EventRecord& event) {
     std::string result = "{\"sequence\":" + std::to_string(event.sequence) +
+                         ",\"session_id\":" + JsonString(event.sessionId.data()) +
+                         ",\"timestamp_unix_ms\":" + std::to_string(event.timestampUnixMs) +
                          ",\"type\":" + JsonString(EventKindName(event.kind)) +
                          ",\"state_generation\":" + std::to_string(event.generation);
     if (event.hasProcessId) {
@@ -2489,6 +2505,8 @@ bool AtomicReplaceScyllaHideConfig(const std::string_view text) {
 }
 } // namespace
 
+std::string EventJson(const EventRecord& event) { return BuildEventJson(event); }
+
 Runtime::~Runtime() {
     Stop();
     CloseHandleValue(traceInterruptThread_);
@@ -2567,10 +2585,8 @@ SessionOrigin Runtime::SessionOriginForTesting() const noexcept {
 std::vector<EventRecord> Runtime::EventsForTesting() noexcept {
     std::lock_guard lock(stateMutex_);
     std::vector<EventRecord> events;
-    events.reserve(eventCount_);
-    for (std::size_t index = 0U; index < eventCount_; ++index) {
-        events.push_back(eventRing_[(eventStart_ + index) % kEventCapacity]);
-    }
+    try { events.assign(eventHistory_.begin(), eventHistory_.end()); }
+    catch (...) { historyComplete_ = false; }
     return events;
 }
 
@@ -2706,7 +2722,11 @@ bool Runtime::CreateEndpoint() {
                              PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                              1U, kMaxFrameBytes, kMaxFrameBytes, 5000U, &attributes);
     LocalFree(descriptor);
-    return pipe_ != INVALID_HANDLE_VALUE;
+    if (pipe_ == INVALID_HANDLE_VALUE) return false;
+    if (!eventStream_.Start(pipeName_ + L".events", nonce_)) {
+        PluginLog("[x64dbg-mcp-backend] persistent event transport unavailable; primary MCP remains active");
+    }
+    return true;
 }
 
 bool Runtime::LaunchSidecar() {
@@ -2775,7 +2795,8 @@ bool Runtime::LaunchSidecar() {
     startup.StartupInfo.hStdOutput = nullOutput;
     startup.StartupInfo.hStdError = nullOutput;
     startup.lpAttributeList = attributes;
-    std::wstring command = L"\"" + executable.wstring() + L"\" --pipe \"" + pipeName_ + L"\"";
+    std::wstring command = L"\"" + executable.wstring() + L"\" --pipe \"" + pipeName_ +
+                           L"\" --events-pipe \"" + pipeName_ + L".events\"";
     const std::filesystem::path backendConfig =
         executable.parent_path() /
         (std::wstring(L"x64dbg-mcp-server-") + kConfigBackend + L".toml");
@@ -2839,6 +2860,7 @@ void Runtime::Worker() noexcept {
     {
         std::lock_guard lock(stateMutex_);
         instanceId_ = *instanceId;
+        eventStream_.SetInstanceId(instanceId_);
         pluginState_.store(PluginState::ready);
         generation_.fetch_add(1U);
     }
@@ -2929,33 +2951,43 @@ void Runtime::Worker() noexcept {
                     return StateResponse(parsed->requestId);
                 }
                 if (parsed->method == "events.list") {
-                    std::array<EventRecord, Runtime::kEventCapacity> copied{};
+                    std::array<EventRecord, 256U> copied{};
                     std::size_t copiedCount = 0U;
-                    std::uint64_t oldest = 0U;
                     std::uint64_t latest = 0U;
-                    bool hasMore = false;
-                    bool overflowed = false;
+                    bool complete = true;
+                    std::string session;
+                    std::string next = "null";
                     {
                         std::lock_guard lock(stateMutex_);
-                        if (eventCount_ != 0U) {
-                            oldest = eventRing_[eventStart_].sequence;
-                            latest = eventRing_[(eventStart_ + eventCount_ - 1U) %
-                                                kEventCapacity].sequence;
-                            overflowed = oldest > 1U && parsed->afterEventSequence < oldest - 1U;
+                        session = instanceId_ + ":" + std::to_string(eventSessionEpoch_);
+                        std::uint32_t filter = 0U;
+                        for (const auto kind : parsed->eventTypes) filter |= 1U << static_cast<unsigned>(kind);
+                        if (filter == 0U) filter = (1U << 19U) - 1U;
+                        const std::string prefix = "ev1:" + session + ":" + std::to_string(filter) + ":";
+                        std::uint64_t offset = eventHistoryOffset_;
+                        if (!parsed->eventCursor.empty()) {
+                            const auto& cursor = parsed->eventCursor;
+                            if (!cursor.starts_with(prefix)) return ErrorResponse(*parsed,
+                                "INVALID_ARGUMENT", "stale or filter-mismatched event cursor", false, false);
+                            const auto conversion = std::from_chars(cursor.data() + prefix.size(),
+                                cursor.data() + cursor.size(), offset);
+                            if (conversion.ec != std::errc{} || conversion.ptr != cursor.data() + cursor.size() ||
+                                offset < eventHistoryOffset_ ||
+                                offset - eventHistoryOffset_ > eventHistory_.size()) return ErrorResponse(*parsed,
+                                "INVALID_ARGUMENT", "invalid event cursor offset", false, false);
                         }
-                        for (std::size_t offset = 0U; offset < eventCount_; ++offset) {
-                            const EventRecord& event =
-                                eventRing_[(eventStart_ + offset) % kEventCapacity];
-                            if (event.sequence <= parsed->afterEventSequence ||
-                                (!parsed->eventTypes.empty() &&
-                                 std::find(parsed->eventTypes.begin(), parsed->eventTypes.end(),
-                                           event.kind) == parsed->eventTypes.end())) {
-                                continue;
-                            }
+                        complete = historyComplete_;
+                        latest = eventHistory_.empty() ? 0U : eventHistory_.back().sequence;
+                        for (std::size_t index = static_cast<std::size_t>(offset - eventHistoryOffset_);
+                             index < eventHistory_.size(); ++index, ++offset) {
+                            if (std::chrono::steady_clock::now() >= requestDeadline)
+                                return ErrorResponse(*parsed, "TIMEOUT", "event page deadline expired", true, false);
+                            const EventRecord& event = eventHistory_[index];
+                            if ((filter & (1U << static_cast<unsigned>(event.kind))) == 0U) continue;
                             if (copiedCount < parsed->pageLimit) {
                                 copied[copiedCount++] = event;
                             } else {
-                                hasMore = true;
+                                next = JsonString(prefix + std::to_string(offset));
                                 break;
                             }
                         }
@@ -2966,49 +2998,38 @@ void Runtime::Worker() noexcept {
                         items += EventJson(copied[index]);
                     }
                     items += "]";
-                    const std::string next = copiedCount == 0U
-                                                 ? "null"
-                                                 : std::to_string(copied[copiedCount - 1U].sequence);
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
-                           ",\"state_generation\":" + std::to_string(generation_.load()) +
-                           ",\"status\":\"ok\",\"result\":{\"oldest_sequence\":" +
-                           std::to_string(oldest) + ",\"latest_sequence\":" +
-                           std::to_string(latest) + ",\"overflowed\":" +
-                           (overflowed ? "true" : "false") + ",\"has_more\":" +
-                           (hasMore ? "true" : "false") + ",\"next_after_sequence\":" +
-                           next + ",\"items\":" + items + "}}";
+                            ",\"state_generation\":" + std::to_string(generation_.load()) +
+                            ",\"status\":\"ok\",\"result\":{\"session_id\":" + JsonString(session) +
+                            ",\"latest_sequence\":" + std::to_string(latest) + ",\"history_complete\":" +
+                            (complete ? "true" : "false") + ",\"storage_error\":" +
+                            (complete ? "null" : "\"event history is incomplete\"") + ",\"next_cursor\":" +
+                            next + ",\"items\":" + items + "}}";
                 }
                 if (parsed->method == "events.wait") {
                     const auto waitDeadline = (std::min)(
                         requestDeadline, std::chrono::steady_clock::now() +
                                              std::chrono::milliseconds(parsed->waitTimeoutMs));
                     EventRecord matched;
-                    std::uint64_t oldest = 0U;
                     std::uint64_t latest = 0U;
-                    bool overflowed = false;
                     bool found = false;
+                    bool changed = false;
+                    std::string session;
                     {
                         std::unique_lock lock(stateMutex_);
-                        const auto findMatch = [this, parsed, &matched, &oldest, &latest,
-                                                &overflowed, &found] {
-                            oldest = 0U;
-                            latest = 0U;
-                            overflowed = false;
-                            found = false;
-                            if (eventCount_ != 0U) {
-                                oldest = eventRing_[eventStart_].sequence;
-                                latest = eventRing_[(eventStart_ + eventCount_ - 1U) %
-                                                    kEventCapacity].sequence;
-                                overflowed = oldest > 1U &&
-                                             parsed->afterEventSequence < oldest - 1U;
-                            }
-                            for (std::size_t offset = 0U; offset < eventCount_; ++offset) {
-                                const EventRecord& event =
-                                    eventRing_[(eventStart_ + offset) % kEventCapacity];
-                                if (event.sequence > parsed->afterEventSequence &&
-                                    std::find(parsed->eventTypes.begin(),
+                        const auto epoch = eventSessionEpoch_;
+                        session = instanceId_ + ":" + std::to_string(epoch);
+                        const std::uint64_t armedSequence = eventHistory_.empty()
+                            ? 0U : eventHistory_.back().sequence;
+                        const auto findMatch = [&, this] {
+                            changed = epoch != eventSessionEpoch_;
+                            if (changed || found) return true;
+                            latest = eventHistory_.empty() ? 0U : eventHistory_.back().sequence;
+                            for (const EventRecord& event : eventHistory_) {
+                                if (event.sequence <= armedSequence) continue;
+                                if (parsed->eventTypes.empty() || std::find(parsed->eventTypes.begin(),
                                               parsed->eventTypes.end(), event.kind) !=
-                                        parsed->eventTypes.end()) {
+                                         parsed->eventTypes.end()) {
                                     matched = event;
                                     found = true;
                                     return true;
@@ -3021,9 +3042,9 @@ void Runtime::Worker() noexcept {
                             findMatch();
                         }
                     }
-                    if (pluginState_.load() != PluginState::ready) {
-                        return ErrorResponse(*parsed, "CANCELLED", "plugin is draining", true,
-                                             false);
+                    if (changed || pluginState_.load() != PluginState::ready) {
+                        return ErrorResponse(*parsed, "CANCELLED", "event session changed or plugin is draining", true,
+                                              false);
                     }
                     if (!found) {
                         return ErrorResponse(*parsed, "TIMEOUT",
@@ -3033,10 +3054,8 @@ void Runtime::Worker() noexcept {
                     return "{\"request_id\":" + JsonString(parsed->requestId) +
                            ",\"state_generation\":" +
                            std::to_string(matched.generation) +
-                           ",\"status\":\"ok\",\"result\":{\"oldest_sequence\":" +
-                           std::to_string(oldest) + ",\"latest_sequence\":" +
-                           std::to_string(latest) + ",\"overflowed\":" +
-                           (overflowed ? "true" : "false") + ",\"event\":" +
+                            ",\"status\":\"ok\",\"result\":{\"session_id\":" + JsonString(session) +
+                            ",\"latest_sequence\":" + std::to_string(latest) + ",\"event\":" +
                            EventJson(matched) + "}}";
                 }
                 if (parsed->method == "trace.status") {
@@ -3731,7 +3750,8 @@ void Runtime::Worker() noexcept {
                                             parsed->addressProvided) ||
                                            parsed->method == "analysis.function" ||
                                            parsed->method == "debugger.run_to_address" ||
-                                           parsed->method == "memory.read" ||
+                                            parsed->method == "memory.read" ||
+                                            parsed->method == "memory.dump" ||
                                            parsed->method == "memory.write" ||
                                            parsed->method == "breakpoints.set" ||
                                            parsed->method == "breakpoints.remove" ||
@@ -5984,6 +6004,31 @@ void Runtime::Worker() noexcept {
                            JsonString(formatted.str()) + ",\"state_generation\":" +
                            std::to_string(*snapshot) + "}}";
                 }
+                if (parsed->method == "memory.dump") {
+                    const int required = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                        parsed->path.data(), static_cast<int>(parsed->path.size()), nullptr, 0);
+                    if (required <= 0) return ErrorResponse(*parsed, "INVALID_ARGUMENT", "invalid UTF-8 dump path", false, false);
+                    std::wstring destination(static_cast<std::size_t>(required), L'\0');
+                    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, parsed->path.data(),
+                        static_cast<int>(parsed->path.size()), destination.data(), required) != required)
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT", "invalid UTF-8 dump path", false, false);
+                    const auto address = resolvedLocation->address;
+                    if (parsed->length - 1U > (std::numeric_limits<duint>::max)() - address)
+                        return ErrorResponse(*parsed, "INVALID_ARGUMENT", "dump range exceeds pointer width", false, false);
+                    const auto dump = DumpMemory(destination, address, parsed->length, parsed->overwrite,
+                        requestDeadline,
+                        [](const std::uint64_t at, unsigned char* bytes, const std::size_t count) {
+                            return DbgMemRead(static_cast<duint>(at), bytes, static_cast<duint>(count));
+                        }, [this, resolvedGeneration] { return PausedSnapshotCurrent(resolvedGeneration); });
+                    if (!dump.complete) return ErrorResponse(*parsed, dump.code, dump.message, false, dump.outcomeUnknown);
+                    return "{\"request_id\":" + JsonString(parsed->requestId) +
+                        ",\"state_generation\":" + std::to_string(resolvedGeneration) +
+                        ",\"status\":\"ok\",\"result\":{\"path\":" + JsonString(parsed->path) +
+                        ",\"bytes_written\":" + std::to_string(dump.bytesWritten) +
+                        ",\"sha256\":" + JsonString(dump.sha256) + ",\"complete\":true,\"location\":" +
+                        LocationJson(*resolvedLocation, resolvedGeneration) + ",\"state_generation\":" +
+                        std::to_string(resolvedGeneration) + "}}";
+                }
                 if (parsed->method == "memory.read") {
                     const duint addressValue = resolvedLocation->address;
                     std::vector<unsigned char> bytes(parsed->length);
@@ -8199,15 +8244,25 @@ std::uint64_t Runtime::ObservedGeneration(const DebuggeeState state) const noexc
 
 void Runtime::RecordEventLocked(EventRecord event) noexcept {
     constexpr std::uint64_t kMaxJsonSafeInteger = 9007199254740991ULL;
-    if (nextEventSequence_ > kMaxJsonSafeInteger) return;
+    bool& complete = candidateEventSession_ ? candidateHistoryComplete_ : historyComplete_;
+    if (nextEventSequence_ > kMaxJsonSafeInteger) { complete = false; return; }
     event.sequence = nextEventSequence_++;
-    if (eventCount_ < kEventCapacity) {
-        eventRing_[(eventStart_ + eventCount_) % kEventCapacity] = event;
-        ++eventCount_;
-    } else {
-        eventRing_[eventStart_] = event;
-        eventStart_ = (eventStart_ + 1U) % kEventCapacity;
+    const auto epoch = candidateEventSession_.value_or(eventSessionEpoch_);
+    std::snprintf(event.sessionId.data(), event.sessionId.size(), "%s:%llu", instanceId_.c_str(),
+                  static_cast<unsigned long long>(epoch));
+    event.timestampUnixMs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    eventStream_.Enqueue(event);
+    auto& history = candidateEventSession_ ? candidateEvents_ : eventHistory_;
+    auto& offset = candidateEventSession_ ? candidateHistoryOffset_ : eventHistoryOffset_;
+    if (history.size() == kMaxEventHistory) {
+        history.pop_front();
+        ++offset;
+        complete = false;
     }
+    try {
+        history.push_back(event);
+    } catch (...) { complete = false; }
 }
 
 void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) noexcept {
@@ -8518,6 +8573,25 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     default: return;
     }
     std::lock_guard lock(stateMutex_);
+    if (callbackType == CB_INITDEBUG || (callbackType == CB_ATTACH && !candidateEventSession_)) {
+        candidateEvents_.clear();
+        candidateHistoryOffset_ = 0U;
+        candidateHistoryComplete_ = true;
+        candidateEventSession_ = ++eventSessionCounter_;
+        eventSessionEstablished_ = false;
+    }
+    // INITDEBUG and ATTACH precede the attach attempt in x64dbg. Only the
+    // CREATEPROCESS callback establishes a session and invalidates old cursors.
+    if (callbackType == CB_CREATEPROCESS && !eventSessionEstablished_) {
+        eventSessionEpoch_ = candidateEventSession_.value_or(++eventSessionCounter_);
+        eventHistory_.swap(candidateEvents_);
+        eventHistoryOffset_ = candidateHistoryOffset_;
+        candidateEvents_.clear();
+        candidateHistoryOffset_ = 0U;
+        historyComplete_ = candidateHistoryComplete_;
+        candidateEventSession_.reset();
+        eventSessionEstablished_ = true;
+    }
     {
         std::lock_guard traceLock(traceMutex_);
         // Check under the state/admission lock, not before it: pause and native
@@ -8563,11 +8637,21 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
         sessionOrigin_.store(SessionOrigin::launched);
     }
     if (clearProcess) {
+        event.processId = processId_.load();
+        event.threadId = activeThreadId_.load();
+        event.hasProcessId = event.processId != 0U;
+        event.hasThreadId = event.threadId != 0U;
         processId_.store(0U);
         activeThreadId_.store(0U);
     } else {
         if (callbackProcessId) processId_.store(*callbackProcessId);
         if (callbackThreadId) activeThreadId_.store(*callbackThreadId);
+    }
+    if (!clearProcess) {
+        event.processId = processId_.load();
+        event.threadId = activeThreadId_.load();
+        event.hasProcessId = event.processId != 0U;
+        event.hasThreadId = event.threadId != 0U;
     }
     if (next == DebuggeeState::paused && activeThreadId_.load() != 0U) {
         pause.threadId = activeThreadId_.load();
@@ -8629,11 +8713,13 @@ void Runtime::OnDebuggerEvent(const int callbackType, void* const callbackInfo) 
     case DebuggeeState::exited: break;
     }
     event.generation = observed;
-    event.processId = processId_.load();
-    event.threadId = activeThreadId_.load();
-    event.hasProcessId = event.hasProcessId || event.processId != 0U;
-    event.hasThreadId = event.hasThreadId || event.threadId != 0U;
     RecordEventLocked(event);
+    if (clearProcess) {
+        candidateEvents_.clear();
+        candidateHistoryOffset_ = 0U;
+        candidateEventSession_.reset();
+        eventSessionEstablished_ = false;
+    }
     CommitTraceEventLocked(callbackType);
     stateChanged_.notify_all();
 }
@@ -8739,6 +8825,7 @@ void Runtime::Stop() noexcept {
     traceChanged_.notify_all();
     commandFence_.Stop();
     stateChanged_.notify_all();
+    eventStream_.Stop();
     CloseHandleValue(nonceWriter_); // stdin EOF asks the child to shut down gracefully.
     if (worker_.joinable()) {
         CancelSynchronousIo(worker_.native_handle());

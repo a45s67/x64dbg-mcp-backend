@@ -66,10 +66,14 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
         .as_object()
         .ok_or(invalid("arguments", "must be an object"))?;
     match name {
-        "events.list" => {
-            exact_keys(object, &[], &["after_sequence", "types", "limit"])?;
-            optional_integer(object, "after_sequence", 0, 9_007_199_254_740_991)?;
-            optional_integer(object, "limit", 1, 256)?;
+        "events.list" | "events.wait" => {
+            if name == "events.list" {
+                exact_keys(object, &[], &["cursor", "types", "limit"])?;
+                discovery_page(object)?;
+            } else {
+                exact_keys(object, &[], &["types", "timeout_ms"])?;
+                optional_integer(object, "timeout_ms", 1, 9_000)?;
+            }
             if let Some(types) = object.get("types") {
                 let values = types
                     .as_array()
@@ -88,26 +92,11 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             }
             Ok(())
         }
-        "events.wait" => {
-            exact_keys(object, &["after_sequence", "types"], &["timeout_ms"])?;
-            integer(object, "after_sequence", 0, 9_007_199_254_740_991)?;
-            optional_integer(object, "timeout_ms", 1, 9_000)?;
-            let values = object
-                .get("types")
-                .and_then(Value::as_array)
-                .filter(|values| !values.is_empty() && values.len() <= EVENT_TYPES.len())
-                .ok_or(invalid("types", "must contain 1 to 19 event types"))?;
-            let mut seen = std::collections::HashSet::new();
-            for value in values {
-                let name = value
-                    .as_str()
-                    .filter(|name| EVENT_TYPES.contains(name))
-                    .ok_or(invalid("types", "contains an unknown event type"))?;
-                if !seen.insert(name) {
-                    return Err(invalid("types", "must not contain duplicates"));
-                }
-            }
-            Ok(())
+        "logs.read" => {
+            exact_keys(object, &[], &["cursor", "limit", "max_bytes"])?;
+            discovery_page(object)?;
+            optional_integer(object, "limit", 1, 100)?;
+            optional_integer(object, "max_bytes", 1024, 262_144)
         }
         "debugger.snapshot" => {
             exact_keys(
@@ -449,9 +438,58 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             validate_address_ref(object, "address")
         }
         "memory.read" => {
-            exact_keys(object, &["address", "length"], &[])?;
+            exact_keys(object, &["address", "length"], &["format", "byte_order"])?;
             validate_address_ref(object, "address")?;
-            integer(object, "length", 1, 65_536)
+            integer(object, "length", 1, 65_536)?;
+            if object.contains_key("format") {
+                one_of(
+                    object,
+                    "format",
+                    &["bytes", "word", "dword", "qword", "str", "wstr"],
+                )?;
+            }
+            let format = object.get("format").and_then(Value::as_str);
+            if object.contains_key("byte_order") {
+                if !matches!(format, Some("word" | "dword" | "qword")) {
+                    return Err(invalid("byte_order", "requires a numeric format"));
+                }
+                one_of(object, "byte_order", &["little", "big"])?;
+            }
+            let width = match format {
+                Some("word" | "wstr") => 2,
+                Some("dword") => 4,
+                Some("qword") => 8,
+                _ => 1,
+            };
+            if object["length"]
+                .as_u64()
+                .is_none_or(|length| length % width != 0)
+            {
+                return Err(invalid(
+                    "length",
+                    "must be a multiple of the format width in bytes",
+                ));
+            }
+            Ok(())
+        }
+        "memory.dump" => {
+            exact_keys(
+                object,
+                &["operation_id", "instance_id", "address", "length", "path"],
+                &["overwrite"],
+            )?;
+            validate_operation_id(object)?;
+            validate_instance_id(object)?;
+            validate_address_ref(object, "address")?;
+            integer(object, "length", 1, 67_108_864)?;
+            validate_path(object, "path")?;
+            if object
+                .get("overwrite")
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return Err(invalid("overwrite", "must be a boolean"));
+            }
+            Ok(())
         }
         "memory.search" => {
             exact_keys(
@@ -728,7 +766,7 @@ pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), Validatio
             }
             Ok(())
         }
-        "debugger.state" | "process.peb" => exact_keys(object, &[], &[]),
+        "debugger.state" | "process.peb" | "logs.status" => exact_keys(object, &[], &[]),
         "context.arguments" => {
             exact_keys(object, &[], &["count", "calling_convention", "thread_id"])?;
             optional_integer(object, "count", 1, 16)?;
@@ -1210,12 +1248,12 @@ fn build_catalog() -> Vec<Value> {
         ),
         read_tool(
             "events.list",
-            "Read the fixed-capacity recent debugger event ring by sequence and closed event type; this is diagnostic history, not a trace stream.",
+            "Page up to 65536 retained structured events from the current debuggee session with an opaque cursor and optional event types. Returns session_id, items, next_cursor, latest_sequence, and history_complete; false reports storage pressure or oldest-event eviction. History resets only when a new session is established and remains available after stop. It is separate from rotating logs and is not a trace stream.",
             object(
                 vec![
                     (
-                        "after_sequence",
-                        json!({"type":"integer","minimum":0,"maximum":9_007_199_254_740_991_i64}),
+                        "cursor",
+                        json!({"type":"string","minLength":1,"maxLength":512}),
                     ),
                     (
                         "types",
@@ -1231,13 +1269,9 @@ fn build_catalog() -> Vec<Value> {
         ),
         read_tool(
             "events.wait",
-            "Wait for the first callback event newer than after_sequence that matches one or more closed event types. The wait is bounded and never consumes the event ring.",
+            "Wait for the next matching event AFTER native arming in the current session, never historical events; cancels on session change. No arguments waits for any event for 5 seconds. An event does not necessarily mean execution is paused or finished.",
             object(
                 vec![
-                    (
-                        "after_sequence",
-                        json!({"type":"integer","minimum":0,"maximum":9_007_199_254_740_991_i64}),
-                    ),
                     (
                         "types",
                         json!({"type":"array","minItems":1,"maxItems":19,"uniqueItems":true,"items":{"type":"string","enum":EVENT_TYPES}}),
@@ -1247,7 +1281,33 @@ fn build_catalog() -> Vec<Value> {
                         json!({"type":"integer","minimum":1,"maximum":9000,"default":5000}),
                     ),
                 ],
-                vec!["after_sequence", "types"],
+                vec![],
+            ),
+        ),
+        read_tool(
+            "logs.status",
+            "Read status of the backend's configured rotating logs. Logs are separate from current-session debugger events; no arbitrary paths are accepted.",
+            object(vec![], vec![]),
+        ),
+        read_tool(
+            "logs.read",
+            "Read bounded chunks of the backend's configured rotating logs using an opaque cursor. Rotation can invalidate cursors. Logs are separate from current-session debugger events; no arbitrary paths or type filters are accepted.",
+            object(
+                vec![
+                    (
+                        "cursor",
+                        json!({"type":"string","minLength":1,"maxLength":512}),
+                    ),
+                    (
+                        "limit",
+                        json!({"type":"integer","minimum":1,"maximum":100,"default":50}),
+                    ),
+                    (
+                        "max_bytes",
+                        json!({"type":"integer","minimum":1024,"maximum":262_144,"default":65_536}),
+                    ),
+                ],
+                vec![],
             ),
         ),
         read_tool(
@@ -1352,7 +1412,7 @@ fn build_catalog() -> Vec<Value> {
         ),
         mutation_tool(
             "debugger.run_to_address",
-            "Run from a paused state to one absolute or module-relative address through an exactly owned single-shot breakpoint. Interruption and timeout are bounded and the temporary breakpoint is cleaned before a successful result.",
+            "Run to one address through an exactly owned single-shot breakpoint. An existing native breakpoint at the target conflicts: inspect breakpoints.list and explicitly manage it first. Interruption and timeout are bounded; the temporary breakpoint is cleaned before success.",
             operation_schema_with_optional(
                 vec![("address", address_ref())],
                 vec![(
@@ -1545,10 +1605,18 @@ fn build_catalog() -> Vec<Value> {
         ),
         read_tool(
             "memory.read",
-            "Read at most 65536 bytes from a paused debuggee. Accepts an absolute or module-relative address reference.",
+            "Read 1-65536 bytes from a paused debuggee. Without format, returns unchanged raw data_hex; otherwise adds view. Numeric lengths must be multiples of 2/4/8. str is strict UTF-8; wstr is strict UTF-16LE with even length and aligned NUL termination, bounded by the read. Invalid text returns view.status=decode_error, preserving raw bytes.",
             object(
                 vec![
                     ("address", address_ref()),
+                    (
+                        "format",
+                        json!({"type":"string","enum":["bytes","word","dword","qword","str","wstr"]}),
+                    ),
+                    (
+                        "byte_order",
+                        json!({"type":"string","enum":["little","big"],"default":"little","description":"Only valid with word, dword, or qword; defaults to little endian."}),
+                    ),
                     (
                         "length",
                         json!({"type":"integer","minimum":1,"maximum":65536}),
@@ -1556,6 +1624,25 @@ fn build_catalog() -> Vec<Value> {
                 ],
                 vec!["address", "length"],
             ),
+        ),
+        mutation_tool(
+            "memory.dump",
+            "Write 1-67108864 raw memory bytes to an absolute file path on the debugger host, not a reconstructed PE. Requires paused state and mutation IDs. overwrite defaults false. Returns read flags and SHA-256; atomic publication fails without exposing a partial destination file.",
+            operation_schema_with_optional(
+                vec![
+                    ("address", address_ref()),
+                    (
+                        "length",
+                        json!({"type":"integer","minimum":1,"maximum":67_108_864}),
+                    ),
+                    (
+                        "path",
+                        json!({"type":"string","minLength":1,"maxLength":8192,"description":"Absolute destination file path on the debugger host, without control characters. Minimum 3 UTF-8 bytes is checked at runtime; native code validates the destination."}),
+                    ),
+                ],
+                vec![("overwrite", json!({"type":"boolean","default":false}))],
+            ),
+            true,
         ),
         read_tool(
             "memory.search",
@@ -1899,7 +1986,7 @@ fn build_catalog() -> Vec<Value> {
         ),
         read_tool(
             "context.arguments",
-            "Read bounded ABI argument candidates from one paused thread. Values are exact register/stack reads, but their interpretation assumes the instruction pointer is at callee entry.",
+            "Read entry-only ABI argument candidates, not a prototype. auto maps x64 to windows_x64 and x32 to cdecl. Register candidates use GPRs only, not floating-point/vector registers; thiscall includes ECX as the first candidate. Interpretation requires callee entry.",
             object(
                 vec![
                     (
@@ -2026,6 +2113,14 @@ fn build_catalog() -> Vec<Value> {
     for tool in &mut tools {
         refine_schema(&mut tool["inputSchema"], "");
         match tool["name"].as_str().unwrap() {
+            "memory.read" => {
+                tool["inputSchema"]["allOf"] = json!([
+                    {"if":{"required":["byte_order"]},"then":{"required":["format"],"properties":{"format":{"enum":["word","dword","qword"]}}}},
+                    {"if":{"required":["format"],"properties":{"format":{"enum":["word","wstr"]}}},"then":{"properties":{"length":{"multipleOf":2}}}},
+                    {"if":{"required":["format"],"properties":{"format":{"const":"dword"}}},"then":{"properties":{"length":{"multipleOf":4}}}},
+                    {"if":{"required":["format"],"properties":{"format":{"const":"qword"}}},"then":{"properties":{"length":{"multipleOf":8}}}}
+                ]);
+            }
             "strings.search" => {
                 tool["inputSchema"]["dependentRequired"] = json!({"context_bytes":["query"]});
             }
@@ -2512,7 +2607,7 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_bounded_tool_definitions() {
-        assert_eq!(catalog().len(), 64);
+        assert_eq!(catalog().len(), 67);
         let names = catalog()
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -2575,7 +2670,7 @@ mod tests {
         assert!(
             validate_arguments(
                 "events.list",
-                &json!({"after_sequence":0,"types":["breakpoint","dll_loaded"],"limit":256})
+                &json!({"cursor":"opaque","types":["breakpoint","dll_loaded"],"limit":256})
             )
             .is_ok()
         );
@@ -2586,17 +2681,11 @@ mod tests {
         assert!(
             validate_arguments(
                 "events.wait",
-                &json!({"after_sequence":12,"types":["exception","dll_loaded"],"timeout_ms":9000})
+                &json!({"types":["exception","dll_loaded"],"timeout_ms":9000})
             )
             .is_ok()
         );
-        assert!(
-            validate_arguments(
-                "events.wait",
-                &json!({"after_sequence":12,"types":[],"timeout_ms":9000})
-            )
-            .is_err()
-        );
+        assert!(validate_arguments("events.wait", &json!({"types":[],"timeout_ms":9000})).is_err());
         assert!(
             validate_arguments(
                 "debugger.snapshot",

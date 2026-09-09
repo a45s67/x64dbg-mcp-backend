@@ -1,5 +1,10 @@
 use serde_json::{Value, json};
 use x64dbg_mcp_server::tools::{catalog, validate_arguments};
+use x64dbg_mcp_server::{adapter, tools};
+
+// Exercise the pure view helper independently of the parent's MCP integration.
+#[path = "../src/memory_view.rs"]
+mod memory_view;
 
 fn validator(name: &str) -> jsonschema::Validator {
     let tool = catalog().iter().find(|tool| tool["name"] == name).unwrap();
@@ -204,6 +209,16 @@ fn numeric_and_byte_boundaries() {
     for (name, base, field, minimum, maximum) in [
         ("memory.read", json!({"address":"0x1"}), "length", 1, 65536),
         (
+            "memory.dump",
+            mutation(json!({"address":"0x1","path":"C:\\dump.bin"})),
+            "length",
+            1,
+            67_108_864,
+        ),
+        ("events.list", json!({}), "limit", 1, 256),
+        ("logs.read", json!({}), "limit", 1, 100),
+        ("logs.read", json!({}), "max_bytes", 1024, 262_144),
+        (
             "memory.search",
             json!({"scope":{"module":"a"},"pattern_hex":"aa","mask":"x"}),
             "limit",
@@ -222,7 +237,7 @@ fn numeric_and_byte_boundaries() {
         ("debugger.snapshot", json!({}), "disassembly_count", 0, 64),
         (
             "events.wait",
-            json!({"after_sequence":0,"types":["paused"]}),
+            json!({"types":["paused"]}),
             "timeout_ms",
             1,
             9000,
@@ -364,4 +379,126 @@ fn documented_runtime_only_constraints() {
             "runtime {name}"
         );
     }
+}
+
+#[test]
+fn memory_presentation_dependencies_and_dump_contract() {
+    for format in ["bytes", "word", "dword", "qword", "str", "wstr"] {
+        let width = match format {
+            "word" | "wstr" => 2,
+            "dword" => 4,
+            "qword" => 8,
+            _ => 1,
+        };
+        for length in [1, 2, 3, 4, 7, 8, 65_535, 65_536] {
+            contract(
+                "memory.read",
+                &json!({"address":"0x1","length":length,"format":format}),
+                length % width == 0,
+            );
+        }
+        for order in [
+            json!("little"),
+            json!("big"),
+            json!("native"),
+            Value::Null,
+            json!(1),
+        ] {
+            contract(
+                "memory.read",
+                &json!({"address":"0x1","length":8,"format":format,"byte_order":order}),
+                matches!(format, "word" | "dword" | "qword")
+                    && matches!(order.as_str(), Some("little" | "big")),
+            );
+        }
+    }
+    for options in [
+        json!({"byte_order":"little"}),
+        json!({"format":null}),
+        json!({"format":"raw"}),
+        json!({"format":1}),
+    ] {
+        let mut args = json!({"address":"0x1","length":8});
+        args.as_object_mut()
+            .unwrap()
+            .extend(options.as_object().unwrap().clone());
+        contract("memory.read", &args, false);
+    }
+    for overwrite in [
+        None,
+        Some(json!(false)),
+        Some(json!(true)),
+        Some(json!(0)),
+        Some(Value::Null),
+    ] {
+        let mut args = mutation(
+            json!({"address":{"module":"a.exe","rva":"0x0"},"length":1,"path":"C:\\dump.bin"}),
+        );
+        if let Some(value) = &overwrite {
+            args["overwrite"] = value.clone();
+        }
+        contract(
+            "memory.dump",
+            &args,
+            overwrite.is_none_or(|value| value.is_boolean()),
+        );
+    }
+    for field in ["operation_id", "instance_id", "address", "length", "path"] {
+        let mut args = mutation(json!({"address":"0x1","length":1,"path":"C:\\dump.bin"}));
+        args.as_object_mut().unwrap().remove(field);
+        contract("memory.dump", &args, false);
+    }
+    contract(
+        "memory.dump",
+        &mutation(json!({"address":"0x1","length":1,"path":"C:\\bad\nfile"})),
+        false,
+    );
+    assert!(tools::is_mutation("memory.dump"));
+}
+
+#[test]
+fn event_and_log_catalog_contracts() {
+    for name in ["events.list", "events.wait", "logs.status", "logs.read"] {
+        contract(name, &json!({}), true);
+        assert!(!tools::is_mutation(name));
+        for removed in [
+            json!({"after_sequence":0}),
+            json!({"session_id":"a"}),
+            json!({"path":"C:\\a.log"}),
+        ] {
+            contract(name, &removed, false);
+        }
+    }
+    for name in ["events.list", "events.wait"] {
+        for (types, accepted) in [
+            (json!(["paused"]), true),
+            (json!([]), false),
+            (json!(["paused", "paused"]), false),
+            (json!(["unknown"]), false),
+            (Value::Null, false),
+        ] {
+            contract(name, &json!({"types":types}), accepted);
+        }
+    }
+    for name in ["events.list", "logs.read"] {
+        for (cursor, accepted) in [
+            ("x".repeat(512), true),
+            ("x".repeat(513), false),
+            (String::new(), false),
+        ] {
+            contract(name, &json!({"cursor":cursor}), accepted);
+        }
+    }
+    contract("events.wait", &json!({"cursor":"x"}), false);
+    contract("logs.read", &json!({"types":["paused"]}), false);
+    for (name, field, default) in [
+        ("events.list", "limit", 100),
+        ("events.wait", "timeout_ms", 5000),
+        ("logs.read", "limit", 50),
+        ("logs.read", "max_bytes", 65536),
+    ] {
+        let tool = catalog().iter().find(|tool| tool["name"] == name).unwrap();
+        assert_eq!(tool["inputSchema"]["properties"][field]["default"], default);
+    }
+    assert_eq!(catalog().len(), 67);
 }

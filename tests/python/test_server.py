@@ -77,10 +77,39 @@ def test_initialize_ping_and_catalog(client, version):
     tools = client.rpc("tools/list", {})["tools"]
     names = [tool["name"] for tool in tools]
     assert len(names) == len(set(names))
-    assert {"debugger.state", "debuggee.launch", "debuggee.attach", "memory.read"} <= set(names)
+    assert {"debugger.state", "debuggee.launch", "debuggee.attach", "memory.read", "memory.dump",
+            "events.list", "events.wait", "logs.status", "logs.read"} <= set(names)
     for tool in tools:
         assert tool["inputSchema"]["type"] == "object"
         assert "outputSchema" not in tool
+
+
+def test_new_tool_schemas_are_bounded_and_explicit(client):
+    tools = {tool["name"]: tool for tool in client.rpc("tools/list", {})["tools"]}
+    memory_read = tools["memory.read"]["inputSchema"]
+    assert memory_read["properties"]["format"]["enum"] == [
+        "bytes", "word", "dword", "qword", "str", "wstr",
+    ]
+    assert memory_read["properties"]["byte_order"]["enum"] == ["little", "big"]
+    memory_dump = tools["memory.dump"]["inputSchema"]
+    assert set(memory_dump["required"]) == {
+        "operation_id", "instance_id", "address", "length", "path",
+    }
+    assert memory_dump["properties"]["length"]["maximum"] == 64 * 1024 * 1024
+    assert memory_dump["properties"]["overwrite"]["default"] is False
+    events_list = tools["events.list"]["inputSchema"]
+    assert events_list["required"] == []
+    assert set(events_list["properties"]) == {"cursor", "types", "limit"}
+    events_wait = tools["events.wait"]["inputSchema"]
+    assert events_wait["required"] == []
+    assert events_wait["properties"]["timeout_ms"]["default"] == 5000
+    assert tools["logs.status"]["inputSchema"]["required"] == []
+    logs_read = tools["logs.read"]["inputSchema"]
+    assert set(logs_read["properties"]) == {
+        "cursor", "limit", "max_bytes",
+    }
+    assert logs_read["properties"]["limit"]["maximum"] == 100
+    assert logs_read["properties"]["max_bytes"]["maximum"] == 256 * 1024
 
 
 def test_disconnected_tool_content_contract(client, workspace):
@@ -99,6 +128,17 @@ def test_invalid_argument_and_stale_identity_are_not_dispatched(client, http):
         client.tool("memory.read", {"address": "not-an-address", "length": 1})
     assert error.value.payload["error"]["code"] == "INVALID_ARGUMENT"
     assert error.value.payload["error"]["details"]["field"] == "address"
+    with pytest.raises(ToolError) as error:
+        client.tool("memory.read", {
+            "address": "0x1000", "length": 3, "format": "word", "byte_order": "little",
+        })
+    assert error.value.payload["error"]["details"]["field"] == "length"
+    with pytest.raises(ToolError) as error:
+        client.tool("memory.dump", {
+            "address": "0x1000", "length": 1, "path": "C:\\bad\npath.bin",
+            "instance_id": str(uuid4()), "operation_id": str(uuid4()),
+        })
+    assert error.value.payload["error"]["details"]["field"] == "path"
     _, _, ready = http("/health/ready")
     stale = str(uuid4())
     assert stale != ready["instance_id"]

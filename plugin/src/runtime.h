@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <thread>
 #include <mutex>
@@ -15,6 +16,7 @@
 
 #include "command_fence.h"
 #include "debugger_executor.h"
+#include "event_stream.h"
 #include "trace_policy.h"
 
 namespace mcp {
@@ -44,30 +46,6 @@ struct PauseObservation {
     bool hasExceptionCode{false};
     bool firstChance{false};
     bool hasThreadId{false};
-};
-
-enum class EventKind : std::uint8_t {
-    debugInitialized, processCreated, systemBreakpoint, breakpoint, exception,
-    paused, stepped, resumed, attached, detached, stopping, processExited,
-    debugStopped, threadCreated, threadExited, dllLoaded, dllUnloaded,
-    debugString, rip
-};
-
-struct EventRecord {
-    std::uint64_t sequence{0};
-    std::uint64_t generation{0};
-    EventKind kind{EventKind::debugInitialized};
-    std::uint32_t processId{0};
-    std::uint32_t threadId{0};
-    std::uint64_t address{0};
-    std::uint64_t code{0};
-    std::uint32_t auxiliary{0};
-    std::uint8_t breakpointType{0};
-    bool hasProcessId{false};
-    bool hasThreadId{false};
-    bool hasAddress{false};
-    bool hasCode{false};
-    bool firstChance{false};
 };
 
 struct PendingExceptionObservation {
@@ -188,11 +166,19 @@ private:
     bool traceSupervisorStopping_{false};
     PauseObservation latestPause_;
     PendingExceptionObservation pendingException_;
-    static constexpr std::size_t kEventCapacity = 256U;
-    std::array<EventRecord, kEventCapacity> eventRing_{};
-    std::size_t eventStart_{0U};
-    std::size_t eventCount_{0U};
+    std::deque<EventRecord> eventHistory_;
+    std::deque<EventRecord> candidateEvents_;
+    static constexpr std::size_t kMaxEventHistory = 65536U;
+    std::uint64_t eventHistoryOffset_{0U};
+    std::uint64_t candidateHistoryOffset_{0U};
+    std::uint64_t eventSessionEpoch_{0U};
+    std::uint64_t eventSessionCounter_{0U};
+    std::optional<std::uint64_t> candidateEventSession_;
+    bool eventSessionEstablished_{false};
+    bool historyComplete_{true};
+    bool candidateHistoryComplete_{true};
     std::uint64_t nextEventSequence_{1U};
+    EventStream eventStream_;
     std::wstring pipeName_;
     std::string nonce_;
     std::string instanceId_;

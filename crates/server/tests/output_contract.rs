@@ -235,7 +235,7 @@ async fn arbitrary_json_payload_shapes_are_not_wrapped_or_normalized() {
 async fn tools_list_omits_output_schemas_for_every_tool() {
     use x64dbg_mcp_server::{adapter::DisconnectedAdapter, mcp, tools};
 
-    assert_eq!(tools::catalog().len(), 64);
+    assert_eq!(tools::catalog().len(), 67);
     assert!(
         tools::catalog()
             .iter()
@@ -424,7 +424,7 @@ fn every_core_schema_accepts_errors_without_requiring_success_fields() {
             false,
         );
     }
-    assert_eq!(checked, 18, "core internal payload schemas are missing");
+    assert_eq!(checked, 19, "core internal payload schemas are missing");
 }
 
 #[test]

@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
 use crate::{
@@ -35,6 +36,61 @@ struct Request {
 }
 
 pub async fn handle(body: &[u8], adapter: &dyn DebuggerAdapter, instance_id: Uuid) -> Response {
+    handle_inner(body, adapter, instance_id, None).await
+}
+
+pub async fn handle_with_log(
+    body: &[u8],
+    adapter: &dyn DebuggerAdapter,
+    instance_id: Uuid,
+    log: &Arc<crate::audit_log::AuditLog>,
+) -> Response {
+    let call_id = Uuid::new_v4();
+    let request = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    let name = request.pointer("/params/name").and_then(Value::as_str);
+    let metadata_only = matches!(name, Some("logs.read" | "logs.status"));
+    let metadata = json!({"call_id":call_id,"rpc_id":request.get("id"),"method":request.get("method"),"tool":name,"operation_id":request.pointer("/params/arguments/operation_id"),"request_bytes":body.len()});
+    log.record(
+        "request",
+        if metadata_only {
+            metadata.clone()
+        } else {
+            json!({"metadata":metadata,"request":request})
+        },
+    );
+    let response = handle_inner(body, adapter, instance_id, Some(Arc::clone(log))).await;
+    let (parts, body) = response.into_parts();
+    if let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await {
+        let mut response = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+        if let Some(result) = response.get_mut("result")
+            && let Some(decoded) = result
+                .pointer("/content/0/text")
+                .and_then(Value::as_str)
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        {
+            *result = json!({"payload":decoded,"isError":result.get("isError")});
+        }
+        log.record(
+            "response",
+            if metadata_only {
+                json!({"metadata":metadata,"output_bytes":bytes.len(),"metadata_only":true})
+            } else {
+                json!({"metadata":metadata,"output_bytes":bytes.len(),"response":response})
+            },
+        );
+        Response::from_parts(parts, bytes.into())
+    } else {
+        log.record("response_failure", metadata);
+        rpc_error(None, -32603, "Response serialization failed")
+    }
+}
+
+async fn handle_inner(
+    body: &[u8],
+    adapter: &dyn DebuggerAdapter,
+    instance_id: Uuid,
+    log: Option<Arc<crate::audit_log::AuditLog>>,
+) -> Response {
     let value: Value = match serde_json::from_slice(body) {
         Ok(value) => value,
         Err(_) => return rpc_error(None, -32700, "Parse error"),
@@ -73,7 +129,7 @@ pub async fn handle(body: &[u8], adapter: &dyn DebuggerAdapter, instance_id: Uui
         "initialize" => initialize(&request.params, instance_id),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools::catalog() })),
-        "tools/call" => call_tool(&request.params, adapter, instance_id).await,
+        "tools/call" => call_tool(&request.params, adapter, instance_id, log.as_ref()).await,
         _ => Err((-32601, "Method not found")),
     };
     match result {
@@ -108,12 +164,13 @@ async fn call_tool(
     params: &Value,
     adapter: &dyn DebuggerAdapter,
     instance_id: Uuid,
+    log: Option<&Arc<crate::audit_log::AuditLog>>,
 ) -> Result<Value, (i32, &'static str)> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .ok_or((-32602, "Missing tool name"))?;
-    if !tools::exists(name) {
+    if !tools::exists(name) && !matches!(name, "logs.read" | "logs.status") {
         return Err((-32602, "Unknown tool name"));
     }
     let arguments = params.get("arguments").unwrap_or(&Value::Null);
@@ -133,7 +190,88 @@ async fn call_tool(
             details: json!({ "field": error.field }),
         }));
     }
-    let mut dispatched_arguments = arguments.clone();
+    if name == "events.wait"
+        && let Some(log) = log
+    {
+        let wait = log.arm_event_wait();
+        let barrier = match adapter.call("events.list", &json!({"limit":1})).await {
+            Ok(value) => value,
+            Err(error) => return Ok(tool_failure(error)),
+        };
+        let Some(after_sequence) = barrier.get("latest_sequence").and_then(Value::as_u64) else {
+            return Ok(tool_failure(ToolError::new(
+                "INTERNAL",
+                "native event barrier omitted latest_sequence",
+                false,
+                false,
+                json!({}),
+            )));
+        };
+        let Some(session_id) = barrier.get("session_id").and_then(Value::as_str) else {
+            return Ok(tool_failure(ToolError::new(
+                "INTERNAL",
+                "native event barrier omitted session_id",
+                false,
+                false,
+                json!({}),
+            )));
+        };
+        return Ok(
+            match log
+                .wait_event(wait, arguments, after_sequence, session_id)
+                .await
+            {
+                Ok(value) => tool_success(value),
+                Err(error) => tool_failure(error),
+            },
+        );
+    }
+    if matches!(name, "logs.read" | "logs.status") {
+        let Some(log) = log else {
+            return Ok(tool_failure(ToolError::new(
+                "LOG_STORE_UNAVAILABLE",
+                "audit store is unavailable",
+                true,
+                false,
+                json!({}),
+            )));
+        };
+        let log = Arc::clone(log);
+        let arguments = arguments.clone();
+        let status = name == "logs.status";
+        let task = tokio::task::spawn_blocking(move || {
+            if status {
+                Ok(log.status())
+            } else {
+                log.read(&arguments)
+            }
+        });
+        return Ok(
+            match tokio::time::timeout(Duration::from_secs(2), task).await {
+                Ok(Ok(Ok(value))) => tool_success(value),
+                Ok(Ok(Err(error))) => tool_failure(error),
+                Ok(Err(_)) => tool_failure(ToolError::new(
+                    "INTERNAL",
+                    "audit log worker failed",
+                    false,
+                    false,
+                    json!({}),
+                )),
+                Err(_) => tool_failure(ToolError::new(
+                    "TIMEOUT",
+                    "audit log operation exceeded its deadline",
+                    true,
+                    true,
+                    json!({}),
+                )),
+            },
+        );
+    }
+    let mut dispatched_arguments = if name == "memory.read" {
+        crate::memory_view::native_arguments(arguments)
+    } else {
+        arguments.clone()
+    };
     if tools::is_mutation_call(name, arguments) {
         let supplied = arguments
             .get("instance_id")
@@ -191,6 +329,10 @@ async fn call_tool(
                 details: json!({ "instance_id": instance_id }),
             })
         }
+        Ok(value) if name == "memory.read" => match crate::memory_view::apply(arguments, value) {
+            Ok(value) => tool_success(value),
+            Err(error) => tool_failure(error),
+        },
         Ok(value) => tool_success(value),
         Err(error) => tool_failure(error),
     })
@@ -307,6 +449,7 @@ mod contract_tests {
     struct MemoryRecordingAdapter {
         calls: AtomicUsize,
         result: Value,
+        expected_arguments: Value,
     }
 
     #[async_trait]
@@ -329,9 +472,10 @@ mod contract_tests {
             true
         }
 
-        async fn call(&self, name: &str, _arguments: &Value) -> Result<Value, ToolError> {
+        async fn call(&self, name: &str, arguments: &Value) -> Result<Value, ToolError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(name, "memory.read");
+            assert_eq!(arguments, &self.expected_arguments);
             Ok(self.result.clone())
         }
     }
@@ -526,6 +670,7 @@ mod contract_tests {
         let adapter = MemoryRecordingAdapter {
             calls: AtomicUsize::new(0),
             result: exact.clone(),
+            expected_arguments: json!({"address":"0x1e56090","length":24}),
         };
         let request = json!({
             "jsonrpc":"2.0",
@@ -545,6 +690,44 @@ mod contract_tests {
         let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(content_payload(&value["result"], false), exact);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn memory_read_presentation_options_are_server_local() {
+        let adapter = MemoryRecordingAdapter {
+            calls: AtomicUsize::new(0),
+            result: json!({"data_hex":"01020304","bytes_read":4,"complete":true}),
+            expected_arguments: json!({"address":"0x1000","length":4}),
+        };
+        let request = json!({
+            "jsonrpc":"2.0",
+            "id":6,
+            "method":"tools/call",
+            "params":{
+                "name":"memory.read",
+                "arguments":{
+                    "address":"0x1000",
+                    "length":4,
+                    "format":"word",
+                    "byte_order":"big"
+                }
+            }
+        });
+        let response = handle(
+            &serde_json::to_vec(&request).unwrap(),
+            &adapter,
+            instance_id(),
+        )
+        .await;
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let payload = content_payload(&value["result"], false);
+        assert_eq!(payload["data_hex"], "01020304");
+        assert_eq!(
+            payload["view"],
+            json!({"format":"word","byte_order":"big","values":["0x0102","0x0304"]})
+        );
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
     }
 

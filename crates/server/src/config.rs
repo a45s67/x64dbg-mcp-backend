@@ -39,6 +39,8 @@ pub struct Config {
     pub max_header_count: usize,
     pub max_header_bytes: usize,
     pub max_requests_per_second: usize,
+    pub log_directory: Option<PathBuf>,
+    pub log_backup_count: usize,
     request_timeout: Duration,
     mutation_timeout: Duration,
     shutdown_timeout: Duration,
@@ -81,6 +83,8 @@ struct FileConfig {
     max_header_bytes: Option<usize>,
     max_requests_per_second: Option<usize>,
     allowed_origins: Option<Vec<String>>,
+    log_directory: Option<PathBuf>,
+    log_backup_count: Option<usize>,
 }
 
 impl Config {
@@ -210,6 +214,14 @@ impl Config {
         )?;
 
         Ok(Self {
+            log_directory: env::var_os("X64DBG_MCP_LOG_DIRECTORY")
+                .map(PathBuf::from)
+                .or(file.log_directory),
+            log_backup_count: parse_limit(
+                "X64DBG_MCP_LOG_BACKUP_COUNT",
+                file.log_backup_count.unwrap_or(5),
+                100,
+            )?,
             bind,
             port,
             bearer_token,
@@ -260,6 +272,8 @@ impl Config {
     #[must_use]
     pub fn for_test(token: &str) -> Self {
         Self {
+            log_directory: None,
+            log_backup_count: 5,
             bind: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port: 3000,
             bearer_token: token.as_bytes().to_vec(),

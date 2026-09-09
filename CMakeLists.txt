@@ -51,6 +51,8 @@ if(BUILD_TESTING)
     plugin/src/breakpoint_policy.cpp
     plugin/src/command_fence.cpp
     plugin/src/debugger_executor.cpp
+    plugin/src/dump_memory.cpp
+    plugin/src/event_stream.cpp
     plugin/src/memory_filters.cpp
     plugin/src/launch_arguments.cpp
     plugin/src/patch_policy.cpp
@@ -77,6 +79,18 @@ if(BUILD_TESTING)
   target_compile_definitions(x64dbg_mcp_executor_test PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_compile_options(x64dbg_mcp_executor_test PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
+
+  add_executable(x64dbg_mcp_dump_memory_test
+    plugin/tests/dump_memory_test.cpp
+    plugin/src/dump_memory.cpp
+  )
+  target_compile_features(x64dbg_mcp_dump_memory_test PRIVATE cxx_std_20)
+  target_include_directories(x64dbg_mcp_dump_memory_test PRIVATE plugin/src)
+  target_compile_definitions(x64dbg_mcp_dump_memory_test PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(x64dbg_mcp_dump_memory_test PRIVATE
+    /W4 /WX /permissive- /EHsc /utf-8)
+  target_link_libraries(x64dbg_mcp_dump_memory_test PRIVATE bcrypt)
 
   add_executable(x64dbg_mcp_command_fence_test
     plugin/tests/command_fence_test.cpp
@@ -210,6 +224,7 @@ if(BUILD_TESTING)
   # configuration rather than producing successful no-op executables.
   foreach(MCP_ASSERT_TEST
       x64dbg_mcp_executor_test
+      x64dbg_mcp_dump_memory_test
       x64dbg_mcp_command_fence_test
       x64dbg_mcp_utf8_test
       x64dbg_mcp_memory_filters_test
@@ -229,6 +244,8 @@ add_library(x64dbg_mcp_plugin SHARED
   plugin/src/breakpoint_policy.cpp
   plugin/src/command_fence.cpp
   plugin/src/debugger_executor.cpp
+  plugin/src/dump_memory.cpp
+  plugin/src/event_stream.cpp
   plugin/src/memory_filters.cpp
   plugin/src/memory_search.cpp
   plugin/src/launch_arguments.cpp
@@ -286,6 +303,7 @@ if(BUILD_TESTING)
     set(MCP_TEST_PORT 43832)
   endif()
   add_test(NAME executor-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_executor_test)
+  add_test(NAME dump-memory-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_dump_memory_test)
   add_test(NAME command-fence-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_command_fence_test)
   add_test(NAME utf8-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_utf8_test)
   add_test(NAME memory-filters-${MCP_TEST_ARCH} COMMAND x64dbg_mcp_memory_filters_test)
@@ -320,7 +338,8 @@ if(BUILD_TESTING)
     COMMAND x64dbg_mcp_lifecycle_test
       "${MCP_TEST_SERVER}"
       "${MCP_ACTIVE_TRACE_TEST_PORT}" active-trace-shutdown)
-  set_tests_properties(executor-${MCP_TEST_ARCH} command-fence-${MCP_TEST_ARCH}
+  set_tests_properties(executor-${MCP_TEST_ARCH} dump-memory-${MCP_TEST_ARCH}
+    command-fence-${MCP_TEST_ARCH}
     utf8-${MCP_TEST_ARCH}
     memory-filters-${MCP_TEST_ARCH} memory-search-${MCP_TEST_ARCH}
     register-policy-${MCP_TEST_ARCH}

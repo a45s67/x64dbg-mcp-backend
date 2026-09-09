@@ -33,6 +33,7 @@ pub struct AppState {
     adapter: Arc<dyn DebuggerAdapter>,
     rate_window: Arc<Mutex<RateWindow>>,
     instance_id: Uuid,
+    audit_log: Option<Arc<crate::audit_log::AuditLog>>,
 }
 
 struct RateWindow {
@@ -65,7 +66,14 @@ impl AppState {
                 requests: 0,
             })),
             instance_id,
+            audit_log: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_audit_log(mut self, log: Arc<crate::audit_log::AuditLog>) -> Self {
+        self.audit_log = Some(log);
+        self
     }
 }
 
@@ -244,9 +252,19 @@ async fn mcp_post(
             "request body exceeds configured limit",
         )
     })?;
-    let mut response = mcp::handle(&body, state.adapter.as_ref(), state.instance_id).await;
+    let mut response = if let Some(log) = &state.audit_log {
+        mcp::handle_with_log(&body, state.adapter.as_ref(), state.instance_id, log).await
+    } else {
+        mcp::handle(&body, state.adapter.as_ref(), state.instance_id).await
+    };
     set_json_utf8(&mut response);
-    bound_response(response, state.config.max_output_bytes).await
+    let result = bound_response(response, state.config.max_output_bytes).await;
+    if result.is_err()
+        && let Some(log) = &state.audit_log
+    {
+        log.record("http_output_rejected", json!({"reason":"OUTPUT_LIMIT_EXCEEDED","rpc_id":serde_json::from_slice::<serde_json::Value>(&body).ok().and_then(|v| v.get("id").cloned())}));
+    }
+    result
 }
 
 fn set_json_utf8(response: &mut Response) {
@@ -727,7 +745,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
         let value: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 64);
+        assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 67);
     }
 
     #[tokio::test]
@@ -760,7 +778,7 @@ mod tests {
         let value =
             mcp_request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#).await;
         let tools = value["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 64);
+        assert_eq!(tools.len(), 67);
         assert!(tools.iter().all(|tool| tool.get("outputSchema").is_none()));
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.state"));
         assert!(tools.iter().any(|tool| tool["name"] == "debugger.snapshot"));
@@ -771,6 +789,9 @@ mod tests {
         assert!(tools.iter().any(|tool| tool["name"] == "exports.list"));
         assert!(tools.iter().any(|tool| tool["name"] == "events.list"));
         assert!(tools.iter().any(|tool| tool["name"] == "events.wait"));
+        assert!(tools.iter().any(|tool| tool["name"] == "memory.dump"));
+        assert!(tools.iter().any(|tool| tool["name"] == "logs.status"));
+        assert!(tools.iter().any(|tool| tool["name"] == "logs.read"));
         assert!(
             tools
                 .iter()

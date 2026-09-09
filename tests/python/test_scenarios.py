@@ -26,8 +26,8 @@ ABSENT = {
                      {"code": "CALL_DEBUGGEE_ATTACH", "tool": "debuggee.attach"}],
 }
 EMPTY_EVENTS = {
-    "items": [], "oldest_sequence": 0, "latest_sequence": 0,
-    "overflowed": False, "has_more": False, "next_after_sequence": None,
+    "session_id": f"{INSTANCE_ID}:0", "items": [], "next_cursor": None,
+    "latest_sequence": 0, "history_complete": True, "storage_error": None,
 }
 
 
@@ -397,8 +397,11 @@ def test_generic_flow_checks_generation_and_preserves_launch_arguments(args, pat
     ]
     if pattern:
         responses += [("memory.search", {"items": [{}], "state_generation": 5})]
-    responses += [("events.list", {"items": [{"type": "process_created"}]}),
-                  ("debugger.stop", {"debuggee_state": "absent"})]
+    responses += [("events.list", {"session_id": f"{INSTANCE_ID}:1",
+                                    "items": [{"type": "process_created"}],
+                                    "next_cursor": None, "latest_sequence": 1,
+                                    "history_complete": True, "storage_error": None}),
+                   ("debugger.stop", {"debuggee_state": "absent"})]
     client = FakeClient(responses)
     if search_generation != 5:
         with pytest.raises(AssertionError, match="PE signature search"):

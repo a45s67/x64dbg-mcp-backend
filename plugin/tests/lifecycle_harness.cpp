@@ -493,58 +493,56 @@ bool ExerciseSessionOriginCallbacks(mcp::Runtime& runtime) {
     return runtime.SessionOriginForTesting() == mcp::SessionOrigin::none;
 }
 
-bool ExerciseEventRingBoundary(mcp::Runtime& runtime, const unsigned short port) {
+bool ExerciseEventHistory(mcp::Runtime& runtime, const unsigned short port) {
     mcp::Runtime emptyRuntime;
     if (!emptyRuntime.EventsForTesting().empty()) return false;
-    const std::vector<mcp::EventRecord> before = runtime.EventsForTesting();
-    const std::uint64_t previousLatest = before.empty() ? 0U : before.back().sequence;
+    const auto preceding = runtime.EventsForTesting();
+    runtime.OnDebuggerEvent(CB_INITDEBUG, nullptr);
+    // A failed launch attempt must not invalidate the retained session.
+    if (runtime.EventsForTesting().size() != preceding.size()) return false;
+    runtime.OnDebuggerEvent(CB_CREATEPROCESS, nullptr);
+    const auto established = runtime.EventsForTesting();
+    if (established.size() != 2U || established[0].kind != mcp::EventKind::debugInitialized ||
+        established[1].kind != mcp::EventKind::processCreated ||
+        established[0].sessionId != established[1].sessionId) return false;
+    const std::string session(established[0].sessionId.data());
+    const std::uint64_t previousLatest = established.back().sequence;
     for (std::uint64_t sequence = 1U; sequence <= 300U; ++sequence) {
         runtime.OnDebuggerEvent(CB_RESUMEDEBUG, nullptr);
     }
     const std::vector<mcp::EventRecord> events = runtime.EventsForTesting();
-    if (events.size() != 256U || events.front().sequence != previousLatest + 45U ||
+    if (events.size() != 302U || events.front().kind != mcp::EventKind::debugInitialized ||
         events.back().sequence != previousLatest + 300U) {
         return false;
     }
-    for (std::size_t index = 0U; index < events.size(); ++index) {
+    for (std::size_t index = 2U; index < events.size(); ++index) {
         if (events[index].kind != mcp::EventKind::resumed ||
-            events[index].sequence != previousLatest + static_cast<std::uint64_t>(index) + 45U ||
+            events[index].sequence != previousLatest + static_cast<std::uint64_t>(index) - 1U ||
             (index > 0U && events[index - 1U].generation >= events[index].generation)) {
             return false;
         }
     }
     constexpr std::string_view body =
-        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"events.list\",\"arguments\":{\"after_sequence\":0,\"types\":[\"resumed\"],\"limit\":1}}}";
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"events.list\",\"arguments\":{\"types\":[\"resumed\"],\"limit\":256}}}";
     const Json result = DecodeToolResult(PostMcp(port, body), 3U);
     const json_t* items = json_object_get(result.get(), "items");
-    const json_t* first = json_array_get(items, 0U);
-    const bool valid = json_is_true(json_object_get(result.get(), "overflowed")) &&
-                       json_is_true(json_object_get(result.get(), "has_more")) &&
-                       json_is_array(items) && json_array_size(items) == 1U &&
-                       JsonStringEquals(json_object_get(first, "type"), "resumed") &&
-                       JsonIntegerEquals(json_object_get(first, "sequence"), events.front().sequence) &&
-                       JsonIntegerEquals(json_object_get(result.get(), "oldest_sequence"),
-                                         events.front().sequence) &&
-                       JsonIntegerEquals(json_object_get(result.get(), "latest_sequence"),
-                                         events.back().sequence) &&
-                       JsonIntegerEquals(json_object_get(result.get(), "next_after_sequence"),
-                                         events.front().sequence);
-    const std::string waitBody =
+    const json_t* cursor = json_object_get(result.get(), "next_cursor");
+    if (!json_is_array(items) || json_array_size(items) != 256U || !json_is_string(cursor) ||
+        !json_is_true(json_object_get(result.get(), "history_complete")) ||
+        !JsonStringEquals(json_object_get(result.get(), "session_id"), session)) return false;
+    const std::string secondBody =
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{"
-        "\"name\":\"events.wait\",\"arguments\":{\"after_sequence\":" +
-        std::to_string(previousLatest + 299U) +
-        ",\"types\":[\"resumed\"],\"timeout_ms\":100}}}";
-    const Json waitResult = DecodeToolResult(PostMcp(port, waitBody), 4U);
-    const json_t* waitedEvent = json_object_get(waitResult.get(), "event");
-    const bool waitValid = json_is_false(json_object_get(waitResult.get(), "overflowed")) &&
-                           JsonStringEquals(json_object_get(waitedEvent, "type"), "resumed") &&
-                           JsonIntegerEquals(json_object_get(waitedEvent, "sequence"),
-                                             events.back().sequence);
-    const std::string futureWaitBody =
+        "\"name\":\"events.list\",\"arguments\":{\"cursor\":\"" +
+        std::string(json_string_value(cursor), json_string_length(cursor)) +
+        "\",\"types\":[\"resumed\"],\"limit\":256}}}";
+    const Json second = DecodeToolResult(PostMcp(port, secondBody), 4U);
+    const json_t* secondItems = json_object_get(second.get(), "items");
+    if (!json_is_array(secondItems) || json_array_size(secondItems) != 44U ||
+        !json_is_null(json_object_get(second.get(), "next_cursor"))) return false;
+
+    constexpr std::string_view futureWaitBody =
         "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{"
-        "\"name\":\"events.wait\",\"arguments\":{\"after_sequence\":" +
-        std::to_string(events.back().sequence) +
-        ",\"types\":[\"paused\"],\"timeout_ms\":1000}}}";
+        "\"name\":\"events.wait\",\"arguments\":{}}}";
     std::string futureWaitResponse;
     std::thread futureWait([port, &futureWaitBody, &futureWaitResponse] {
         futureWaitResponse = PostMcp(port, futureWaitBody);
@@ -554,12 +552,16 @@ bool ExerciseEventRingBoundary(mcp::Runtime& runtime, const unsigned short port)
     futureWait.join();
     const Json futureWaitResult = DecodeToolResult(futureWaitResponse, 5U);
     const json_t* futureEvent = json_object_get(futureWaitResult.get(), "event");
-    const bool futureWaitValid =
-        json_is_false(json_object_get(futureWaitResult.get(), "overflowed")) &&
-        JsonStringEquals(json_object_get(futureEvent, "type"), "paused") &&
+    const bool futureWaitValid = JsonStringEquals(json_object_get(futureEvent, "type"), "paused") &&
         JsonIntegerEquals(json_object_get(futureEvent, "sequence"), events.back().sequence + 1U);
     runtime.OnDebuggerEvent(CB_STOPDEBUG, nullptr);
-    return valid && waitValid && futureWaitValid;
+    const auto stopped = runtime.EventsForTesting();
+    if (!futureWaitValid || stopped.empty() || stopped.back().kind != mcp::EventKind::debugStopped) return false;
+    runtime.OnDebuggerEvent(CB_INITDEBUG, nullptr);
+    if (runtime.EventsForTesting().size() != stopped.size()) return false;
+    runtime.OnDebuggerEvent(CB_CREATEPROCESS, nullptr);
+    const auto reset = runtime.EventsForTesting();
+    return reset.size() == 2U && std::string(reset.front().sessionId.data()) != session;
 }
 } // namespace
 
@@ -664,9 +666,9 @@ int wmain(const int argc, wchar_t** argv) {
         std::cerr << "owned create-thread pause contract failed\n";
         return 16;
     }
-    if (!ExerciseEventRingBoundary(runtime, static_cast<unsigned short>(parsedPort))) {
+    if (!ExerciseEventHistory(runtime, static_cast<unsigned short>(parsedPort))) {
         runtime.Stop();
-        std::cerr << "bounded debugger-event ring contract failed\n";
+        std::cerr << "debugger-event history contract failed\n";
         return 12;
     }
     if (argc == 4 && std::wstring_view(argv[3]) == L"active-wait-shutdown") {

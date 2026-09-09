@@ -66,6 +66,31 @@ exposing detailed diagnostics.
 and removes the public MCP `instance_id` before encoding IPC. Its operation
 ledger has the same lifetime as the sidecar process.
 
+`memory.dump` is a mutation. Its IPC payload contains the operation ID copied
+from the request envelope plus the exact dump arguments:
+
+```json
+{
+  "address": {"module":"sample.exe","rva":"0x1000"},
+  "length": 65536,
+  "path": "C:\\dumps\\sample-memory.bin",
+  "overwrite": false,
+  "operation_id": "7b9207c9-4e50-48d7-8fac-09cf37ccf864"
+}
+```
+
+The native boundary requires 1 through 67,108,864 bytes and a drive-absolute
+regular-file destination. `overwrite` is optional and defaults to false. The
+plugin reads raw memory and publishes through a same-directory temporary file,
+returning `path`, `bytes_written`, lowercase `sha256`, `complete`, `location`,
+and `state_generation`. It must remove the temporary file on every failure and
+must not expose or replace the destination before the complete contents and
+SHA-256 are finalized.
+
+`memory.read` presentation fields (`format` and `byte_order`) are sidecar-only;
+the sidecar strips them before IPC and adds the requested lossless `view` to a
+successful native result. The native response's `data_hex` remains unchanged.
+
 Address fields accept an absolute hexadecimal string, an explicit absolute
 object, or a module-relative object:
 
@@ -80,6 +105,42 @@ object, or a module-relative object:
 The plugin resolves addresses only inside its serialized debugger executor.
 Per-tool payload schemas and limits are defined by
 `crates/server/src/tools.rs` and enforced again at the native boundary.
+
+### Event payloads
+
+`events.list` carries zero or more of `cursor`, `types`, and `limit`. The cursor
+is an opaque string bound to the native event session and exact type filter; it
+is not a sequence number. Its result is:
+
+```json
+{
+  "session_id": "11111111-2222-4333-8444-555555555555:1",
+  "items": [],
+  "next_cursor": null,
+  "latest_sequence": 0,
+  "history_complete": true,
+  "storage_error": null
+}
+```
+
+`events.wait` carries optional `types` and `timeout_ms` only. Missing types mean
+any supported event and missing timeout means 5,000 ms. The plugin snapshots
+the current ring end while arming and may return only a matching event appended
+after that point. It never searches retained history. A successful result has
+`session_id`, `latest_sequence`, and `event`; timeout is `TIMEOUT`, and a change
+of event session is `CANCELLED`. Event delivery says nothing about whether the
+debuggee is currently paused.
+
+An implementation may provision a secondary current-user-only named pipe by
+appending `.events` to the primary pipe name. This extension is optional and
+must not be assumed unless the native agent creates it. It uses the same
+32-bit-little-endian length plus UTF-8 JSON framing and the same 1,048,576-byte
+frame bound. The sidecar must authenticate it with the launch nonce before
+accepting event frames; authentication failure closes only that connection.
+Event objects use the same `session_id`, monotonically increasing `sequence`,
+`timestamp_unix_ms`, `type`, and `state_generation` fields returned by the event
+tools. The request/response pipe remains authoritative and available when this
+optional channel is absent or disconnects.
 
 ## Response
 

@@ -1,6 +1,8 @@
 """Real-backend HTTP qualification; Windows process ownership stays in PowerShell."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -119,9 +121,9 @@ def run(client, args):
           and before_launch["next_actions"][1]["tool"] == "debuggee.attach",
           "Isolated debugger did not advertise absent-debuggee launch and attach actions.")
     initial_events = tool("events.list", {"limit": 1}, 212)
-    check(initial_events["items"] == [] and initial_events["oldest_sequence"] == 0
-          and initial_events["latest_sequence"] == 0 and not initial_events["overflowed"]
-          and not initial_events["has_more"] and initial_events.get("next_after_sequence") is None,
+    check(initial_events["items"] == [] and initial_events["latest_sequence"] == 0
+          and initial_events["history_complete"] and initial_events["storage_error"] is None
+          and initial_events["next_cursor"] is None and initial_events["session_id"],
           "A fresh backend instance did not expose an empty event history.")
     rejected("debuggee.launch", operation(path=".\\relative-fixture.exe"), "INVALID_ARGUMENT", 3)
     launch_argument_values = ["", "plain", "with space", 'quote"inside', "trail\\",
@@ -139,26 +141,22 @@ def run(client, args):
           "Paused debugger.state retained a stale bootstrap diagnostic.")
     startup_event_types = ["process_created", "system_breakpoint", "dll_loaded"]
     startup_event_page_one = tool("events.list", {"types": startup_event_types, "limit": 1}, 213)
-    check(len(startup_event_page_one["items"]) == 1 and startup_event_page_one["has_more"]
-          and not startup_event_page_one["overflowed"] and startup_event_page_one["next_after_sequence"]
+    check(len(startup_event_page_one["items"]) == 1 and startup_event_page_one["next_cursor"]
+          and startup_event_page_one["history_complete"] and startup_event_page_one["storage_error"] is None
           and startup_event_page_one["items"][0]["type"] in startup_event_types
-          and startup_event_page_one["items"][0]["state_generation"],
+          and startup_event_page_one["items"][0]["state_generation"]
+          and startup_event_page_one["items"][0]["session_id"] == startup_event_page_one["session_id"],
           "Filtered debugger-event history did not return a bounded first page.")
     startup_event_page_two = tool("events.list", {
-        "after_sequence": startup_event_page_one["next_after_sequence"],
+        "cursor": startup_event_page_one["next_cursor"],
         "types": startup_event_types, "limit": 256,
     }, 214)
     check(len(startup_event_page_two["items"]) >= 1
           and startup_event_page_two["items"][0]["sequence"] > startup_event_page_one["items"][0]["sequence"]
-          and startup_event_page_two["next_after_sequence"] > startup_event_page_one["next_after_sequence"],
+          and startup_event_page_two["session_id"] == startup_event_page_one["session_id"]
+          and startup_event_page_two["next_cursor"] is None,
           "Debugger-event continuation did not preserve sequence order and filter semantics.")
-    startup_event_wait = tool("events.wait", {
-        "after_sequence": 0, "types": startup_event_types, "timeout_ms": 100,
-    }, 215)
-    check(startup_event_wait["event"] and startup_event_wait["event"]["type"] in startup_event_types
-          and startup_event_wait["event"]["sequence"] == startup_event_page_one["items"][0]["sequence"]
-          and not startup_event_wait["overflowed"],
-          "Typed debugger-event wait did not return the first matching retained event.")
+    rejected("events.wait", {"types": startup_event_types, "timeout_ms": 100}, "TIMEOUT", 215)
 
     registers = tool("registers.read", {}, 3)
     callstack = tool("callstack.read", {"limit": 50}, 201)
@@ -273,6 +271,40 @@ def run(client, args):
     check(after_width_error["plugin_state"] == "ready" and after_width_error["debuggee_state"] == "paused",
           "A pointer-width validation error damaged the plugin connection.")
     module_memory = tool("memory.read", {"address": module_entry_ref, "length": 16}, 42)
+    memory_views = {
+        format_name: tool("memory.read", {
+            "address": module_entry_ref, "length": 16, "format": format_name,
+            **({"byte_order": "big"} if format_name in ("word", "dword", "qword") else {}),
+        }, 430 + index)
+        for index, format_name in enumerate(("bytes", "word", "dword", "qword", "str", "wstr"))
+    }
+    check(all(item["data_hex"] == module_memory["data_hex"]
+              and item["view"]["format"] == format_name
+              for format_name, item in memory_views.items())
+          and memory_views["bytes"]["view"]["text"].replace(" ", "").lower() == module_memory["data_hex"]
+          and all(memory_views[name]["view"]["byte_order"] == "big"
+                  for name in ("word", "dword", "qword"))
+          and all(memory_views[name]["view"]["status"] in ("ok", "decode_error")
+                  for name in ("str", "wstr")),
+          "Formatted memory reads changed raw bytes or returned an invalid bounded view.")
+    dump_path = backend_root / f"mcp-memory-dump-{uuid.uuid4()}.bin"
+    failed_dump_path = backend_root / f"mcp-memory-dump-failed-{uuid.uuid4()}.bin"
+    dumped = tool("memory.dump", operation(address=module_entry_ref, length=16,
+                                            path=str(dump_path)), 436)
+    expected_dump = bytes.fromhex(module_memory["data_hex"])
+    check(dumped["complete"] and dumped["bytes_written"] == 16
+          and dumped["path"] == str(dump_path)
+          and dumped["sha256"] == hashlib.sha256(expected_dump).hexdigest()
+          and dump_path.read_bytes() == expected_dump,
+          "memory.dump did not atomically publish the exact raw bytes and SHA-256.")
+    rejected("memory.dump", operation(address=module_entry_ref, length=16,
+             path=str(dump_path)), "ACCESS_DENIED", 437)
+    check(dump_path.read_bytes() == expected_dump,
+          "The default overwrite:false changed an existing dump destination.")
+    rejected("memory.dump", operation(address="0x1", length=16,
+             path=str(failed_dump_path)), "ACCESS_DENIED", 438)
+    check(not failed_dump_path.exists(), "A failed memory dump exposed a partial destination file.")
+    dump_path.unlink()
     entry_pattern = module_memory["data_hex"][:8]
     entry_search_arguments = {"scope": {"start": module_entry_ref, "length": 16},
                               "pattern_hex": entry_pattern, "mask": "xxxx", "limit": 1}
@@ -497,7 +529,16 @@ def run(client, args):
                  "INVALID_DEBUGGER_STATE", 76)
         early_hardware_rejected = True
     # Native hardware slots need the actionable debug thread, past startup.
-    hardware_ready_resume, hardware_ready_pause = resume_wait(78, 79)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future_event = executor.submit(
+            client.tool, "events.wait", {"types": ["resumed"], "timeout_ms": 5000}, 439,
+        )
+        time.sleep(0.25)
+        hardware_ready_resume, hardware_ready_pause = resume_wait(78, 79)
+        resumed_event = future_event.result(timeout=6)
+    check(resumed_event["event"]["type"] == "resumed"
+          and resumed_event["event"]["session_id"] == resumed_event["session_id"],
+          "Future-only events.wait did not observe the deterministic resumed event after arming.")
     check(hardware_ready_pause["debuggee_state"] == "paused"
           and hardware_ready_pause["state_generation"] > hardware_ready_resume["state_generation"],
           "Fixture did not reach an actionable pause before hardware breakpoint setup.")
@@ -970,6 +1011,8 @@ def run(client, args):
         "text_section": text_section["start"]["address"],
         "analysis_target_in_text": True,
         "event_history_initially_empty": True,
+        "historical_event_wait_timed_out": True,
+        "future_event_wait_type": resumed_event["event"]["type"],
         "startup_event_first_type": startup_event_page_one["items"][0]["type"],
         "startup_event_continuation_count": len(startup_event_page_two["items"]),
         "debug_stopped_event_sequence": debug_stopped_event["sequence"],
@@ -994,6 +1037,10 @@ def run(client, args):
         "pointer_width_rejected": True,
         "connection_survived_width_error": True,
         "module_memory_bytes": module_memory["bytes_read"],
+        "memory_read_formats": list(memory_views),
+        "memory_dump_sha256": dumped["sha256"],
+        "memory_dump_atomic_no_partial": True,
+        "memory_dump_overwrite_default_preserved": True,
         "memory_search_entry_match": entry_search["items"][0]["location"]["address"],
         "memory_search_module_matches": len(module_pattern_search["items"]),
         "memory_search_wildcard_match": True,

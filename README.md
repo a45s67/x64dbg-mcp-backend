@@ -319,7 +319,7 @@ To qualify a fresh package with Flare without replacing an existing installation
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\run-flare-qualification.ps1 `
-  -PackageRoot "$PWD\dist\x64dbg-mcp-backend-0.0.0-beta" `
+  -PackageRoot "$PWD\dist\x64dbg-mcp-backend-0.3.0-beta" `
   -X64dbgRoot C:\tools\x64dbg `
   -SamplePath 'C:\samples\checksum.exe' `
   -OutputDirectory "$PWD\build\flare-qualification-new" -Iterations 3
@@ -333,7 +333,7 @@ Reports contain no credentials; do not publish the generated runtime/config dire
 The plugin/sidecar wire contract is
 [`docs/contracts/ipc-v1.md`](docs/contracts/ipc-v1.md). A pushed `v*` tag
 builds and publishes the minimal ZIP through GitHub Actions.
-The current CI qualification version is `v0.0.0-beta`; its GitHub release is
+The current CI qualification version is `v0.3.0-beta`; its GitHub release is
 marked as a prerelease and is not promoted to Latest.
 
 ## Uninstall

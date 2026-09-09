@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.0.0-beta',
+    [string]$Version = '0.3.0-beta',
     [string]$OutputDirectory,
     [string]$X64dbgRoot = 'C:\tools\x64dbg'
 )
